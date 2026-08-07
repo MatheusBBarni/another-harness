@@ -255,12 +255,13 @@ fn streamVercelAdapter(
         if (!bridge.saw_text) {
             if (result.completion.content) |content| try events.emit(.{ .text_delta = content });
         }
-        for (result.completion.tool_calls) |call| switch (call.provenance) {
+        tool_calls: for (result.completion.tool_calls) |call| switch (call.provenance) {
             .fx_local => try events.emit(.{ .fx_tool_call = call }),
             .provider_executed => {
                 var started = call;
                 started.provider_result = null;
                 events.emit(.{ .provider_tool_started = started }) catch |err| {
+                    if (err == error.DuplicateProviderToolStart and result.completion.provider_result_identity_failure != null) break :tool_calls;
                     if (err == error.DuplicateProviderToolStart) return error.MalformedAuthoritativeToolIdentity;
                     return err;
                 };
