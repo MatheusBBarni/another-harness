@@ -204,6 +204,7 @@ const LegacyGatewayCompatibilityBridge = struct {
             .authorization => .forbidden,
             .configuration => .bad_request,
             .invalid_content => .unprocessable_entity,
+            .request_too_large => .payload_too_large,
             .rate_limited => .too_many_requests,
             .provider_internal => .internal_server_error,
             .upstream_failure, .protocol => .bad_gateway,

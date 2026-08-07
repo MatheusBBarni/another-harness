@@ -306,6 +306,7 @@ fn streamVercelAdapter(
                 .too_many_requests => .rate_limited,
                 .bad_request => .configuration,
                 .unprocessable_entity => .invalid_content,
+                .payload_too_large => .request_too_large,
                 .internal_server_error => .provider_internal,
                 .bad_gateway => .upstream_failure,
                 .service_unavailable => .unavailable,

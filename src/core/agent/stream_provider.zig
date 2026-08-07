@@ -263,6 +263,7 @@ pub const StreamFailure = struct {
         authorization,
         configuration,
         invalid_content,
+        request_too_large,
         rate_limited,
         provider_internal,
         upstream_failure,
