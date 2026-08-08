@@ -910,6 +910,9 @@ pub fn Bindings(comptime App: type) type {
         fn agentPushHttpError(ctx: *anyopaque, status: std.http.Status, detail: []const u8, credential_source: ?types.CredentialSource) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
             const auth_failure = auth_runtime.FailureSnapshot.fromHttp(status, credential_source);
+            if (auth_failure != null) {
+                try app_worker_runtime.Runtime(App).pushEvent(app, .authentication_failed);
+            }
             const message = if (auth_failure) |failure|
                 try failure.renderText(std.heap.c_allocator)
             else
@@ -1786,6 +1789,23 @@ test "agent deps forward app callbacks through core types" {
     const formatted = try deps.format_tool_execution_error(deps.ctx, std.testing.allocator, "tool", error.Boom);
     defer std.testing.allocator.free(formatted);
     try std.testing.expectEqualStrings("tool:Boom", formatted);
+}
+
+test "unauthorized HTTP errors publish authentication failure before status text" {
+    var app = FakeApp.init(std.testing.allocator);
+    defer app.deinit();
+
+    const deps = Bindings(FakeApp).agentRuntimeDeps(&app);
+    try deps.push_http_error(
+        deps.ctx,
+        .unauthorized,
+        "invalid credential",
+        .ai_gateway_api_key,
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), app.worker.events.items.len);
+    try std.testing.expect(app.worker.events.items[0] == .authentication_failed);
+    try std.testing.expect(app.worker.events.items[1] == .api_status_text);
 }
 
 test "agent deps use request-time model capability resolution when available" {

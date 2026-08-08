@@ -17,6 +17,7 @@ const gateway_failure_diagnostics = @import("../core/gateway/gateway_failure_dia
 const gateway_json = @import("../core/gateway/gateway_json.zig");
 const io_mod = @import("../core/shared/io.zig");
 const gateway_generation_usage = @import("../gateway/generation_usage.zig");
+const connection_registry = @import("../core/gateway/connection_registry.zig");
 const gateway_provider = @import("../core/gateway/gateway_provider.zig");
 const model_capabilities = @import("../core/config/model_capabilities.zig");
 const model_catalog = @import("../core/gateway/model_catalog.zig");
@@ -50,6 +51,16 @@ const base_url_env = "FX_GATEWAY_BASE_URL";
 const e2e_gateway_models_url_env = "FX_E2E_GATEWAY_MODELS_URL";
 const oauth_request_timeout_ms: i64 = 15_000;
 const oauth_response_max_bytes: usize = 64 * 1024;
+
+pub const connection_seed = connection_registry.Seed{
+    .id = "vercel",
+    .display_name = "Vercel AI Gateway",
+    .adapter_id = "vercel_ai_gateway",
+    .endpoint = default_chat_url,
+    .protocol = "vercel_ai_gateway",
+    .credential_ref = "automatic",
+    .permission_review_model = "openai/gpt-5.4",
+};
 
 const web_search_system_prompt = "Research the user's query with the web_search tool and preserve sources for citation.";
 const perplexity_search_backend_id = web_search_contract.SearchBackendId{ .value = "ai_gateway_perplexity_search" };
@@ -136,6 +147,7 @@ pub const provider_adapter = agent_stream_provider_contract.ProviderAdapter{
 };
 
 pub const provider = gateway_provider.Provider{
+    .connection_seed = connection_seed,
     .agent_stream = agent_stream_provider,
     .provider_adapter = provider_adapter,
     .oauth_transport = oauth_transport_provider,

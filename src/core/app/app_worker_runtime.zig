@@ -214,6 +214,7 @@ pub fn Runtime(comptime App: type) type {
                 .notification,
                 .question_requested,
                 .clear_route_recovery_status,
+                .authentication_failed,
                 .api_status_text,
                 .finish_prompt,
                 .session_grant,
@@ -814,6 +815,11 @@ pub fn Runtime(comptime App: type) type {
                     .clear_route_recovery_status => {
                         if (app.shell.worker_status_state().clear_route_recovery()) {
                             app.shell.render_requests.request(.footer);
+                        }
+                    },
+                    .authentication_failed => {
+                        if (comptime @hasField(App, "auth")) {
+                            app.auth.recordSelectedAuthenticationFailure(app.alloc);
                         }
                     },
                     .api_status_text => |text| {

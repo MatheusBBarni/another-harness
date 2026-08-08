@@ -460,6 +460,7 @@ pub const WorkerEvent = union(enum) {
     semantic_notice: types.SemanticNotice,
     route_recovery_status: types.RouteRecoveryStatus,
     clear_route_recovery_status,
+    authentication_failed,
     api_status_text: []u8,
     command_output: CommandOutputChunk,
     command_output_complete: ?types.ToolLifecycleId,
@@ -2516,6 +2517,7 @@ pub fn dupeWorkerEvent(alloc: std.mem.Allocator, event: WorkerEvent) !WorkerEven
         .semantic_notice => |notice| .{ .semantic_notice = try types.dupeSemanticNotice(alloc, notice) },
         .route_recovery_status => |status| .{ .route_recovery_status = status },
         .clear_route_recovery_status => .clear_route_recovery_status,
+        .authentication_failed => .authentication_failed,
         .api_status_text => |text| .{ .api_status_text = try alloc.dupe(u8, text) },
         .command_output => |chunk| .{ .command_output = .{
             .lifecycle_id = if (chunk.lifecycle_id) |id| .{

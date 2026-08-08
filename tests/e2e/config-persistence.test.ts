@@ -2449,3 +2449,129 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
     45_000,
   );
 });
+
+describe("connection registry persistence", () => {
+  serialTest(
+    "legacy 1024-byte model setting starts through the default connection",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "fx-legacy-model-boundary-"));
+      try {
+        const home = join(root, "home");
+        const workspace = join(root, "workspace");
+        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
+        mkdirSync(workspace);
+        writeFileSync(
+          join(home, ".fx", "settings.json"),
+          JSON.stringify({ model: "m".repeat(1024) }) + "\n",
+          { mode: 0o600 },
+        );
+
+        const result = await runFx(["permissions", "--json"], {
+          cwd: workspace,
+          env: { ...NO_AUTH, HOME: home },
+          timeoutMs: TIMEOUT,
+        });
+        expect(result.code).toBe(0);
+        expect(result.stderr).toBe("");
+        expect(JSON.parse(result.stdout).kind).toBe("permissions");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  serialTest(
+    "persisted Vercel connection survives a fresh-process restart on loopback",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "fx-connection-registry-"));
+      const gateway = startFakeGateway([
+        fakeGatewayFinalText("CONNECTION_RESTART_COMPLETE"),
+      ], {
+        models: [{ id: FAKE_GATEWAY_MODEL, type: "language", tags: ["tool-use"] }],
+      });
+      try {
+        const home = join(root, "home");
+        const workspace = join(root, "workspace");
+        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
+        mkdirSync(workspace);
+        const settingsPath = join(home, ".fx", "settings.json");
+        writeFileSync(
+          settingsPath,
+          JSON.stringify({
+            connections: {
+              selected: "vercel",
+              profiles: [{
+                id: "vercel",
+                display_name: "Vercel AI Gateway",
+                adapter_id: "vercel_ai_gateway",
+                endpoint: gateway.chatUrl,
+                protocol: "vercel_ai_gateway",
+                credential_ref: "ai_gateway_api_key",
+                remembered_model: FAKE_GATEWAY_MODEL,
+                permission_review_model: "openai/gpt-5.4",
+              }],
+            },
+          }) + "\n",
+          { mode: 0o600 },
+        );
+        const env = {
+          ...NO_AUTH,
+          AI_GATEWAY_API_KEY: "isolated-gateway-key",
+          HOME: home,
+          FX_GATEWAY_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/v1/models`,
+        };
+
+        const catalog = await runFx(["models", "--json"], {
+          cwd: workspace,
+          env,
+          timeoutMs: TIMEOUT,
+        });
+        expect(catalog.code).toBe(0);
+        expect(catalog.stderr).toBe("");
+        expect(JSON.parse(catalog.stdout)).toMatchObject({
+          kind: "models",
+          ids: [FAKE_GATEWAY_MODEL],
+        });
+
+        const restarted = await runFx(
+          ["ask", "--auto", "--json", "--no-save", "Prove the connection restart."],
+          { cwd: workspace, env, timeoutMs: TIMEOUT },
+        );
+        expect(restarted.code).toBe(0);
+        expect(restarted.stderr).toBe("");
+        expect(JSON.parse(restarted.stdout).output).toContain(
+          "CONNECTION_RESTART_COMPLETE",
+        );
+        expect(gateway.requests).toHaveLength(1);
+        expect(gateway.requests[0]!.headers.get("authorization")).toBe(
+          "Bearer isolated-gateway-key",
+        );
+        expect(gateway.requests[0]!.headers.get("ai-language-model-id")).toBe(
+          FAKE_GATEWAY_MODEL,
+        );
+        expect(gateway.modelRequests.length).toBeGreaterThan(0);
+        expect(gateway.modelRequests[0]!.headers.get("authorization")).toBe(
+          "Bearer isolated-gateway-key",
+        );
+
+        const stored = JSON.parse(readFileSync(settingsPath, "utf8"));
+        const profile = stored.connections.profiles[0];
+        expect(stored.connections.selected).toBe("vercel");
+        expect(profile.remembered_model).toBe(FAKE_GATEWAY_MODEL);
+        expect(profile).not.toHaveProperty("api_key");
+        expect(profile).not.toHaveProperty("token");
+        expect(profile).not.toHaveProperty("secret");
+        expect(readFileSync(settingsPath, "utf8")).not.toContain(
+          "isolated-gateway-key",
+        );
+      } finally {
+        gateway.stop();
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    45_000,
+  );
+});

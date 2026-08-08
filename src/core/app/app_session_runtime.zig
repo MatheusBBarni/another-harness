@@ -2580,20 +2580,33 @@ pub fn Runtime(comptime App: type) type {
                 result.session_error = err;
             };
 
-            var settings_attempt = config_runtime.attemptUserPreferences(
-                app.alloc,
-                patch.userSettingsPatch(),
-            );
-            switch (settings_attempt) {
-                .outcome => |outcome| {
-                    result.settings_outcome = outcome;
-                    settings_attempt = undefined;
-                },
-                .failure => |failure| {
-                    result.settings_error = failure.err;
-                    result.settings_failure_cleanup = failure.cleanup;
-                    settings_attempt = undefined;
-                },
+            if (patch.model) |model| {
+                if (comptime @hasField(App, "auth") and
+                    @hasDecl(@TypeOf(app.auth), "rememberSelectedConnectionModel"))
+                {
+                    app.auth.rememberSelectedConnectionModel(model) catch |err| {
+                        result.settings_error = err;
+                    };
+                }
+            }
+            if (result.settings_error == null) {
+                // Compatibility projection until session and status readers move
+                // to connection identity in G4.
+                var settings_attempt = config_runtime.attemptUserPreferences(
+                    app.alloc,
+                    patch.userSettingsPatch(),
+                );
+                switch (settings_attempt) {
+                    .outcome => |outcome| {
+                        result.settings_outcome = outcome;
+                        settings_attempt = undefined;
+                    },
+                    .failure => |failure| {
+                        result.settings_error = failure.err;
+                        result.settings_failure_cleanup = failure.cleanup;
+                        settings_attempt = undefined;
+                    },
+                }
             }
             if (result.settings_error == null) {
                 applyPreferencePatch(

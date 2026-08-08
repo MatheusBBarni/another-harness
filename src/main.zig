@@ -609,6 +609,8 @@ const App = struct {
                 .load_mcp_runtime = if (comptime host_target.is_wasm) loadNoMcpRuntime else builtin_mcp.loadRuntime,
                 .skill_root_policy = if (comptime host_target.is_wasm) wasm_skill_root_policy else builtin_skills.root_policy,
                 .terminal_title = ui_render.terminal_title,
+                .connection_seed = builtin_gateway.connection_seed,
+                .model_descriptors = builtin_gateway.model_descriptor_provider,
             },
         );
         errdefer app.deinit();
