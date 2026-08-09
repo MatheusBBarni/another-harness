@@ -6,6 +6,7 @@ const permission_auto_classifier = @import("../permissions/auto_classifier.zig")
 const auth_runtime = @import("../auth/auth_runtime.zig");
 const credentials = @import("../auth/credentials.zig");
 const model_capabilities = @import("../config/model_capabilities.zig");
+const route_snapshot = @import("../gateway/route_snapshot.zig");
 const input_completion_runtime = @import("input_completion_runtime.zig");
 const core_input_runtime = @import("../input/runtime.zig");
 const app_worker_runtime = @import("app_worker_runtime.zig");
@@ -337,6 +338,9 @@ pub fn Bindings(comptime App: type) type {
                     .removed = ui_render.diff_removed_marker_style,
                 },
             };
+            if (comptime @hasDecl(App, "resolveRouteCredential")) {
+                deps.resolve_route_credential = resolveRouteCredential;
+            }
             if (comptime @hasField(@TypeOf(app.session), "usage")) {
                 deps.usage = &app.session.usage;
                 if (comptime @hasField(App, "session_persistence") and
@@ -358,6 +362,15 @@ pub fn Bindings(comptime App: type) type {
                 deps.request_sandbox_widening = agentRequestSandboxWidening;
             }
             return deps;
+        }
+
+        fn resolveRouteCredential(
+            raw_ctx: *anyopaque,
+            alloc: std.mem.Allocator,
+            route: *const route_snapshot.RouteSnapshot,
+        ) !agent_runtime.RouteCredential {
+            const app: *App = @ptrCast(@alignCast(raw_ctx));
+            return app.resolveRouteCredential(alloc, route);
         }
 
         fn refreshGatewayCredential(

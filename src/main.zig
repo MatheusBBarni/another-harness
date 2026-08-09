@@ -11,7 +11,6 @@ const api_key_validator = @import("core/auth/api_key_validator.zig");
 const oauth_transport = @import("core/auth/oauth_transport.zig");
 const js_host_auth = @import("core/auth/js_host_auth.zig");
 const credentials = @import("core/auth/credentials.zig");
-const secret = @import("core/auth/secret.zig");
 const model_cache_runtime = @import("core/app/model_cache_runtime.zig");
 const app_auth_runtime = @import("core/app/app_auth_runtime.zig");
 const app_host_config_runtime = @import("core/app/app_host_config_runtime.zig");
@@ -50,6 +49,7 @@ const builtin_devbox = @import("builtins/devbox.zig");
 const builtin_gateway = @import("builtins/gateway.zig");
 const gateway_provider = @import("core/gateway/gateway_provider.zig");
 const generation_usage_provider = @import("core/session/generation_usage_provider.zig");
+const route_snapshot = @import("core/gateway/route_snapshot.zig");
 const agent_stream_provider = @import("core/agent/stream_provider.zig");
 const builtin_hooks = @import("builtins/hooks.zig");
 const builtin_mcp = @import("builtins/mcp.zig");
@@ -455,6 +455,24 @@ const App = struct {
         var adapter = builtin_gateway.provider_adapter;
         adapter.legacy_provider = self.agentStreamProvider();
         return adapter;
+    }
+
+    pub fn resolveRouteCredential(
+        self: *App,
+        alloc: Allocator,
+        route: *const route_snapshot.RouteSnapshot,
+    ) !agent_runtime.RouteCredential {
+        var credential = try self.auth.resolveCredentialReference(alloc, route.credential_ref);
+        defer credential.deinit(alloc);
+        const tenant = if (credential.gatewayTeam()) |value| try alloc.dupe(u8, value) else null;
+        errdefer if (tenant) |value| alloc.free(value);
+        const token = credential.token;
+        credential.token = &.{};
+        return .{
+            .credential = token,
+            .tenant = tenant,
+            .legacy_source = credential.source,
+        };
     }
 
     pub fn secretStore(self: *const Self) host.SecretStore {
@@ -1250,18 +1268,20 @@ const App = struct {
         const prompt_copy = try std.heap.c_allocator.dupe(u8, prompt);
         errdefer std.heap.c_allocator.free(prompt_copy);
 
-        const model_copy = try std.heap.c_allocator.dupe(u8, self.selected_model.items);
-        errdefer std.heap.c_allocator.free(model_copy);
-
-        const gateway_credential = self.auth.gatewayCredential() orelse return error.MissingApiKey;
-        const api_key_copy = try std.heap.c_allocator.dupe(u8, gateway_credential.api_key);
-        errdefer secret.zeroAndFree(std.heap.c_allocator, api_key_copy);
-
-        const gateway_team_copy = if (gateway_credential.gateway_team) |team|
-            try std.heap.c_allocator.dupe(u8, team)
+        if (self.auth.gatewayCredential() == null) return error.MissingApiKey;
+        const profile = try self.auth.selectedConnectionProfile();
+        const endpoint = if (std.mem.eql(u8, profile.adapter_id, builtin_gateway.connection_seed.adapter_id))
+            builtin_gateway.defaultChatUrl()
         else
-            null;
-        errdefer if (gateway_team_copy) |team| std.heap.c_allocator.free(team);
+            profile.endpoint orelse return error.InvalidRouteEndpoint;
+        const descriptor = try self.resolveModelDescriptorForRequest(self.selected_model.items);
+        var route = try route_snapshot.RouteSnapshot.admit(
+            std.heap.c_allocator,
+            profile,
+            descriptor,
+            endpoint,
+        );
+        errdefer route.deinit(std.heap.c_allocator);
 
         const authorized_image_catalog = try self.session.snapshotImageCatalog(
             std.heap.c_allocator,
@@ -1330,10 +1350,7 @@ const App = struct {
             .prompt = prompt_copy,
             .images = images_copy,
             .authorized_image_catalog = authorized_image_catalog,
-            .model = model_copy,
-            .api_key = api_key_copy,
-            .gateway_team = gateway_team_copy,
-            .credential_source = gateway_credential.source,
+            .route = route,
             .permission_mode = self.permission_engine.mode,
             .sandbox_backend = sandbox.effectiveBackend(
                 self.permission_engine.mode,

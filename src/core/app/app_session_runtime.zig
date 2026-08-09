@@ -4538,10 +4538,6 @@ pub fn Runtime(comptime App: type) type {
                 app.selected_model.clearRetainingCapacity();
                 try app.selected_model.appendSlice(app.alloc, model);
             }
-            try app.worker.syncQueuedPromptModel(
-                std.heap.c_allocator,
-                app.selected_model.items,
-            );
             app.effort = preferences.effort;
             app.fast_mode = preferences.fast_mode;
             app.worker.syncQueuedPromptEffort(preferences.effort);
@@ -4713,27 +4709,12 @@ const FakeBackground = struct {
 };
 
 const FakeWorker = struct {
-    model: std.ArrayList(u8) = .empty,
     effort: types.ReasoningEffort = .auto,
     fast_mode: bool = false,
-
-    fn deinit(self: *FakeWorker, alloc: Allocator) void {
-        self.model.deinit(alloc);
-        self.* = .{};
-    }
 
     pub fn queuedPromptCount(self: *const FakeWorker) usize {
         _ = self;
         return 0;
-    }
-
-    fn syncQueuedPromptModel(
-        self: *FakeWorker,
-        alloc: Allocator,
-        model: []const u8,
-    ) !void {
-        self.model.clearRetainingCapacity();
-        try self.model.appendSlice(alloc, model);
     }
 
     fn syncQueuedPromptEffort(
@@ -4901,7 +4882,6 @@ const TestApp = struct {
         if (self.requested_resume) |*target| target.deinit(self.alloc);
         self.session.deinit(self.alloc);
         self.background.deinit();
-        self.worker.deinit(std.heap.c_allocator);
         self.selected_model.deinit(self.alloc);
         self.permission_engine.deinit(self.alloc);
         for (self.mcp_tool_names.items) |name| self.alloc.free(name);

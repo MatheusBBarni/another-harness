@@ -2,6 +2,7 @@ const std = @import("std");
 const std_builtin = @import("builtin");
 const command_admission = @import("../permissions/command_admission.zig");
 const agent_runtime = @import("../agent/agent_runtime.zig");
+const agent_stream_provider = @import("../agent/stream_provider.zig");
 const app_lifecycle = @import("../app/app_lifecycle.zig");
 const app_runtime_setup = @import("../app/app_runtime_setup.zig");
 const auth_runtime = @import("../auth/auth_runtime.zig");
@@ -15,6 +16,7 @@ const context_contract = @import("../workspace/context_contract.zig");
 const devbox_executor = @import("../execution/devbox_executor.zig");
 const gateway_provider = @import("../gateway/gateway_provider.zig");
 const connection_registry = @import("../gateway/connection_registry.zig");
+const route_snapshot = @import("../gateway/route_snapshot.zig");
 const background_process_provider = @import(
     "../execution/background_process_provider.zig",
 );
@@ -1543,16 +1545,26 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
         checkpoint.turn_id
     else
         debug_trace.nextTurnId();
+    const profile = startup.connections.?.selectedProfile();
+    const descriptor = try resolveModelDescriptor(@ptrCast(&ctx), alloc, ctx.model);
+    const endpoint = if (std.mem.eql(u8, profile.adapter_id, cfg.gateway_provider.connection_seed.adapter_id))
+        cfg.gateway_chat_url
+    else
+        profile.endpoint orelse return error.InvalidRouteEndpoint;
+    var route = try route_snapshot.RouteSnapshot.admit(
+        alloc,
+        profile,
+        descriptor,
+        endpoint,
+    );
+    defer route.deinit(alloc);
 
     const job: worker_runtime.QueuedPrompt = .{
         .turn_id = ctx.active_turn_id,
         .prompt = owned_prompt,
         .images = current_images,
         .authorized_image_catalog = authorized_image_catalog,
-        .model = @constCast(ctx.model),
-        .api_key = api_key,
-        .gateway_team = if (credential.gatewayTeam()) |team| @constCast(team) else null,
-        .credential_source = credential.source,
+        .route = route,
         .permission_mode = ctx.permission_mode,
         .sandbox_backend = ctx.sandbox_backend,
         .history = context_history,
@@ -1772,6 +1784,7 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
         .push_route_recovery_status = pushRouteRecoveryStatus,
         .push_command_output_complete = pushCommandOutputComplete,
         .push_http_error = pushHttpError,
+        .resolve_route_credential = resolveRouteCredential,
         .refresh_gateway_credential = refreshGatewayCredential,
         .available_model_capabilities = availableModelCapabilities,
         .resolve_model_capabilities = resolveModelCapabilities,
@@ -1780,6 +1793,22 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
         .report_usage = reportUsage,
         .usage = &ctx.session.usage,
         .usage_allocator = ctx.alloc,
+    };
+}
+
+fn resolveRouteCredential(
+    raw_ctx: *anyopaque,
+    alloc: Allocator,
+    _: *const route_snapshot.RouteSnapshot,
+) !agent_runtime.RouteCredential {
+    const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
+    const credential = try alloc.dupe(u8, ctx.api_key);
+    errdefer alloc.free(credential);
+    const tenant = if (ctx.gateway_team) |value| try alloc.dupe(u8, value) else null;
+    return .{
+        .credential = credential,
+        .tenant = tenant,
+        .legacy_source = ctx.credential_source,
     };
 }
 
@@ -3706,16 +3735,22 @@ fn testConfig() Config {
     };
 }
 
-fn testMissingKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.SecretStore, default_model: []const u8, default_fast_mode: bool, default_agent_step_limit: usize, _: connection_registry.Seed) !app_lifecycle.StartupState {
+fn testMissingKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.SecretStore, default_model: []const u8, default_fast_mode: bool, default_agent_step_limit: usize, connection_seed: connection_registry.Seed) !app_lifecycle.StartupState {
     var state = app_lifecycle.StartupState{ .agent_step_limit = default_agent_step_limit };
     errdefer state.deinit(alloc);
     state.workspace_root = try alloc.dupe(u8, "/tmp/fx-test");
     state.selected_model = try alloc.dupe(u8, default_model);
+    state.connections = try connection_registry.Runtime.init(
+        alloc,
+        connection_seed.profile(default_model, null),
+        null,
+        .unavailable,
+    );
     state.context_enabled = false;
     return state;
 }
 
-fn testPresentKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.SecretStore, default_model: []const u8, default_fast_mode: bool, default_agent_step_limit: usize, _: connection_registry.Seed) !app_lifecycle.StartupState {
+fn testPresentKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.SecretStore, default_model: []const u8, default_fast_mode: bool, default_agent_step_limit: usize, connection_seed: connection_registry.Seed) !app_lifecycle.StartupState {
     var state = app_lifecycle.StartupState{ .agent_step_limit = default_agent_step_limit };
     errdefer state.deinit(alloc);
     state.workspace_root = try alloc.dupe(u8, "/tmp/fx-test");
@@ -3724,6 +3759,12 @@ fn testPresentKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.
         .source = .ai_gateway_api_key,
     };
     state.selected_model = try alloc.dupe(u8, default_model);
+    state.connections = try connection_registry.Runtime.init(
+        alloc,
+        connection_seed.profile(default_model, null),
+        null,
+        .unavailable,
+    );
     state.context_enabled = true;
     return state;
 }
@@ -3868,12 +3909,14 @@ fn testProcessQueuedPromptRestrictedProvider(deps: *const agent_runtime.AgentRun
 
 fn testProcessQueuedPromptUnauthorized(deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, _: agent_runtime.LifecycleContext, _: agent_runtime.Config, job: worker_runtime.QueuedPrompt) !void {
     try std.testing.expect(semantic_presentation == null);
+    const ctx: *AskContext = @ptrCast(@alignCast(deps.ctx));
     try deps.push_http_error(
         deps.ctx,
         .unauthorized,
         "provider rejected secret-key body",
-        job.credential_source,
+        ctx.credential_source,
     );
+    _ = job;
 }
 
 fn testProcessQueuedPromptUnauthorizedThenHistory(deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, lifecycle: agent_runtime.LifecycleContext, cfg: agent_runtime.Config, job: worker_runtime.QueuedPrompt) !void {
@@ -4235,6 +4278,64 @@ fn testPromptRunDepsWithProcess(stdout_capture: *TestCapture, stderr_capture: *T
     var deps = testPromptRunDeps(stdout_capture, stderr_capture, testPresentKeyStartup);
     deps.process_queued_prompt = process;
     return deps;
+}
+
+test "fake non-Vercel adapter completes an Ask root turn on its admitted route" {
+    const Fake = struct {
+        calls: usize = 0,
+
+        fn stream(
+            adapter: *const agent_stream_provider.ProviderAdapter,
+            _: Allocator,
+            request: agent_stream_provider.AdapterRequest,
+            events: agent_stream_provider.EventSink,
+        ) !void {
+            const self: *@This() = @ptrCast(@alignCast(adapter.context.?));
+            self.calls += 1;
+            try std.testing.expectEqualStrings("test_non_vercel", request.route.adapter_kind);
+            try std.testing.expectEqualStrings("fake-protocol", request.route.protocol);
+            try std.testing.expectEqualStrings("fake://ask", request.route.endpoint);
+            try std.testing.expectEqualStrings("automatic", request.route.credential_ref);
+            try std.testing.expectEqualStrings("key", request.credential);
+            try events.emit(.{ .text_delta = "ask complete" });
+            try events.emit(.{ .finish = .{ .reason = .stop } });
+        }
+    };
+
+    const alloc = std.testing.allocator;
+    var stdout_capture: TestCapture = .{};
+    defer stdout_capture.deinit(alloc);
+    var stderr_capture: TestCapture = .{};
+    defer stderr_capture.deinit(alloc);
+    var fake = Fake{};
+    var cfg = testConfig();
+    cfg.gateway_chat_url = "fake://ask";
+    cfg.gateway_provider.connection_seed = .{
+        .id = "fake",
+        .display_name = "Fake",
+        .adapter_id = "test_non_vercel",
+        .endpoint = "fake://ask",
+        .protocol = "fake-protocol",
+        .credential_ref = "automatic",
+    };
+    cfg.gateway_provider.provider_adapter = .{
+        .kind = "test_non_vercel",
+        .context = &fake,
+        .stream_fn = Fake.stream,
+    };
+    var deps = testPromptRunDeps(&stdout_capture, &stderr_capture, testPresentKeyStartup);
+    deps.process_queued_prompt = processQueuedPromptDefault;
+
+    var result = try runPromptInternal(alloc, "hello", null, cfg, .{
+        .output_mode = .json,
+        .save_session = false,
+        .deps = deps,
+    });
+    defer result.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 1), fake.calls);
+    try std.testing.expectEqual(@as(u8, 0), result.exit_code);
+    try std.testing.expectEqualStrings("ask complete", result.assistant_output);
 }
 
 fn testPermissionRuleSet(alloc: Allocator, permission: []const u8, pattern: []const u8, action: types.PermissionAction) !types.PermissionRuleSet {

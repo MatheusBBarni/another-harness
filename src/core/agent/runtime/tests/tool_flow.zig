@@ -4639,7 +4639,7 @@ test "permission review receives only the active root request" {
         &canonical_history,
     );
     defer alloc.free(job.root_user_intent_context);
-    job.api_key = @constCast("excluded runtime credential");
+    hooks.route_credential = "excluded runtime credential";
 
     try runFakePrompt(&gateway, &hooks, fixture.config(), job);
 
@@ -4721,7 +4721,7 @@ test "permission review reaches serial and parallel tools after native history p
         hooks.permission_decisions = if (calls.len == 1) &.{.deny} else &.{ .deny, .deny };
         var fixture = PromptFixture{};
         var job = fixture.job();
-        job.model = @constCast("openai/gpt-5.6-sol");
+        job.route = test_support.testRouteForModel(@constCast("openai/gpt-5.6-sol"));
         job.history = &history;
         job.authorized_image_catalog = catalog;
 

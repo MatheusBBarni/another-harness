@@ -16,6 +16,7 @@ const builtin_tools = @import("../builtins/tools.zig");
 const credentials = @import("../core/auth/credentials.zig");
 const debug_trace = @import("../core/shared/debug_trace.zig");
 const gateway_provider = @import("../core/gateway/gateway_provider.zig");
+const connection_registry = @import("../core/gateway/connection_registry.zig");
 const hooks = @import("../core/hooks/hooks.zig");
 const mcp_runtime = @import("../core/mcp/mcp_runtime.zig");
 const mode_registry = @import("../core/modes/mode_registry.zig");
@@ -215,6 +216,7 @@ pub const ServerState = struct {
     api_key: []u8 = &.{},
     credential_source: ?types.CredentialSource = null,
     gateway_team: ?[]u8 = null,
+    connections: ?connection_registry.Runtime = null,
     selected_model: []u8 = &.{},
     configured_model: []u8 = &.{},
     process_model_override: bool = false,
@@ -267,6 +269,7 @@ pub const ServerState = struct {
         if (self.gateway_team) |team| self.alloc.free(team);
         if (self.selected_model.len > 0) self.alloc.free(self.selected_model);
         if (self.configured_model.len > 0) self.alloc.free(self.configured_model);
+        if (self.connections) |*connections| connections.deinit();
         self.permission_rules.deinit(self.alloc);
         self.background.deinit(std.heap.c_allocator);
         self.skills.deinit(self.alloc);
@@ -1148,6 +1151,7 @@ fn loadConfiguredStartupState(state: *const ServerState, alloc: Allocator) !app_
         state.cfg.secret_store,
         state.cfg.default_model,
         state.cfg.default_agent_step_limit,
+        state.cfg.gateway_provider.connection_seed,
     );
 }
 
@@ -1195,6 +1199,7 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
 
     state.workspace_root = startup.takeWorkspaceRoot();
     state.workspace_access = startup.takeWorkspaceAccess();
+    state.connections = startup.takeConnections();
     var credential = if (state.cfg.credential_override) |override| credentials.Credential{
         .token = try alloc.dupe(u8, override),
         .source = .ai_gateway_api_key,

@@ -18,6 +18,7 @@ const gateway_json = @import("../core/gateway/gateway_json.zig");
 const io_mod = @import("../core/shared/io.zig");
 const gateway_generation_usage = @import("../gateway/generation_usage.zig");
 const connection_registry = @import("../core/gateway/connection_registry.zig");
+const route_snapshot_contract = @import("../core/gateway/route_snapshot.zig");
 const gateway_provider = @import("../core/gateway/gateway_provider.zig");
 const model_capabilities = @import("../core/config/model_capabilities.zig");
 const model_catalog = @import("../core/gateway/model_catalog.zig");
@@ -143,6 +144,7 @@ pub const agent_stream_provider = agent_stream_provider_contract.Provider{
 };
 
 pub const provider_adapter = agent_stream_provider_contract.ProviderAdapter{
+    .kind = connection_seed.adapter_id,
     .stream_fn = streamVercelAdapter,
 };
 
@@ -237,7 +239,7 @@ fn streamVercelAdapter(
         .session_id = request.session_id,
         .model = request.model_id,
         .retry_count = request.retry_count,
-        .chat_url = request.endpoint,
+        .chat_url = request.route.endpoint,
         .payload = payload,
         .trace_ctx = request.trace_ctx,
         .content_capture_limit = request.content_capture_limit,
@@ -367,6 +369,19 @@ test "Vercel adapter sink failure does not mutate user cancellation" {
     defer state.deinit();
     var sink_error: ?anyerror = null;
     var sink_context: u8 = 0;
+    var route = route_snapshot_contract.RouteSnapshot{
+        .connection_id = @constCast("vercel"),
+        .adapter_kind = @constCast(connection_seed.adapter_id),
+        .endpoint = @constCast("provider:endpoint"),
+        .protocol = @constCast("vercel_ai_gateway"),
+        .credential_ref = @constCast("automatic"),
+        .primary_model_id = @constCast("test/model"),
+        .permission_review_model_id = null,
+        .capabilities = .{},
+        .capability_source = .configured,
+        .selected_fast_mode = false,
+        .fast_model_suffix = null,
+    };
     try std.testing.expectError(error.TestSinkFailure, adapter.stream(std.testing.allocator, .{
         .model_request = .{
             .model = "test/model",
@@ -375,11 +390,11 @@ test "Vercel adapter sink failure does not mutate user cancellation" {
             .tool_choice = .none,
             .capabilities = .{},
         },
+        .route = &route,
         .credential = "credential",
         .tenant = null,
         .model_id = "test/model",
         .retry_count = 1,
-        .endpoint = "provider:endpoint",
         .trace_ctx = .{},
         .content_capture_limit = null,
         .delivery = &delivery,

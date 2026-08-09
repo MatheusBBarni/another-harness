@@ -9,6 +9,7 @@ const secret = @import("secret.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const io_mod = @import("../shared/io.zig");
 const text_utils = @import("../shared/text_utils.zig");
+const types = @import("../shared/types.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -644,6 +645,32 @@ pub const Runtime = struct {
     pub fn connectionList(self: *const Self) []const connection_registry.Profile {
         const connections = if (self.connections) |*value| value else return &.{};
         return connections.list();
+    }
+
+    pub fn selectedConnectionProfile(self: *const Self) !connection_registry.Profile {
+        const connections = if (self.connections) |*value| value else return error.ConnectionRegistryUnavailable;
+        return connections.selectedProfile();
+    }
+
+    /// Resolves one owned credential from an admitted reference without
+    /// consulting the currently selected connection.
+    pub fn resolveCredentialReference(
+        self: *const Self,
+        alloc: Allocator,
+        reference: []const u8,
+    ) !credentials.Credential {
+        const preferred = if (std.mem.eql(u8, reference, "automatic"))
+            null
+        else
+            types.parseCredentialSource(reference) orelse return error.InvalidCredentialReference;
+        const resolution = try credentials.resolvePreferring(
+            alloc,
+            self.oauth_transport,
+            self.secret_store,
+            .refresh_if_needed,
+            preferred,
+        );
+        return resolution.credential orelse error.MissingCredential;
     }
 
     pub fn addConnection(self: *Self, input: connection_registry.ProfileInput) !void {

@@ -252,10 +252,6 @@ pub fn Runtime(comptime App: type) type {
             return app.worker.queuePreview();
         }
 
-        pub fn syncQueuedPromptModel(app: *App, model: []const u8) !void {
-            try app.worker.syncQueuedPromptModel(std.heap.c_allocator, model);
-        }
-
         pub fn syncQueuedPromptPermissionSnapshot(app: *App, snapshot: worker_runtime.PermissionSnapshot) void {
             app.worker.syncQueuedPromptPermissionSnapshot(snapshot);
         }
@@ -1223,12 +1219,6 @@ const FakeWorker = struct {
         return if (self.pending_question) FakeQuestionSnapshot{
             .source = self.pending_question_source,
         } else null;
-    }
-
-    fn syncQueuedPromptModel(self: *FakeWorker, alloc: std.mem.Allocator, model: []const u8) !void {
-        _ = self;
-        _ = alloc;
-        _ = model;
     }
 
     fn syncQueuedPromptPermissionSnapshot(self: *FakeWorker, snapshot: worker_runtime.PermissionSnapshot) void {
