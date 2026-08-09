@@ -1274,14 +1274,6 @@ const App = struct {
             builtin_gateway.defaultChatUrl()
         else
             profile.endpoint orelse return error.InvalidRouteEndpoint;
-        const descriptor = try self.resolveModelDescriptorForRequest(self.selected_model.items);
-        var route = try route_snapshot.RouteSnapshot.admit(
-            std.heap.c_allocator,
-            profile,
-            descriptor,
-            endpoint,
-        );
-        errdefer route.deinit(std.heap.c_allocator);
 
         const authorized_image_catalog = try self.session.snapshotImageCatalog(
             std.heap.c_allocator,
@@ -1291,6 +1283,20 @@ const App = struct {
                 self.pending_images.items,
         );
         errdefer types.freeImageAttachmentSlice(std.heap.c_allocator, authorized_image_catalog);
+        var descriptor = self.resolvedModelDescriptor(self.selected_model.items);
+        if (model_capabilities.requiresResolvedRequestCapabilities(
+            authorized_image_catalog.len > 0,
+            self.effort,
+            self.fast_mode,
+            descriptor.capabilities,
+        )) descriptor = try self.resolveModelDescriptorForRequest(self.selected_model.items);
+        var route = try route_snapshot.RouteSnapshot.admit(
+            std.heap.c_allocator,
+            profile,
+            descriptor,
+            endpoint,
+        );
+        errdefer route.deinit(std.heap.c_allocator);
 
         const history_copy = try self.session.snapshotContextHistory(std.heap.c_allocator);
         errdefer types.freeHistoryTurnSlice(std.heap.c_allocator, history_copy);

@@ -56,8 +56,10 @@ pub fn main(init: std.process.Init) !void {
 }
 
 const js_host_gateway_provider = gateway_provider.Provider{
+    .connection_seed = builtin_gateway.connection_seed,
     .agent_stream = js_host_stream_provider.provider(),
     .provider_adapter = .{
+        .kind = builtin_gateway.connection_seed.adapter_id,
         .legacy_provider = js_host_stream_provider.provider(),
         .stream_fn = builtin_gateway.provider_adapter.stream_fn,
     },
@@ -68,6 +70,7 @@ const js_host_gateway_provider = gateway_provider.Provider{
     .generation_usage = generation_usage_provider.unavailable_provider,
     .web_search = unavailable_web_search_provider,
     .model_catalog = js_host_model_catalog.provider,
+    .model_descriptors = builtin_gateway.model_descriptor_provider,
 };
 
 fn resolveChatUrl(_: ?*anyopaque, fallback: []const u8) []const u8 {

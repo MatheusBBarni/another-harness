@@ -1546,7 +1546,13 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
     else
         debug_trace.nextTurnId();
     const profile = startup.connections.?.selectedProfile();
-    const descriptor = try resolveModelDescriptor(@ptrCast(&ctx), alloc, ctx.model);
+    var descriptor = availableModelDescriptor(@ptrCast(&ctx), ctx.model);
+    if (model_capabilities.requiresResolvedRequestCapabilities(
+        current_images.len > 0 or authorized_image_catalog.len > 0,
+        ctx.effort,
+        ctx.fast_mode,
+        descriptor.capabilities,
+    )) descriptor = try resolveModelDescriptor(@ptrCast(&ctx), alloc, ctx.model);
     const endpoint = if (std.mem.eql(u8, profile.adapter_id, cfg.gateway_provider.connection_seed.adapter_id))
         cfg.gateway_chat_url
     else

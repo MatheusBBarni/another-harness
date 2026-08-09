@@ -562,7 +562,13 @@ pub fn handlePrompt(
     const authorized_image_catalog = try session.session_rt.snapshotImageCatalog(alloc, current_images);
     defer types.freeImageAttachmentSlice(alloc, authorized_image_catalog);
     const profile = state.connections.?.selectedProfile();
-    const descriptor = try resolveModelDescriptor(@ptrCast(&ctx), alloc, session.model);
+    var descriptor = availableModelDescriptor(@ptrCast(&ctx), session.model);
+    if (model_capabilities.requiresResolvedRequestCapabilities(
+        current_images.len > 0 or authorized_image_catalog.len > 0,
+        session.effort,
+        session.fast_mode,
+        descriptor.capabilities,
+    )) descriptor = try resolveModelDescriptor(@ptrCast(&ctx), alloc, session.model);
     const endpoint = if (std.mem.eql(u8, profile.adapter_id, state.cfg.gateway_provider.connection_seed.adapter_id))
         state.cfg.gateway_chat_url
     else

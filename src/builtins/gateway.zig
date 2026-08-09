@@ -200,7 +200,7 @@ const AdapterEventBridge = struct {
     }
 };
 
-fn streamVercelAdapter(
+pub fn streamVercelAdapter(
     adapter: *const agent_stream_provider_contract.ProviderAdapter,
     alloc: Allocator,
     request: agent_stream_provider_contract.AdapterRequest,
