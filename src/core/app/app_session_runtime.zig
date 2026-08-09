@@ -2590,8 +2590,8 @@ pub fn Runtime(comptime App: type) type {
                 }
             }
             if (result.settings_error == null) {
-                // Compatibility projection until session and status readers move
-                // to connection identity in G4.
+                // G11 removes this compatibility projection once session and
+                // status readers consume selected connection identity.
                 var settings_attempt = config_runtime.attemptUserPreferences(
                     app.alloc,
                     patch.userSettingsPatch(),

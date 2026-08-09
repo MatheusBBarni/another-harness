@@ -63,14 +63,27 @@ const DiffEntryPayload = runtime_tool_contracts.DiffEntryPayload;
 const SecondaryPublicationReport = runtime_tool_contracts.SecondaryPublicationReport;
 
 pub fn testRouteForModel(model: []const u8) route_snapshot.RouteSnapshot {
-    const descriptor = builtin_gateway.model_descriptor_provider.fallback(model);
+    return testRouteForDescriptor(builtin_gateway.model_descriptor_provider.fallback(model));
+}
+
+pub fn testRouteForCapabilities(
+    model: []const u8,
+    capabilities: model_capabilities.Capabilities,
+) route_snapshot.RouteSnapshot {
+    var descriptor = builtin_gateway.model_descriptor_provider.fallback(model);
+    descriptor.capabilities = capabilities;
+    descriptor.source = .configured;
+    return testRouteForDescriptor(descriptor);
+}
+
+fn testRouteForDescriptor(descriptor: model_capabilities.ModelDescriptor) route_snapshot.RouteSnapshot {
     return .{
         .connection_id = @constCast("vercel"),
         .adapter_kind = @constCast(builtin_gateway.connection_seed.adapter_id),
         .endpoint = @constCast("https://example.invalid"),
         .protocol = @constCast("vercel_ai_gateway"),
         .credential_ref = @constCast("automatic"),
-        .primary_model_id = @constCast(model),
+        .primary_model_id = @constCast(descriptor.id),
         .permission_review_model_id = null,
         .capabilities = descriptor.capabilities,
         .capability_source = descriptor.source,
@@ -399,6 +412,11 @@ pub const ModelCapabilityOverride = struct {
     capabilities: model_capabilities.Capabilities,
 };
 
+pub const RouteCredentialOverride = struct {
+    credential_ref: []const u8,
+    credential: []const u8,
+};
+
 fn fakeGatewayStream(
     context: ?*anyopaque,
     alloc: Allocator,
@@ -646,6 +664,7 @@ pub const FakeAgentRuntimeDeps = struct {
     credential_refresh_modes: std.ArrayList(runtime_deps.CredentialRefreshMode) = .empty,
     credential_refresh_error: ?anyerror = null,
     route_credential: []const u8 = "key",
+    route_credential_overrides: []const RouteCredentialOverride = &.{},
     route_credential_source: ?types.CredentialSource = null,
     enable_interactive_notices: bool = false,
     enable_recovery_checkpoint: bool = false,
@@ -771,11 +790,15 @@ pub const FakeAgentRuntimeDeps = struct {
     fn resolveRouteCredential(
         raw: *anyopaque,
         alloc: Allocator,
-        _: *const route_snapshot.RouteSnapshot,
+        route: *const route_snapshot.RouteSnapshot,
     ) !runtime_deps.RouteCredential {
         const self: *FakeAgentRuntimeDeps = @ptrCast(@alignCast(raw));
+        const credential = for (self.route_credential_overrides) |override| {
+            if (std.mem.eql(u8, override.credential_ref, route.credential_ref))
+                break override.credential;
+        } else self.route_credential;
         return .{
-            .credential = try alloc.dupe(u8, self.route_credential),
+            .credential = try alloc.dupe(u8, credential),
             .legacy_source = self.route_credential_source,
         };
     }
@@ -1962,19 +1985,6 @@ pub fn runFakePromptWithLifecycle(
     lifecycle: runtime_lifecycle.LifecycleContext,
 ) !void {
     hooks.workspace_root = config.workspace_root;
-    var job = queued_job;
-    if (FakeAgentRuntimeDeps.resolveModelDescriptor(hooks, hooks.alloc, job.route.primary_model_id)) |descriptor| {
-        job.route.primary_model_id = @constCast(descriptor.id);
-        job.route.capabilities = descriptor.capabilities;
-        job.route.capability_source = descriptor.source;
-        job.route.selected_fast_mode = descriptor.selected_fast_mode;
-        job.route.fast_model_suffix = switch (descriptor.fast_route) {
-            .same_model => null,
-            .suffix => |suffix| @constCast(suffix),
-        };
-    } else |err| if (err != error.Cancelled) {
-        return err;
-    }
     var deps = hooks.deps();
     deps.agent_stream_provider = gateway.provider();
     deps.provider_adapter = adapterFromLegacy(deps.agent_stream_provider);
@@ -1988,7 +1998,7 @@ pub fn runFakePromptWithLifecycle(
         null,
         lifecycle,
         config,
-        job,
+        queued_job,
     );
 }
 

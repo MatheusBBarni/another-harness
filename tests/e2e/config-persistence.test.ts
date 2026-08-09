@@ -2482,14 +2482,17 @@ describe("connection registry persistence", () => {
   );
 
   serialTest(
-    "persisted Vercel connection survives a fresh-process restart on loopback",
+    "selected same-adapter connection keeps its endpoint across a fresh-process restart",
     async () => {
       const root = mkdtempSync(join(tmpdir(), "fx-connection-registry-"));
-      const gateway = startFakeGateway([
+      const selectedGateway = startFakeGateway([
         fakeGatewayFinalText("CONNECTION_RESTART_COMPLETE"),
       ], {
         models: [{ id: FAKE_GATEWAY_MODEL, type: "language", tags: ["tool-use"] }],
       });
+      const nonSelectedGateway = startFakeGateway([
+        fakeGatewayFinalText("WRONG_CONNECTION"),
+      ]);
       try {
         const home = join(root, "home");
         const workspace = join(root, "workspace");
@@ -2500,12 +2503,12 @@ describe("connection registry persistence", () => {
           settingsPath,
           JSON.stringify({
             connections: {
-              selected: "vercel",
+              selected: "custom-vercel",
               profiles: [{
-                id: "vercel",
-                display_name: "Vercel AI Gateway",
+                id: "custom-vercel",
+                display_name: "Custom Vercel Gateway",
                 adapter_id: "vercel_ai_gateway",
-                endpoint: gateway.chatUrl,
+                endpoint: selectedGateway.chatUrl,
                 protocol: "vercel_ai_gateway",
                 credential_ref: "ai_gateway_api_key",
                 remembered_model: FAKE_GATEWAY_MODEL,
@@ -2519,9 +2522,9 @@ describe("connection registry persistence", () => {
           ...NO_AUTH,
           AI_GATEWAY_API_KEY: "isolated-gateway-key",
           HOME: home,
-          FX_GATEWAY_BASE_URL: gateway.baseUrl,
-          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
-          FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/v1/models`,
+          FX_GATEWAY_BASE_URL: selectedGateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: nonSelectedGateway.chatUrl,
+          FX_E2E_GATEWAY_MODELS_URL: `${selectedGateway.baseUrl}/v1/models`,
         };
 
         const catalog = await runFx(["models", "--json"], {
@@ -2545,21 +2548,24 @@ describe("connection registry persistence", () => {
         expect(JSON.parse(restarted.stdout).output).toContain(
           "CONNECTION_RESTART_COMPLETE",
         );
-        expect(gateway.requests).toHaveLength(1);
-        expect(gateway.requests[0]!.headers.get("authorization")).toBe(
+        expect(selectedGateway.requests).toHaveLength(1);
+        expect(nonSelectedGateway.requests).toHaveLength(0);
+        expect(selectedGateway.requests[0]!.headers.get("authorization")).toBe(
           "Bearer isolated-gateway-key",
         );
-        expect(gateway.requests[0]!.headers.get("ai-language-model-id")).toBe(
+        expect(selectedGateway.requests[0]!.headers.get("ai-language-model-id")).toBe(
           FAKE_GATEWAY_MODEL,
         );
-        expect(gateway.modelRequests.length).toBeGreaterThan(0);
-        expect(gateway.modelRequests[0]!.headers.get("authorization")).toBe(
+        expect(selectedGateway.modelRequests.length).toBeGreaterThan(0);
+        expect(selectedGateway.modelRequests[0]!.headers.get("authorization")).toBe(
           "Bearer isolated-gateway-key",
         );
 
         const stored = JSON.parse(readFileSync(settingsPath, "utf8"));
-        const profile = stored.connections.profiles[0];
-        expect(stored.connections.selected).toBe("vercel");
+        const profile = stored.connections.profiles.find(
+          (candidate: { id: string }) => candidate.id === "custom-vercel",
+        );
+        expect(stored.connections.selected).toBe("custom-vercel");
         expect(profile.remembered_model).toBe(FAKE_GATEWAY_MODEL);
         expect(profile).not.toHaveProperty("api_key");
         expect(profile).not.toHaveProperty("token");
@@ -2568,7 +2574,8 @@ describe("connection registry persistence", () => {
           "isolated-gateway-key",
         );
       } finally {
-        gateway.stop();
+        selectedGateway.stop();
+        nonSelectedGateway.stop();
         rmSync(root, { recursive: true, force: true });
       }
     },

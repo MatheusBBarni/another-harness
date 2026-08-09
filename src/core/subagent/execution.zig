@@ -8402,7 +8402,7 @@ const GatewayExecution = struct {
         defer session.freeHistoryTurnSlice(turn.alloc, history);
         var job = fixture.job();
         job.prompt = message.content;
-        job.route.primary_model_id = admission.model;
+        job.route = agent_test_support.testRouteForModel(admission.model);
         job.permission_mode = admission.permission_mode;
         job.sandbox_backend = admission.sandbox_backend;
         job.history = history;

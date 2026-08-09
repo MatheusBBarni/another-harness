@@ -569,15 +569,12 @@ pub fn handlePrompt(
         session.fast_mode,
         descriptor.capabilities,
     )) descriptor = try resolveModelDescriptor(@ptrCast(&ctx), alloc, session.model);
-    const endpoint = if (std.mem.eql(u8, profile.adapter_id, state.cfg.gateway_provider.connection_seed.adapter_id))
-        state.cfg.gateway_chat_url
-    else
-        profile.endpoint orelse return error.InvalidRouteEndpoint;
-    var route = try route_snapshot.RouteSnapshot.admit(
+    var route = try route_snapshot.RouteSnapshot.admitSelected(
         alloc,
         profile,
+        state.cfg.gateway_provider.connection_seed,
         descriptor,
-        endpoint,
+        state.cfg.gateway_chat_url,
     );
     defer route.deinit(alloc);
 

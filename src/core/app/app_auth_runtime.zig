@@ -337,8 +337,8 @@ pub fn Runtime(comptime App: type) type {
                     return;
                 };
             }
-            // Compatibility projection until all status readers consume the
-            // selected connection in G4.
+            // G11 removes this compatibility projection once status readers
+            // consume the selected connection as their authority.
             var attempt = config_runtime.attemptUserPreferences(
                 app.alloc,
                 .{ .clear_credential_source = true },
@@ -393,8 +393,8 @@ pub fn Runtime(comptime App: type) type {
                     return;
                 };
             }
-            // Compatibility projection until all status readers consume the
-            // selected connection in G4.
+            // G11 removes this compatibility projection once status readers
+            // consume the selected connection as their authority.
             if (comptime @hasDecl(App, "persistCredentialSourcePreference")) {
                 app.persistCredentialSourcePreference(source);
                 return;

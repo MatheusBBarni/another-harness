@@ -4716,12 +4716,13 @@ test "permission review reaches serial and parallel tools after native history p
         var hooks = FakeAgentRuntimeDeps.init(alloc);
         defer hooks.deinit();
         hooks.tool_registry = .{ .tools = &review_tools };
-        hooks.available_capability_overrides = &capability_overrides;
-        hooks.capability_overrides = &capability_overrides;
         hooks.permission_decisions = if (calls.len == 1) &.{.deny} else &.{ .deny, .deny };
         var fixture = PromptFixture{};
         var job = fixture.job();
-        job.route = test_support.testRouteForModel(@constCast("openai/gpt-5.6-sol"));
+        job.route = test_support.testRouteForCapabilities(
+            "openai/gpt-5.6-sol",
+            capability_overrides[0].capabilities,
+        );
         job.history = &history;
         job.authorized_image_catalog = catalog;
 

@@ -18,6 +18,20 @@ pub const RouteSnapshot = struct {
     selected_fast_mode: bool,
     fast_model_suffix: ?[]const u8,
 
+    pub fn admitSelected(
+        alloc: Allocator,
+        profile: connection_registry.Profile,
+        seed: connection_registry.Seed,
+        model_descriptor: model_capabilities.ModelDescriptor,
+        seed_endpoint: []const u8,
+    ) !RouteSnapshot {
+        const endpoint = if (std.mem.eql(u8, profile.id, seed.id))
+            seed_endpoint
+        else
+            profile.endpoint orelse return error.InvalidRouteEndpoint;
+        return admit(alloc, profile, model_descriptor, endpoint);
+    }
+
     pub fn admit(
         alloc: Allocator,
         profile: connection_registry.Profile,
@@ -207,4 +221,47 @@ test "route admission rejects invalid model protocol and endpoint" {
         error.InvalidRouteEndpoint,
         RouteSnapshot.admit(std.testing.allocator, profile, descriptor, ""),
     );
+}
+
+test "selected route applies the seed override only to the seed connection" {
+    const seed = connection_registry.Seed{
+        .id = "seed",
+        .display_name = "Seed",
+        .adapter_id = "shared-adapter",
+        .endpoint = "https://seed.invalid",
+        .protocol = "shared-protocol",
+        .credential_ref = "seed-ref",
+    };
+    var custom_profile = connection_registry.Profile{
+        .id = @constCast("custom"),
+        .display_name = @constCast("Custom"),
+        .adapter_id = @constCast("shared-adapter"),
+        .endpoint = @constCast("https://custom.invalid"),
+        .protocol = @constCast("shared-protocol"),
+        .credential_ref = @constCast("custom-ref"),
+        .remembered_model = @constCast("custom-model"),
+        .permission_review_model = null,
+    };
+    const descriptor = model_capabilities.configuredDescriptor("custom-model", .{});
+
+    var custom_route = try RouteSnapshot.admitSelected(
+        std.testing.allocator,
+        custom_profile,
+        seed,
+        descriptor,
+        "https://override.invalid",
+    );
+    defer custom_route.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("https://custom.invalid", custom_route.endpoint);
+
+    custom_profile.id = @constCast("seed");
+    var seed_route = try RouteSnapshot.admitSelected(
+        std.testing.allocator,
+        custom_profile,
+        seed,
+        descriptor,
+        "https://override.invalid",
+    );
+    defer seed_route.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("https://override.invalid", seed_route.endpoint);
 }

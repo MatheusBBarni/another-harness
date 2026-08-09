@@ -2437,7 +2437,7 @@ fn makeQueuedPrompt(alloc: Allocator) !worker_runtime.QueuedPrompt {
 fn makeNonVercelQueuedPrompt(alloc: Allocator) !worker_runtime.QueuedPrompt {
     const prompt = try alloc.dupe(u8, "draft an issue");
     errdefer alloc.free(prompt);
-    var route = try route_snapshot.RouteSnapshot.admit(
+    var route = try route_snapshot.RouteSnapshot.admitSelected(
         alloc,
         .{
             .id = @constCast("fake"),
@@ -2449,8 +2449,9 @@ fn makeNonVercelQueuedPrompt(alloc: Allocator) !worker_runtime.QueuedPrompt {
             .remembered_model = @constCast("test-model"),
             .permission_review_model = null,
         },
+        test_builtin_gateway.connection_seed,
         model_capabilities.configuredDescriptor("test-model", .{}),
-        "fake://tui",
+        "https://unused-seed.invalid",
     );
     errdefer route.deinit(alloc);
     const history = try alloc.alloc(types.HistoryTurn, 0);
@@ -2465,7 +2466,7 @@ fn makeNonVercelQueuedPrompt(alloc: Allocator) !worker_runtime.QueuedPrompt {
     };
 }
 
-test "fake non-Vercel adapter completes a queued TUI root turn on its admitted route" {
+test "fake non-Vercel adapter completes a TUI-admitted queued root turn" {
     const Fake = struct {
         calls: usize = 0,
 
@@ -2496,7 +2497,13 @@ test "fake non-Vercel adapter completes a queued TUI root turn on its admitted r
         .context = &fake,
         .stream_fn = Fake.stream,
     };
-    const job = try makeNonVercelQueuedPrompt(alloc);
+    const pending_job = try makeNonVercelQueuedPrompt(alloc);
+    app.worker.enqueuePrompt(std.heap.c_allocator, pending_job) catch |err| {
+        worker_runtime.freeQueuedPrompt(alloc, pending_job);
+        return err;
+    };
+    const job = (try app.worker.tryTakeNextPrompt(std.heap.c_allocator)) orelse
+        return error.TestExpectedQueuedPrompt;
     defer worker_runtime.freeQueuedPrompt(alloc, job);
 
     try Runtime(FakeApp).processQueuedPrompt(&app, job, 1, test_gateway_chat_url);

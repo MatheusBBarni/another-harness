@@ -1270,10 +1270,6 @@ const App = struct {
 
         if (self.auth.gatewayCredential() == null) return error.MissingApiKey;
         const profile = try self.auth.selectedConnectionProfile();
-        const endpoint = if (std.mem.eql(u8, profile.adapter_id, builtin_gateway.connection_seed.adapter_id))
-            builtin_gateway.defaultChatUrl()
-        else
-            profile.endpoint orelse return error.InvalidRouteEndpoint;
 
         const authorized_image_catalog = try self.session.snapshotImageCatalog(
             std.heap.c_allocator,
@@ -1290,11 +1286,12 @@ const App = struct {
             self.fast_mode,
             descriptor.capabilities,
         )) descriptor = try self.resolveModelDescriptorForRequest(self.selected_model.items);
-        var route = try route_snapshot.RouteSnapshot.admit(
+        var route = try route_snapshot.RouteSnapshot.admitSelected(
             std.heap.c_allocator,
             profile,
+            builtin_gateway.connection_seed,
             descriptor,
-            endpoint,
+            builtin_gateway.defaultChatUrl(),
         );
         errdefer route.deinit(std.heap.c_allocator);
 
