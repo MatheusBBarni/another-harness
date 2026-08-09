@@ -653,10 +653,16 @@ pub const Runtime = struct {
 
     pub fn selectConnection(self: *Self, alloc: Allocator, id: []const u8) !bool {
         const connections = if (self.connections) |*value| value else return error.ConnectionRegistryUnavailable;
-        const changed = try connections.select(id);
+        const changed = connections.select(id) catch |err| {
+            if (std.mem.eql(u8, connections.selectedProfile().id, id)) {
+                self.clearCredential(alloc);
+                connections.markSelectedDisconnected(.not_checked);
+            }
+            return err;
+        };
         if (!changed) return false;
         self.clearCredential(alloc);
-        try connections.markDisconnected(id, .not_checked);
+        connections.markSelectedDisconnected(.not_checked);
         return true;
     }
 
@@ -2574,7 +2580,40 @@ fn discardConnectionSnapshot(
     _: ?*anyopaque,
     _: Allocator,
     _: connection_registry.Snapshot,
-) anyerror!void {}
+) anyerror!connection_registry.PersistenceOutcome {
+    return .committed;
+}
+
+const ConnectionSelectionPersistence = struct {
+    failure: enum { definite, indeterminate } = .definite,
+
+    fn write(
+        raw: ?*anyopaque,
+        _: Allocator,
+        _: connection_registry.Snapshot,
+    ) anyerror!connection_registry.PersistenceOutcome {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        return switch (self.failure) {
+            .definite => error.ConnectionWriteFailed,
+            .indeterminate => .{ .replaced_indeterminate = error.SettingsCommitIndeterminate },
+        };
+    }
+};
+
+fn initTestConnectionRegistry(alloc: Allocator) !connection_registry.Runtime {
+    return connection_registry.Runtime.init(
+        alloc,
+        .{
+            .id = "vercel",
+            .display_name = "Vercel AI Gateway",
+            .adapter_id = "vercel_ai_gateway",
+            .credential_ref = "automatic",
+            .remembered_model = "model/vercel",
+        },
+        null,
+        .{ .write_fn = discardConnectionSnapshot },
+    );
+}
 
 test "credentials are bound to the selected connection and invalid auth disconnects it" {
     const alloc = std.testing.allocator;
@@ -2628,5 +2667,55 @@ test "credentials are bound to the selected connection and invalid auth disconne
     try std.testing.expectEqual(
         connection_registry.DisconnectReason.authentication_failed,
         (try runtime.connectionStatus("vercel")).auth.disconnected,
+    );
+}
+
+test "connection selection failure preserves or completes the credential transition" {
+    const credential_bytes = "bound-vercel-credential";
+    var backing: [32768]u8 = [_]u8{0xa5} ** 32768;
+    var fixed = std.heap.FixedBufferAllocator.init(&backing);
+    const alloc = fixed.allocator();
+    var persistence: ConnectionSelectionPersistence = .{};
+    var connections = try initTestConnectionRegistry(alloc);
+
+    var runtime: Runtime = .{};
+    defer runtime.deinit(alloc);
+    runtime.adoptConnections(alloc, &connections);
+    try runtime.addConnection(.{
+        .id = "local",
+        .display_name = "Local",
+        .adapter_id = "local",
+        .credential_ref = "local_key",
+        .remembered_model = "model/local",
+    });
+    runtime.connections.?.persistence = .{
+        .context = &persistence,
+        .write_fn = ConnectionSelectionPersistence.write,
+    };
+    var credential = credentials.Credential{
+        .token = try alloc.dupe(u8, credential_bytes),
+        .source = .ai_gateway_api_key,
+    };
+    defer credential.deinit(alloc);
+    _ = runtime.adoptCredential(alloc, &credential);
+
+    try std.testing.expectError(
+        error.ConnectionWriteFailed,
+        runtime.selectConnection(alloc, "local"),
+    );
+    try std.testing.expectEqualStrings("vercel", runtime.connections.?.selectedProfile().id);
+    try std.testing.expectEqualStrings(credential_bytes, runtime.apiKey().?);
+
+    persistence.failure = .indeterminate;
+    try std.testing.expectError(
+        error.SettingsCommitIndeterminate,
+        runtime.selectConnection(alloc, "local"),
+    );
+    try std.testing.expectEqualStrings("local", runtime.connections.?.selectedProfile().id);
+    try std.testing.expect(runtime.gatewayCredential() == null);
+    try std.testing.expect(std.mem.find(u8, &backing, credential_bytes) == null);
+    try std.testing.expectEqual(
+        connection_registry.DisconnectReason.not_checked,
+        (try runtime.connectionStatus("local")).auth.disconnected,
     );
 }

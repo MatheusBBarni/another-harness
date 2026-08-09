@@ -515,6 +515,16 @@ const test_seed = ProfileInput{
     .permission_review_model = "openai/gpt-5.4",
 };
 
+const test_local = ProfileInput{
+    .id = "local",
+    .display_name = "Local",
+    .adapter_id = "custom",
+    .endpoint = "http://127.0.0.1:8080/v1",
+    .protocol = "openai_compatible",
+    .credential_ref = "local_key",
+    .remembered_model = "local/model",
+};
+
 const PersistenceCapture = struct {
     writes: usize = 0,
     stored: ?Stored = null,
@@ -565,21 +575,42 @@ test "connection selection is idempotent and unknown ids preserve state" {
     try std.testing.expectEqual(@as(usize, 0), capture.writes);
 }
 
-test "failed persistence leaves connection state unchanged" {
+test "definite persistence failure leaves connection selection unchanged" {
     const alloc = std.testing.allocator;
+    var capture = PersistenceCapture{};
+    defer capture.deinit(alloc);
     var persistence = RejectingPersistence{};
-    var runtime = try Runtime.init(alloc, test_seed, null, persistence.persistence());
+    var runtime = try Runtime.init(alloc, test_seed, null, capture.persistence());
     defer runtime.deinit();
+    try runtime.add(test_local);
+    runtime.persistence = persistence.persistence();
 
     try std.testing.expectError(
         error.ConnectionWriteFailed,
-        runtime.rememberSelectedModel("replacement/model"),
+        runtime.select("local"),
     );
     try std.testing.expectEqual(@as(usize, 1), persistence.writes);
-    try std.testing.expectEqualStrings(
-        test_seed.remembered_model,
-        runtime.selectedProfile().remembered_model,
+    try std.testing.expectEqualStrings("vercel", runtime.selectedProfile().id);
+}
+
+test "indeterminate persistence installs the authoritative connection selection" {
+    const alloc = std.testing.allocator;
+    var capture = PersistenceCapture{};
+    defer capture.deinit(alloc);
+    var persistence = IndeterminatePersistence{};
+    defer persistence.deinit(alloc);
+    var runtime = try Runtime.init(alloc, test_seed, null, capture.persistence());
+    defer runtime.deinit();
+    try runtime.add(test_local);
+    runtime.persistence = persistence.persistence();
+
+    try std.testing.expectError(
+        error.SettingsCommitIndeterminate,
+        runtime.select("local"),
     );
+    try std.testing.expectEqual(@as(usize, 1), persistence.writes);
+    try std.testing.expectEqualStrings("local", runtime.selectedProfile().id);
+    try std.testing.expectEqualStrings("local", persistence.stored.?.selected_id);
 }
 
 test "models credentials and authentication status stay isolated by connection" {
@@ -589,15 +620,7 @@ test "models credentials and authentication status stay isolated by connection" 
     var runtime = try Runtime.init(alloc, test_seed, null, capture.persistence());
     defer runtime.deinit();
 
-    try runtime.add(.{
-        .id = "local",
-        .display_name = "Local",
-        .adapter_id = "custom",
-        .endpoint = "http://127.0.0.1:8080/v1",
-        .protocol = "openai_compatible",
-        .credential_ref = "local_key",
-        .remembered_model = "local/model",
-    });
+    try runtime.add(test_local);
     try runtime.markConnected("vercel");
     try std.testing.expect(try runtime.select("local"));
     try runtime.rememberSelectedModel("local/next");
