@@ -1282,7 +1282,7 @@ fn livePresentationEventBytes(event: worker_runtime.WorkerEvent) ?usize {
 const Slot = struct {
     owner: *Owner,
     child_id: []u8,
-    retry_interrupted: bool,
+    retry_interrupted: std.atomic.Value(bool),
     cancel: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     active_worker: ?*worker_runtime.WorkerRuntime = null,
@@ -1397,7 +1397,7 @@ pub const Owner = struct {
         self.dropCompletionLocked(child_id);
         for (self.slots.items) |slot| {
             if (!std.mem.eql(u8, slot.child_id, child_id)) continue;
-            slot.retry_interrupted = slot.retry_interrupted or retry_interrupted;
+            if (retry_interrupted) slot.retry_interrupted.store(true, .seq_cst);
             slot.wake_requested = true;
             slot.restart_failed = false;
             self.reaper_cond.broadcast(io_mod.getIo());
@@ -1412,7 +1412,7 @@ pub const Owner = struct {
         slot.* = .{
             .owner = self,
             .child_id = owned_id,
-            .retry_interrupted = retry_interrupted,
+            .retry_interrupted = std.atomic.Value(bool).init(retry_interrupted),
         };
         try self.slots.append(self.alloc, slot);
         errdefer _ = self.slots.pop();
@@ -2765,7 +2765,8 @@ fn runOne(slot: *Slot) OneResult {
         communication_state,
         record,
     ) catch return .control_failed;
-    const index = nextRunnableIndex(record.queue, slot.retry_interrupted) orelse
+    const retry_interrupted = slot.retry_interrupted.load(.seq_cst);
+    const index = nextRunnableIndex(record.queue, retry_interrupted) orelse
         return if (record.mode == .one_off and record.state == .completed)
             .completed
         else
@@ -2911,7 +2912,7 @@ fn runOne(slot: *Slot) OneResult {
     if (outcome == .failed) return .failed;
     if (current.mode == .one_off) return .completed;
     if (hasPending(current.queue) or
-        (slot.retry_interrupted and nextRunnableIndex(current.queue, true) != null))
+        (retry_interrupted and nextRunnableIndex(current.queue, true) != null))
     {
         return .more_work;
     }
@@ -4946,7 +4947,7 @@ test "start wakes a reaper retry after a joined child restart failed" {
     slot.* = .{
         .owner = &owner,
         .child_id = owned_id,
-        .retry_interrupted = false,
+        .retry_interrupted = std.atomic.Value(bool).init(false),
         .finished = true,
         .wake_requested = true,
         .restart_failed = true,
@@ -6898,7 +6899,7 @@ fn runExternalExecutionProcess(
     var slot = Slot{
         .owner = &owner,
         .child_id = @constCast("live-child"),
-        .retry_interrupted = false,
+        .retry_interrupted = std.atomic.Value(bool).init(false),
     };
     return if (runOne(&slot) == .idle) 0 else 91;
 }
