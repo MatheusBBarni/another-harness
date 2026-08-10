@@ -765,8 +765,7 @@ fn runAutomaticReview(
             .{ call.name, @errorName(err), io_mod.milliTimestamp() - started_ms, call.id },
         );
         if (err == error.OutOfMemory) return error.OutOfMemory;
-        if (err == error.Cancelled and
-            input.worker.worker_cancel_requested.load(.seq_cst)) return error.Cancelled;
+        if (err == error.Cancelled) return error.Cancelled;
         return .invalid;
     };
     switch (review) {
@@ -4478,7 +4477,7 @@ test "failed automatic review falls back interactively and denies headless" {
     try std.testing.expectEqual(@as(usize, 2), reviewer.calls);
 }
 
-test "cancelled automatic review falls back to the interactive prompt" {
+test "cancelled automatic review remains absorbing with a prompter" {
     const CancelledReviewer = struct {
         calls: usize = 0,
 
@@ -4511,7 +4510,7 @@ test "cancelled automatic review falls back to the interactive prompt" {
     );
     input.permission_prompter = recording.prompter();
 
-    const outcome = try requestPermissionOutcome(
+    try std.testing.expectError(error.Cancelled, requestPermissionOutcome(
         input,
         arena_state.allocator(),
         .{
@@ -4521,14 +4520,13 @@ test "cancelled automatic review falls back to the interactive prompt" {
         },
         .auto,
         &.{},
-    );
+    ));
 
     try std.testing.expectEqual(@as(usize, 1), reviewer.calls);
-    try std.testing.expectEqual(@as(usize, 1), recording.calls);
-    try std.testing.expectEqual(ToolPermissionDecision.once, outcome.decision);
+    try std.testing.expectEqual(@as(usize, 0), recording.calls);
 }
 
-test "cancelled automatic review denies visibly without a prompter" {
+test "cancelled automatic review remains absorbing without a prompter" {
     const CancelledReviewer = struct {
         fn classify(
             _: *anyopaque,
@@ -4555,7 +4553,7 @@ test "cancelled automatic review denies visibly without a prompter" {
         ),
     );
 
-    const outcome = try requestPermissionOutcome(
+    try std.testing.expectError(error.Cancelled, requestPermissionOutcome(
         input,
         arena_state.allocator(),
         .{
@@ -4565,14 +4563,7 @@ test "cancelled automatic review denies visibly without a prompter" {
         },
         .auto,
         &.{},
-    );
-
-    try std.testing.expectEqual(ToolPermissionDecision.permission_required, outcome.decision);
-    try std.testing.expectEqual(
-        types.ToolPermissionDenialReason.permission_required,
-        outcome.denial_reason.?,
-    );
-    try std.testing.expect(outcome.execution_authority == null);
+    ));
 }
 
 test "automatic review is skipped for deterministic command authorities" {
