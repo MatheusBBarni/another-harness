@@ -19,6 +19,7 @@ const max_lookup_scope_bytes: usize = 2048;
 const max_identifier_bytes: usize = 8 * 1024;
 const max_active_invocations: usize = 64;
 const shutdown_reconciliation_budget_ms: usize = 250;
+const rollback_null_lookup_scope = "legacy";
 pub const max_snapshot_bytes: usize = 256 * 1024;
 
 /// Completeness of the saved billing window rendered by `/cost`.
@@ -2003,7 +2004,7 @@ pub fn writeSnapshot(writer: *std.Io.Writer, snapshot: Snapshot) !void {
         if (pending.lookup_scope) |scope| {
             try std.json.Stringify.value(scope, .{}, writer);
         } else {
-            try std.json.Stringify.value("legacy", .{}, writer);
+            try std.json.Stringify.value(rollback_null_lookup_scope, .{}, writer);
         }
         try writer.writeAll(",\"team\":null");
         try writer.writeByte('}');
@@ -2661,8 +2662,7 @@ pub const RebindPendingConnectionError = Allocator.Error || error{
     InvalidConnectionIdentifier,
 };
 
-/// Restores the session-authoritative connection on rollback-readable pending
-/// records after their current rich extension becomes unavailable.
+/// Restores current-session routing data after its rich extension disappears.
 pub fn rebindPendingConnection(
     alloc: Allocator,
     snapshot: *Snapshot,
@@ -2682,15 +2682,22 @@ pub fn rebindPendingConnection(
         }
     }
     for (snapshot.pending, replacements) |*pending, *replacement| {
-        const value = replacement.* orelse continue;
-        alloc.free(pending.connection_id);
-        pending.connection_id = value;
-        replacement.* = null;
+        if (replacement.*) |value| {
+            alloc.free(pending.connection_id);
+            pending.connection_id = value;
+            replacement.* = null;
+        }
+        if (pending.lookup_scope) |scope| {
+            if (std.mem.eql(u8, scope, rollback_null_lookup_scope)) {
+                alloc.free(scope);
+                pending.lookup_scope = null;
+            }
+        }
     }
 }
 
 fn validateGenerationId(id: []const u8) !void {
-    if (!types.validGatewayGenerationId(id)) return error.InvalidGenerationId;
+    if (!types.validGenerationReferenceId(id)) return error.InvalidGenerationId;
 }
 
 fn validateModel(model: []const u8) !void {
@@ -4278,7 +4285,7 @@ test "rich usage snapshot preserves optional metrics and recovery state" {
         pending_sequence,
         6,
         .observed_generation,
-        "gen_01ARZ3NDEKTSV4RRFFQ69G5FAW",
+        "request-pending",
         "vercel",
         "https://ai-gateway.vercel.sh",
     );
@@ -4780,6 +4787,7 @@ test "terminal generation lookup stays on connection A after selecting B" {
     const alloc = std.testing.allocator;
     const FakeProvider = struct {
         calls: usize = 0,
+        saw_null_scope: bool = false,
 
         fn lookup(
             raw: ?*anyopaque,
@@ -4788,6 +4796,7 @@ test "terminal generation lookup stays on connection A after selecting B" {
         ) generation_usage.LookupError!generation_usage.LookupOutcome {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             self.calls += 1;
+            self.saw_null_scope = input.lookup_scope == null;
             const id = try allocator.dupe(u8, input.generation_id);
             errdefer allocator.free(id);
             return .{ .found = .{
@@ -4817,9 +4826,9 @@ test "terminal generation lookup stays on connection A after selecting B" {
     try observation.complete(
         alloc,
         .ok,
-        .{ .generation_id = "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+        .{ .generation_id = "request-42" },
         "connection-a",
-        "scope-a",
+        null,
     );
     var queued = try usage.snapshot(alloc);
     defer queued.deinit(alloc);
@@ -4839,6 +4848,7 @@ test "terminal generation lookup stays on connection A after selecting B" {
     reconcilePendingBlocking(&usage, alloc, &cancel, dispatch, 1);
     try std.testing.expectEqual(@as(usize, 1), provider_a.calls);
     try std.testing.expectEqual(@as(usize, 0), provider_b.calls);
+    try std.testing.expect(provider_a.saw_null_scope);
 
     var missing_usage = Usage.initFresh();
     defer missing_usage.deinit(alloc);
@@ -4846,9 +4856,9 @@ test "terminal generation lookup stays on connection A after selecting B" {
     try missing_observation.complete(
         alloc,
         .ok,
-        .{ .generation_id = "gen_01ARZ3NDEKTSV4RRFFQ69G5FAW" },
+        .{ .generation_id = "request-missing" },
         "connection-a",
-        "scope-a",
+        null,
     );
     var missing_dispatch = try generation_usage.Dispatch.init(alloc, &.{.{
         .id = "connection-b",

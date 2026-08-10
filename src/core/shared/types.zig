@@ -1073,6 +1073,19 @@ pub fn validGatewayGenerationId(id: []const u8) bool {
     return true;
 }
 
+pub fn validGenerationReferenceId(id: []const u8) bool {
+    if (id.len == 0 or id.len > 512) return false;
+    for (id) |byte| if (byte < 0x20 or byte == 0x7f) return false;
+    return true;
+}
+
+test "generation references remain provider-neutral and bounded" {
+    try std.testing.expect(validGenerationReferenceId("request-42"));
+    try std.testing.expect(!validGenerationReferenceId("bad\nreference"));
+    var oversized: [513]u8 = @splat('a');
+    try std.testing.expect(!validGenerationReferenceId(&oversized));
+}
+
 test "Gateway timestamps parse UTC fractions strictly" {
     try std.testing.expectEqual(
         @as(i64, 1_775_045_467_000),

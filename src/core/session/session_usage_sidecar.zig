@@ -217,6 +217,21 @@ pub fn restoreCaptured(
         return .invalid;
     }
 
+    if (!pendingConnectionsMatchAuthority(decoded.snapshot, pending_authority)) {
+        try recoverCanonicalFallback(
+            alloc,
+            durable,
+            continuity_at_ms,
+            pending_authority,
+        );
+        debug_trace.logf(
+            "session",
+            "event=usage_sidecar_mismatched reason=pending_connection_changed",
+            .{},
+        );
+        return .mismatched;
+    }
+
     if (!session_usage.billingProjectionEql(
         durable.*,
         decoded.snapshot,
@@ -249,6 +264,20 @@ pub fn restoreCaptured(
     alloc.free(decoded.session_id);
     decoded_owned = false;
     return .restored;
+}
+
+fn pendingConnectionsMatchAuthority(
+    snapshot: session_usage.Snapshot,
+    authority: PendingConnectionAuthority,
+) bool {
+    const connection_id = switch (authority) {
+        .historical_vercel => return true,
+        .current => |value| value,
+    };
+    for (snapshot.pending) |pending| {
+        if (!std.mem.eql(u8, pending.connection_id, connection_id)) return false;
+    }
+    return true;
 }
 
 fn mergeRichExtensions(
@@ -564,7 +593,7 @@ test "missing and corrupt sidecars retain current pending connection with one fi
         .observed_generation,
         "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
         "connection-a",
-        "scope-a",
+        null,
     );
     var rich = try usage.snapshot(alloc);
     defer rich.deinit(alloc);
@@ -584,6 +613,7 @@ test "missing and corrupt sidecars retain current pending connection with one fi
         ),
     );
     try std.testing.expectEqualStrings("connection-a", missing.pending[0].connection_id);
+    try std.testing.expect(missing.pending[0].lookup_scope == null);
     try std.testing.expectEqual(@as(usize, 1), missing.incidents.len);
     try std.testing.expectEqual(@as(i64, 30), missing.incidents[0].occurred_at_ms);
 
@@ -593,6 +623,7 @@ test "missing and corrupt sidecars retain current pending connection with one fi
         calls_a: usize = 0,
         calls_vercel: usize = 0,
         saw_a_credential: bool = false,
+        saw_null_scope: bool = false,
 
         fn resolve(
             raw: ?*anyopaque,
@@ -618,6 +649,7 @@ test "missing and corrupt sidecars retain current pending connection with one fi
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             self.calls_a += 1;
             self.saw_a_credential = std.mem.eql(u8, "credential-a", input.credential);
+            self.saw_null_scope = input.lookup_scope == null;
             return .preserve_pending;
         }
 
@@ -663,6 +695,7 @@ test "missing and corrupt sidecars retain current pending connection with one fi
     try std.testing.expectEqual(@as(usize, 1), probe.calls_a);
     try std.testing.expectEqual(@as(usize, 0), probe.calls_vercel);
     try std.testing.expect(probe.saw_a_credential);
+    try std.testing.expect(probe.saw_null_scope);
 
     try std.testing.expectEqual(
         RestoreOutcome.missing,
@@ -698,8 +731,50 @@ test "missing and corrupt sidecars retain current pending connection with one fi
         ),
     );
     try std.testing.expectEqualStrings("connection-a", corrupt.pending[0].connection_id);
+    try std.testing.expect(corrupt.pending[0].lookup_scope == null);
     try std.testing.expectEqual(@as(usize, 1), corrupt.incidents.len);
     try std.testing.expectEqual(@as(i64, 31), corrupt.incidents[0].occurred_at_ms);
+
+    const valid_sidecar = try encode(alloc, "session-one", rich);
+    defer alloc.free(valid_sidecar);
+    const wrong_connection = try std.mem.replaceOwned(
+        u8,
+        alloc,
+        valid_sidecar,
+        "\"connection_id\":\"connection-a\"",
+        "\"connection_id\":\"vercel\"",
+    );
+    defer alloc.free(wrong_connection);
+    try writeEncoded(alloc, &verified, wrong_connection);
+    var mismatched = try legacyCopyForTest(alloc, rich);
+    defer mismatched.deinit(alloc);
+    try std.testing.expectEqualStrings("vercel", mismatched.pending[0].connection_id);
+    try std.testing.expectEqual(
+        RestoreOutcome.mismatched,
+        try restoreIfMatching(
+            alloc,
+            &verified,
+            "session-one",
+            32,
+            .{ .current = "connection-a" },
+            &mismatched,
+        ),
+    );
+    try std.testing.expectEqualStrings("connection-a", mismatched.pending[0].connection_id);
+    try std.testing.expect(mismatched.pending[0].lookup_scope == null);
+    probe = .{};
+    var mismatched_outcome = try dispatch.lookup(
+        alloc,
+        mismatched.pending[0].connection_id,
+        mismatched.pending[0].id,
+        mismatched.pending[0].lookup_scope,
+        &cancel,
+    );
+    defer mismatched_outcome.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), probe.resolved_a);
+    try std.testing.expectEqual(@as(usize, 0), probe.resolved_vercel);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls_a);
+    try std.testing.expectEqual(@as(usize, 0), probe.calls_vercel);
 }
 
 fn legacyCopyForTest(

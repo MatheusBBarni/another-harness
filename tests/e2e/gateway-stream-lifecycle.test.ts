@@ -749,7 +749,13 @@ describe("gateway stream lifecycle", () => {
         generationA,
         generationMissing,
       ]);
-      writeFileSync(sidecarPath, "{bad");
+      const currentSidecar = readFileSync(sidecarPath, "utf8");
+      const mismatchedSidecar = currentSidecar.replace(
+        `"connection_id":"connection-a"`,
+        `"connection_id":"vercel"`,
+      );
+      expect(mismatchedSidecar).not.toBe(currentSidecar);
+      writeFileSync(sidecarPath, mismatchedSidecar);
       const recovered = await runFx(
         ["ask", "--json", "--resume-id", sessionId, "Recover corrupt usage state."],
         { cwd: root.workspace, env, timeoutMs: 15_000 },

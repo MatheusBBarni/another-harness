@@ -232,7 +232,7 @@ pub const GenerationReference = struct {
     lookup_scope: ?[]const u8 = null,
 
     pub fn validate(self: GenerationReference) error{InvalidGenerationReference}!void {
-        try validatePart(self.id, false);
+        if (!types.validGenerationReferenceId(self.id)) return error.InvalidGenerationReference;
         if (self.lookup_scope) |scope| try validatePart(scope, true);
     }
 
