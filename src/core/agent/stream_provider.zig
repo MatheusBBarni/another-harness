@@ -233,12 +233,9 @@ pub const GenerationReference = struct {
 
     pub fn validate(self: GenerationReference) error{InvalidGenerationReference}!void {
         if (!types.validGenerationReferenceId(self.id)) return error.InvalidGenerationReference;
-        if (self.lookup_scope) |scope| try validatePart(scope, true);
-    }
-
-    fn validatePart(value: []const u8, allow_empty: bool) error{InvalidGenerationReference}!void {
-        if ((!allow_empty and value.len == 0) or value.len > max_bytes) return error.InvalidGenerationReference;
-        for (value) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidGenerationReference;
+        if (self.lookup_scope) |scope| {
+            if (!types.validGenerationLookupScope(scope)) return error.InvalidGenerationReference;
+        }
     }
 };
 

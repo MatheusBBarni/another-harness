@@ -19,7 +19,6 @@ const max_lookup_scope_bytes: usize = 2048;
 const max_identifier_bytes: usize = 8 * 1024;
 const max_active_invocations: usize = 64;
 const shutdown_reconciliation_budget_ms: usize = 250;
-const rollback_null_lookup_scope = "legacy";
 pub const max_snapshot_bytes: usize = 256 * 1024;
 
 /// Completeness of the saved billing window rendered by `/cost`.
@@ -2004,7 +2003,11 @@ pub fn writeSnapshot(writer: *std.Io.Writer, snapshot: Snapshot) !void {
         if (pending.lookup_scope) |scope| {
             try std.json.Stringify.value(scope, .{}, writer);
         } else {
-            try std.json.Stringify.value(rollback_null_lookup_scope, .{}, writer);
+            try std.json.Stringify.value(
+                types.null_generation_lookup_scope_sentinel,
+                .{},
+                writer,
+            );
         }
         try writer.writeAll(",\"team\":null");
         try writer.writeByte('}');
@@ -2255,7 +2258,11 @@ pub fn parseSnapshotValue(alloc: Allocator, value: std.json.Value) !Snapshot {
         errdefer alloc.free(connection_id);
         const lookup_scope = switch (lookup_scope_value) {
             .null => null,
-            .string => |text| try alloc.dupe(u8, text),
+            .string => |text| if (legacy_pending and std.mem.eql(
+                u8,
+                text,
+                types.null_generation_lookup_scope_sentinel,
+            )) null else try alloc.dupe(u8, text),
             else => unreachable,
         };
         errdefer if (lookup_scope) |text| alloc.free(text);
@@ -2687,12 +2694,6 @@ pub fn rebindPendingConnection(
             pending.connection_id = value;
             replacement.* = null;
         }
-        if (pending.lookup_scope) |scope| {
-            if (std.mem.eql(u8, scope, rollback_null_lookup_scope)) {
-                alloc.free(scope);
-                pending.lookup_scope = null;
-            }
-        }
     }
 }
 
@@ -2721,7 +2722,9 @@ fn validateConnectionId(connection_id: []const u8) !void {
 }
 
 fn validateLookupScope(scope: []const u8) !void {
-    if (scope.len == 0 or scope.len > max_lookup_scope_bytes) {
+    if (scope.len == 0 or scope.len > max_lookup_scope_bytes or
+        std.mem.eql(u8, scope, types.null_generation_lookup_scope_sentinel))
+    {
         return error.InvalidGenerationLookupScope;
     }
     for (scope) |char| {
@@ -4758,6 +4761,47 @@ test "pending generation routing inputs remain bounded" {
         error.InvalidGenerationLookupScope,
         validateLookupScope(&oversized),
     );
+}
+
+test "pending connection rebind is allocation atomic" {
+    const alloc = std.testing.allocator;
+    var usage = Usage.initFresh();
+    defer usage.deinit(alloc);
+    for ([_][]const u8{ "request-a", "request-b" }) |id| {
+        const sequence = try usage.reserveInvocation();
+        try usage.finishObservedInvocation(
+            alloc,
+            sequence,
+            1,
+            .observed_generation,
+            id,
+            "vercel",
+            null,
+        );
+    }
+
+    var probe_snapshot = try usage.snapshot(alloc);
+    var probe = std.testing.FailingAllocator.init(alloc, .{});
+    try rebindPendingConnection(probe.allocator(), &probe_snapshot, "connection-a");
+    const allocation_count = probe.alloc_index;
+    probe_snapshot.deinit(alloc);
+
+    for (0..allocation_count) |fail_index| {
+        var snapshot = try usage.snapshot(alloc);
+        defer snapshot.deinit(alloc);
+        var failing = std.testing.FailingAllocator.init(
+            alloc,
+            .{ .fail_index = fail_index },
+        );
+        try std.testing.expectError(
+            error.OutOfMemory,
+            rebindPendingConnection(failing.allocator(), &snapshot, "connection-a"),
+        );
+        try std.testing.expect(failing.has_induced_failure);
+        for (snapshot.pending) |pending| {
+            try std.testing.expectEqualStrings("vercel", pending.connection_id);
+        }
+    }
 }
 
 test "reconciliation retry delay observes cancellation promptly" {

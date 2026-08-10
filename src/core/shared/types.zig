@@ -1079,11 +1079,26 @@ pub fn validGenerationReferenceId(id: []const u8) bool {
     return true;
 }
 
+pub const null_generation_lookup_scope_sentinel = "__fx_null_generation_lookup_scope__";
+
+pub fn validGenerationLookupScope(scope: []const u8) bool {
+    if (scope.len == 0 or scope.len > 512 or
+        std.mem.eql(u8, scope, null_generation_lookup_scope_sentinel))
+    {
+        return false;
+    }
+    for (scope) |byte| if (byte < 0x20 or byte == 0x7f) return false;
+    return true;
+}
+
 test "generation references remain provider-neutral and bounded" {
     try std.testing.expect(validGenerationReferenceId("request-42"));
     try std.testing.expect(!validGenerationReferenceId("bad\nreference"));
     var oversized: [513]u8 = @splat('a');
     try std.testing.expect(!validGenerationReferenceId(&oversized));
+    try std.testing.expect(validGenerationLookupScope("legacy"));
+    try std.testing.expect(!validGenerationLookupScope(""));
+    try std.testing.expect(!validGenerationLookupScope(null_generation_lookup_scope_sentinel));
 }
 
 test "Gateway timestamps parse UTC fractions strictly" {

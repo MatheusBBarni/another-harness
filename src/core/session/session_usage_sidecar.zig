@@ -598,6 +598,24 @@ test "missing and corrupt sidecars retain current pending connection with one fi
     var rich = try usage.snapshot(alloc);
     defer rich.deinit(alloc);
 
+    try write(alloc, &verified, "session-one", rich);
+    var intact = try legacyCopyForTest(alloc, rich);
+    defer intact.deinit(alloc);
+    try std.testing.expectEqual(
+        RestoreOutcome.restored,
+        try restoreIfMatching(
+            alloc,
+            &verified,
+            "session-one",
+            29,
+            .{ .current = "connection-a" },
+            &intact,
+        ),
+    );
+    try std.testing.expect(intact.pending[0].lookup_scope == null);
+    try std.testing.expectEqual(@as(usize, 0), intact.incidents.len);
+    try verified.dir.deleteFile(io_mod.getIo(), sidecar_file);
+
     var missing = try legacyCopyForTest(alloc, rich);
     defer missing.deinit(alloc);
     try std.testing.expectEqualStrings("vercel", missing.pending[0].connection_id);
@@ -624,6 +642,7 @@ test "missing and corrupt sidecars retain current pending connection with one fi
         calls_vercel: usize = 0,
         saw_a_credential: bool = false,
         saw_null_scope: bool = false,
+        saw_legacy_scope: bool = false,
 
         fn resolve(
             raw: ?*anyopaque,
@@ -650,6 +669,10 @@ test "missing and corrupt sidecars retain current pending connection with one fi
             self.calls_a += 1;
             self.saw_a_credential = std.mem.eql(u8, "credential-a", input.credential);
             self.saw_null_scope = input.lookup_scope == null;
+            self.saw_legacy_scope = if (input.lookup_scope) |scope|
+                std.mem.eql(u8, scope, "legacy")
+            else
+                false;
             return .preserve_pending;
         }
 
@@ -791,6 +814,78 @@ test "missing and corrupt sidecars retain current pending connection with one fi
         ),
     );
     try std.testing.expectEqualStrings("vercel", historical.pending[0].connection_id);
+
+    var scoped_usage = session_usage.Usage.initFresh();
+    defer scoped_usage.deinit(alloc);
+    const scoped_sequence = try scoped_usage.reserveInvocation();
+    try scoped_usage.finishObservedInvocation(
+        alloc,
+        scoped_sequence,
+        1,
+        .observed_generation,
+        "request-legacy",
+        "connection-a",
+        "legacy",
+    );
+    var scoped_rich = try scoped_usage.snapshot(alloc);
+    defer scoped_rich.deinit(alloc);
+    try verified.dir.deleteFile(io_mod.getIo(), sidecar_file);
+    var scoped_missing = try legacyCopyForTest(alloc, scoped_rich);
+    defer scoped_missing.deinit(alloc);
+    probe = .{};
+    try std.testing.expectEqual(
+        RestoreOutcome.missing,
+        try restoreIfMatching(
+            alloc,
+            &verified,
+            "session-two",
+            34,
+            .{ .current = "connection-a" },
+            &scoped_missing,
+        ),
+    );
+    try std.testing.expectEqualStrings("connection-a", scoped_missing.pending[0].connection_id);
+    try std.testing.expectEqualStrings("legacy", scoped_missing.pending[0].lookup_scope.?);
+    try std.testing.expectEqual(@as(usize, 0), probe.resolved_a);
+    try std.testing.expectEqual(@as(usize, 0), probe.resolved_vercel);
+    try std.testing.expectEqual(@as(usize, 0), probe.calls_a);
+    try std.testing.expectEqual(@as(usize, 0), probe.calls_vercel);
+
+    try io_mod.durableReplaceVerified(alloc, &verified, sidecar_file, "{bad");
+    var scoped_corrupt = try legacyCopyForTest(alloc, scoped_rich);
+    defer scoped_corrupt.deinit(alloc);
+    try std.testing.expectEqual(
+        RestoreOutcome.invalid,
+        try restoreIfMatching(
+            alloc,
+            &verified,
+            "session-two",
+            35,
+            .{ .current = "connection-a" },
+            &scoped_corrupt,
+        ),
+    );
+    try std.testing.expectEqualStrings("connection-a", scoped_corrupt.pending[0].connection_id);
+    try std.testing.expectEqualStrings("legacy", scoped_corrupt.pending[0].lookup_scope.?);
+    try std.testing.expectEqual(@as(usize, 0), probe.resolved_a);
+    try std.testing.expectEqual(@as(usize, 0), probe.resolved_vercel);
+    try std.testing.expectEqual(@as(usize, 0), probe.calls_a);
+    try std.testing.expectEqual(@as(usize, 0), probe.calls_vercel);
+    probe = .{};
+    var scoped_outcome = try dispatch.lookup(
+        alloc,
+        scoped_corrupt.pending[0].connection_id,
+        scoped_corrupt.pending[0].id,
+        scoped_corrupt.pending[0].lookup_scope,
+        &cancel,
+    );
+    defer scoped_outcome.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), probe.resolved_a);
+    try std.testing.expectEqual(@as(usize, 0), probe.resolved_vercel);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls_a);
+    try std.testing.expectEqual(@as(usize, 0), probe.calls_vercel);
+    try std.testing.expect(probe.saw_a_credential);
+    try std.testing.expect(probe.saw_legacy_scope);
 }
 
 fn legacyCopyForTest(

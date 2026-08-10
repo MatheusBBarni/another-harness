@@ -624,13 +624,13 @@ describe("gateway stream lifecycle", () => {
     const gatewayA = startDynamicFakeGateway(() => {
       completion += 1;
       if (completion === 1) return deferred(generationA, "queued on A");
-      if (completion === 3) return deferred(generationMissing, "missing A queued");
+      if (completion === 4) return deferred(generationMissing, "missing A queued");
       return fakeGatewayFinalText("resumed on A");
     }, {
       models: [{ id: modelA, type: "language", tags: ["tool-use"] }],
       generationResponse(id, request) {
         generationCredentials.push(request.headers.get("authorization"));
-        if (id === generationA && generationCredentials.length === 2) {
+        if (id === generationA && generationCredentials.length === 3) {
           return Response.json({
             data: {
               id,
@@ -719,20 +719,38 @@ describe("gateway stream lifecycle", () => {
       expect(firstSidecar).toContain(`"connection_id":"connection-a"`);
       expect(firstSidecar).not.toContain("credential-a");
       expect(gatewayA.generationRequests).toEqual([generationA]);
-      rmSync(sidecarPath);
-      expect(existsSync(sidecarPath)).toBe(false);
 
       writeFileSync(
         join(root.home, ".fx", "settings.json"),
         JSON.stringify(settings("vercel")),
       );
+      const intact = await runFx(
+        ["ask", "--json", "--resume-id", sessionId, "Keep A with intact usage state."],
+        { cwd: root.workspace, env, timeoutMs: 15_000 },
+      );
+      expect(intact.code).toBe(0);
+      expect(gatewayA.generationRequests).toEqual([generationA, generationA]);
+      expect(generationCredentials).toEqual([
+        "Bearer credential-a",
+        "Bearer credential-a",
+      ]);
+      expect(gatewayB.requests).toHaveLength(0);
+      expect(gatewayB.generationRequests).toHaveLength(0);
+
+      rmSync(sidecarPath);
+      expect(existsSync(sidecarPath)).toBe(false);
       const resumed = await runFx(
         ["ask", "--json", "--resume-id", sessionId, "Settle A after selecting B."],
         { cwd: root.workspace, env, timeoutMs: 15_000 },
       );
       expect(resumed.code).toBe(0);
-      expect(gatewayA.generationRequests).toEqual([generationA, generationA]);
+      expect(gatewayA.generationRequests).toEqual([
+        generationA,
+        generationA,
+        generationA,
+      ]);
       expect(generationCredentials).toEqual([
+        "Bearer credential-a",
         "Bearer credential-a",
         "Bearer credential-a",
       ]);
@@ -745,6 +763,7 @@ describe("gateway stream lifecycle", () => {
       );
       expect(missing.code).toBe(0);
       expect(gatewayA.generationRequests).toEqual([
+        generationA,
         generationA,
         generationA,
         generationMissing,
@@ -764,10 +783,12 @@ describe("gateway stream lifecycle", () => {
       expect(gatewayA.generationRequests).toEqual([
         generationA,
         generationA,
+        generationA,
         generationMissing,
         generationMissing,
       ]);
       expect(generationCredentials).toEqual([
+        "Bearer credential-a",
         "Bearer credential-a",
         "Bearer credential-a",
         "Bearer credential-a",
