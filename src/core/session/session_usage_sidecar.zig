@@ -271,7 +271,7 @@ fn pendingConnectionsMatchAuthority(
     authority: PendingConnectionAuthority,
 ) bool {
     const connection_id = switch (authority) {
-        .historical_vercel => return true,
+        .historical_vercel => "vercel",
         .current => |value| value,
     };
     for (snapshot.pending) |pending| {
@@ -775,6 +775,22 @@ test "missing and corrupt sidecars retain current pending connection with one fi
     try std.testing.expectEqual(@as(usize, 0), probe.resolved_vercel);
     try std.testing.expectEqual(@as(usize, 1), probe.calls_a);
     try std.testing.expectEqual(@as(usize, 0), probe.calls_vercel);
+
+    try writeEncoded(alloc, &verified, valid_sidecar);
+    var historical = try legacyCopyForTest(alloc, rich);
+    defer historical.deinit(alloc);
+    try std.testing.expectEqual(
+        RestoreOutcome.mismatched,
+        try restoreIfMatching(
+            alloc,
+            &verified,
+            "session-one",
+            33,
+            .historical_vercel,
+            &historical,
+        ),
+    );
+    try std.testing.expectEqualStrings("vercel", historical.pending[0].connection_id);
 }
 
 fn legacyCopyForTest(
