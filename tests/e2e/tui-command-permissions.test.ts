@@ -3543,7 +3543,11 @@ describe("effect-aware command permissions", () => {
         timeoutMs: TIMEOUT,
       });
 
-      expect(result.code).toBe(0);
+      if (result.code !== 0) {
+        throw new Error(
+          `child recovery process failed code=${result.code} signal=${result.signal} timed_out=${result.timedOut}\n${result.stderr}`,
+        );
+      }
       expect(result.stdout).toContain(
         "parent resumed the paused child recovery",
       );
