@@ -370,12 +370,14 @@ pub fn streamModelRequest(
             usage_allocator,
             legacy.status,
             completion,
+            route.connection_id,
             legacy.generation_origin,
-            tenant,
         );
     }
-    if (legacy.reconcile_generation_usage) {
-        if (usage) |ledger| ledger.startReconciliation(usage_allocator, credential);
+    if (comptime @import("builtin").os.tag != .wasi) {
+        if (legacy.reconcile_generation_usage) {
+            if (usage) |ledger| ledger.startReconciliation(usage_allocator);
+        }
     }
     if (completion.billing) |billing| {
         alloc.free(@constCast(billing.model));
@@ -472,13 +474,13 @@ pub fn streamGatewayCompletion(
         usage_allocator,
         result.status,
         result.completion,
+        "vercel",
         result.generation_origin,
-        team,
     );
     if (comptime @import("builtin").os.tag != .wasi) {
         if (result.reconcile_generation_usage) {
             if (usage) |ledger| {
-                ledger.startReconciliation(usage_allocator, api_key);
+                ledger.startReconciliation(usage_allocator);
             }
         }
     }

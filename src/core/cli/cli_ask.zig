@@ -49,6 +49,7 @@ const sandbox = @import("../permissions/sandbox.zig");
 const session_runtime = @import("../session/session.zig");
 const session_codec = @import("../session/session_codec.zig");
 const session_usage = @import("../session/session_usage.zig");
+const generation_usage_provider = @import("../session/generation_usage_provider.zig");
 const usage_report = @import("../session/usage_report.zig");
 const session_store = @import("../session/session_store.zig");
 const skill_contract = @import("../skills/skill_contract.zig");
@@ -523,6 +524,8 @@ const AskContext = struct {
     session_write_mutex: std.Io.Mutex = .init,
     requested_resume: ?ResumeTarget = null,
     connection_id: []const u8 = session_codec.legacy_connection_id,
+    connection_adapter_kind: []const u8 = "",
+    connection_credential_ref: []const u8 = "",
     seed_model: []const u8 = "",
     command_timeout_ms: ?usize = null,
     session: SessionRuntime,
@@ -568,10 +571,7 @@ const AskContext = struct {
             .model = cfg.default_model,
             .seed_model = cfg.default_model,
             .mode_id = cfg.mode_registry.default_mode_id,
-            .session = session_runtime.SessionRuntime.init(
-                cfg.max_history_turns,
-                cfg.gateway_provider.generation_usage,
-            ),
+            .session = session_runtime.SessionRuntime.init(cfg.max_history_turns),
             .web_search_runtime = web_search_runtime.Runtime.init(.{
                 .provider = cfg.gateway_provider.web_search,
             }),
@@ -728,6 +728,43 @@ const AskContext = struct {
             },
             .outcome_allocator = self.alloc,
         };
+    }
+
+    fn resolveGenerationUsageCredential(
+        raw: ?*anyopaque,
+        alloc: Allocator,
+        _: []const u8,
+    ) generation_usage_provider.ResolveCredentialError!generation_usage_provider.ResolvedCredential {
+        const self: *AskContext = @ptrCast(@alignCast(raw.?));
+        if (self.api_key.len == 0) return error.Unavailable;
+        const token = try alloc.dupe(u8, self.api_key);
+        errdefer alloc.free(token);
+        return .{
+            .token = token,
+            .tenant = if (self.gateway_team) |team| try alloc.dupe(u8, team) else null,
+        };
+    }
+
+    fn prepareGenerationUsageDispatch(
+        raw: ?*anyopaque,
+        alloc: Allocator,
+    ) generation_usage_provider.PrepareError!generation_usage_provider.Dispatch {
+        const self: *AskContext = @ptrCast(@alignCast(raw.?));
+        if (self.connection_id.len == 0 or self.connection_credential_ref.len == 0) {
+            return error.Unavailable;
+        }
+        const adapter = self.cfg.gateway_provider.provider_adapter;
+        return generation_usage_provider.Dispatch.init(alloc, &.{.{
+            .id = self.connection_id,
+            .credential_ref = self.connection_credential_ref,
+            .provider = if (std.mem.eql(u8, self.connection_adapter_kind, adapter.kind))
+                adapter.generation_usage
+            else
+                null,
+        }}, .{
+            .context = self,
+            .resolve_fn = resolveGenerationUsageCredential,
+        });
     }
 
     fn cancelFlag(self: *AskContext) *std.atomic.Value(bool) {
@@ -919,6 +956,7 @@ const AskContext = struct {
 
     fn toolContext(self: *AskContext) tool_runtime.Context {
         self.web_search_runtime.configure(.{
+            .connection_id = self.connection_id,
             .api_key = self.api_key,
             .gateway_team = self.gateway_team,
             .worker_model = self.model,
@@ -1517,10 +1555,18 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
         break :credential owned_route_credential.?;
     };
     const api_key = credential.token;
+    ctx.connection_id = profile.id;
+    ctx.connection_adapter_kind = profile.adapter_id;
+    ctx.connection_credential_ref = profile.credential_ref;
     ctx.api_key = api_key;
     ctx.gateway_team = credential.gatewayTeam();
     ctx.credential_source = credential.source;
     ctx.model_catalog_access = credentials.catalogAccessForCredential(credential.source, api_key, credential.gatewayTeam());
+    ctx.session.usage.configureReconciliationSource(.{
+        .context = &ctx,
+        .prepare_fn = AskContext.prepareGenerationUsageDispatch,
+    });
+    ctx.session.usage.startReconciliation(alloc);
 
     const restored_image_catalog = try ctx.session.snapshotImageCatalog(alloc, &.{});
     defer types.freeImageAttachmentSlice(alloc, restored_image_catalog);
@@ -7307,8 +7353,8 @@ test "current ask state releases partial snapshots on allocation failure" {
         1,
         .observed_generation,
         "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "vercel",
         "https://ai-gateway.vercel.sh",
-        null,
     );
     const writable = &ctx.writable.?;
 
@@ -7603,8 +7649,8 @@ test "saved ask settles profile publication before persistence teardown" {
         1,
         .observed_generation,
         generation_id,
+        "vercel",
         "https://ai-gateway.vercel.sh",
-        null,
     );
     try ctx.session.usage.applyGeneration(alloc, .{
         .id = generation_id,

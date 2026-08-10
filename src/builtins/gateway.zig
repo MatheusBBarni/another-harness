@@ -18,6 +18,7 @@ const gateway_generation_usage = @import("../gateway/generation_usage.zig");
 const connection_registry = @import("../core/gateway/connection_registry.zig");
 const route_snapshot_contract = @import("../core/gateway/route_snapshot.zig");
 const gateway_provider = @import("../core/gateway/gateway_provider.zig");
+const account_usage_provider = @import("../core/gateway/account_usage_provider.zig");
 const model_capabilities = @import("../core/config/model_capabilities.zig");
 const model_catalog = @import("../core/gateway/model_catalog.zig");
 const model_descriptors = @import("gateway/model_descriptors.zig");
@@ -124,7 +125,7 @@ pub const cli_model_catalog_provider = gateway_provider.CliModelCatalogProvider{
     .fetch_fn = fetchCliModelCatalog,
 };
 
-pub const credits_provider = gateway_provider.CreditsProvider{
+pub const account_usage = account_usage_provider.Provider{
     .fetch_fn = fetchCredits,
 };
 
@@ -146,6 +147,8 @@ pub const agent_stream_provider = agent_stream_provider_contract.Provider{
 
 pub const provider_adapter = agent_stream_provider_contract.ProviderAdapter{
     .kind = connection_seed.adapter_id,
+    .account_usage = account_usage,
+    .generation_usage = generation_usage_provider,
     .stream_fn = streamVercelAdapter,
 };
 
@@ -156,8 +159,6 @@ pub const provider = gateway_provider.Provider{
     .oauth_transport = oauth_transport_provider,
     .chat_url = chat_url_provider,
     .cli_model_catalog = cli_model_catalog_provider,
-    .credits = credits_provider,
-    .generation_usage = generation_usage_provider,
     .web_search = default_web_search_provider,
     .model_catalog = model_catalog_provider,
 };
@@ -869,7 +870,7 @@ fn streamAgentCompletion(
 fn fetchCredits(
     _: ?*anyopaque,
     alloc: Allocator,
-    input: gateway_provider.CreditsLookupInput,
+    input: account_usage_provider.Input,
 ) output_contracts.CreditsSnapshot {
     return fetchCreditsWithFetch(
         alloc,
@@ -1091,6 +1092,7 @@ fn executeWebSearchProvider(
     progress_ctx: ?*anyopaque,
 ) !Response {
     return executeGatewayWorker(alloc, .{
+        .connection_id = inputs.connection_id,
         .api_key = inputs.api_key,
         .team = inputs.gateway_team,
         .model = inputs.worker_model,
@@ -1168,6 +1170,7 @@ pub const StreamFn = *const fn (
 var default_stream_ctx: u8 = 0;
 
 pub const GatewayWorkerConfig = struct {
+    connection_id: []const u8,
     api_key: []const u8,
     team: ?[]const u8 = null,
     model: []const u8,
@@ -1247,12 +1250,12 @@ pub fn executeGatewayWorker(
         config.usage_allocator,
         stream.status,
         stream.completion,
+        config.connection_id,
         gateway_client.generationBaseUrl(),
-        config.team,
     );
     if (!builtin.is_test) {
         if (config.usage) |ledger| {
-            ledger.startReconciliation(config.usage_allocator, config.api_key);
+            ledger.startReconciliation(config.usage_allocator);
         }
     }
     if (stream.status != .ok) return error.GatewayRequestFailed;
@@ -1682,6 +1685,7 @@ fn expectGatewayWorkerAdapterExecutes(backend: web_search_contract.SearchBackend
     var usage = session_usage.Usage.initFresh();
     defer usage.deinit(alloc);
     var response = try executeGatewayWorker(alloc, .{
+        .connection_id = "vercel",
         .api_key = "key",
         .team = "team_123",
         .model = "provider/model",
@@ -1876,6 +1880,7 @@ test "cancelled gateway worker performs zero stream requests" {
     var fake = FakeStream{};
 
     try std.testing.expectError(error.Cancelled, executeGatewayWorker(std.testing.allocator, .{
+        .connection_id = "vercel",
         .api_key = "key",
         .model = "provider/model",
         .retry_count = 1,
@@ -1985,6 +1990,7 @@ test "pre-send web search failure stays unbilled" {
     defer usage.deinit(alloc);
 
     try std.testing.expectError(error.AccessDenied, executeGatewayWorker(alloc, .{
+        .connection_id = "vercel",
         .api_key = "key",
         .model = "provider/model",
         .retry_count = 1,
@@ -2014,6 +2020,7 @@ test "possibly sent web search failure marks billing incomplete" {
     defer usage.deinit(alloc);
 
     try std.testing.expectError(error.ConnectionResetByPeer, executeGatewayWorker(alloc, .{
+        .connection_id = "vercel",
         .api_key = "key",
         .model = "provider/model",
         .retry_count = 1,

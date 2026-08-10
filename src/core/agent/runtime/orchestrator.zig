@@ -1787,18 +1787,14 @@ fn refreshGatewayCredentialForJob(
         );
         return false;
     } orelse return false;
-    const previous_api_key = route_credential.credential;
-    if (comptime !host_target.is_wasm) {
-        if (deps.usage) |usage| {
-            usage.refreshReconciliationCredential(
-                deps.usage_allocator,
-                previous_api_key,
-                refreshed,
-            );
-        }
-    }
     secret.zeroAndFree(alloc, route_credential.credential);
     route_credential.credential = refreshed;
+    if (comptime !host_target.is_wasm) {
+        if (deps.usage) |usage| {
+            usage.cancelReconciliation();
+            usage.startReconciliation(deps.usage_allocator);
+        }
+    }
     debug_trace.eventf(
         "gateway",
         "credential_refreshed",

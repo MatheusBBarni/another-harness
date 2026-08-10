@@ -34,6 +34,7 @@ pub const Config = struct {
     provider: ?web_search_provider.Provider = null,
     clock: Clock = .{},
     policy: ?web_search_policy.WebSearchPolicy = null,
+    connection_id: []const u8 = "vercel",
     api_key: []const u8 = "",
     gateway_team: ?[]const u8 = null,
     worker_model: []const u8 = "",
@@ -46,6 +47,7 @@ pub const Config = struct {
 pub const Inputs = web_search_provider.Inputs;
 
 const OwnedInputs = struct {
+    connection_id: []u8,
     api_key: []u8,
     gateway_team: ?[]u8 = null,
     worker_model: []u8,
@@ -56,6 +58,7 @@ const OwnedInputs = struct {
     usage_allocator: Allocator,
 
     fn deinit(self: *OwnedInputs, alloc: Allocator) void {
+        alloc.free(self.connection_id);
         alloc.free(self.api_key);
         if (self.gateway_team) |team| alloc.free(team);
         alloc.free(self.worker_model);
@@ -65,6 +68,7 @@ const OwnedInputs = struct {
 
     fn borrowed(self: *const OwnedInputs) Inputs {
         return .{
+            .connection_id = self.connection_id,
             .api_key = self.api_key,
             .gateway_team = self.gateway_team,
             .worker_model = self.worker_model,
@@ -82,6 +86,7 @@ pub const Runtime = struct {
     provider: ?web_search_provider.Provider,
     clock: Clock,
     policy: web_search_policy.WebSearchPolicy,
+    connection_id: []const u8,
     api_key: []const u8,
     gateway_team: ?[]const u8 = null,
     worker_model: []const u8,
@@ -97,6 +102,7 @@ pub const Runtime = struct {
             .provider = config.provider,
             .clock = config.clock,
             .policy = config.policy orelse if (config.provider) |provider| provider.policy else .{},
+            .connection_id = config.connection_id,
             .api_key = config.api_key,
             .gateway_team = config.gateway_team,
             .worker_model = config.worker_model,
@@ -112,6 +118,7 @@ pub const Runtime = struct {
     pub fn configure(self: *Runtime, inputs: Inputs) void {
         self.config_mutex.lockUncancelable(io_mod.getIo());
         defer self.config_mutex.unlock(io_mod.getIo());
+        self.connection_id = inputs.connection_id;
         self.api_key = inputs.api_key;
         self.gateway_team = inputs.gateway_team;
         self.worker_model = inputs.worker_model;
@@ -216,6 +223,8 @@ pub const Runtime = struct {
     fn inputsSnapshot(self: *Runtime, alloc: Allocator) !OwnedInputs {
         self.config_mutex.lockUncancelable(io_mod.getIo());
         defer self.config_mutex.unlock(io_mod.getIo());
+        const connection_id = try alloc.dupe(u8, self.connection_id);
+        errdefer alloc.free(connection_id);
         const api_key = try alloc.dupe(u8, self.api_key);
         errdefer alloc.free(api_key);
         const gateway_team = if (self.gateway_team) |team| try alloc.dupe(u8, team) else null;
@@ -224,6 +233,7 @@ pub const Runtime = struct {
         errdefer alloc.free(worker_model);
         const gateway_chat_url = try alloc.dupe(u8, self.gateway_chat_url);
         return .{
+            .connection_id = connection_id,
             .api_key = api_key,
             .gateway_team = gateway_team,
             .worker_model = worker_model,

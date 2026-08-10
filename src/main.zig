@@ -48,6 +48,7 @@ const builtin_context = @import("builtins/context.zig");
 const builtin_devbox = @import("builtins/devbox.zig");
 const builtin_gateway = @import("builtins/gateway.zig");
 const gateway_provider = @import("core/gateway/gateway_provider.zig");
+const output_contracts = @import("core/output/output_contracts.zig");
 const generation_usage_provider = @import("core/session/generation_usage_provider.zig");
 const route_snapshot = @import("core/gateway/route_snapshot.zig");
 const agent_stream_provider = @import("core/agent/stream_provider.zig");
@@ -422,8 +423,28 @@ const App = struct {
             host.unavailable_url_opener;
     }
 
-    pub fn creditsProvider(_: *const Self) gateway_provider.CreditsProvider {
-        return builtin_gateway.credits_provider;
+    pub fn fetchAccountUsage(self: *Self) !output_contracts.CreditsSnapshot {
+        const profile = try self.auth.selectedConnectionProfile();
+        const adapter = self.providerAdapter();
+        const provider = if (std.mem.eql(u8, profile.adapter_id, adapter.kind))
+            adapter.account_usage
+        else
+            null;
+        const account_usage = provider orelse return .{
+            .err_message = try self.alloc.dupe(
+                u8,
+                "account usage unavailable for selected connection",
+            ),
+        };
+        var credential = try self.auth.resolveCredentialReference(
+            self.alloc,
+            profile.credential_ref,
+        );
+        defer credential.deinit(self.alloc);
+        return account_usage.fetch(self.alloc, .{
+            .credential = credential.token,
+            .tenant = credential.gatewayTeam(),
+        });
     }
 
     pub fn agentStreamProvider(_: *const Self) agent_stream_provider.Provider {
@@ -455,6 +476,11 @@ const App = struct {
         var adapter = builtin_gateway.provider_adapter;
         adapter.legacy_provider = self.agentStreamProvider();
         return adapter;
+    }
+
+    pub fn activeConnectionId(self: *const Self) []const u8 {
+        return (self.auth.selectedConnectionProfile() catch
+            return builtin_gateway.connection_seed.id).id;
     }
 
     pub fn resolveRouteCredential(
@@ -490,6 +516,56 @@ const App = struct {
             .tenant = tenant,
             .legacy_source = credential.source,
         };
+    }
+
+    fn resolveGenerationUsageCredential(
+        raw: ?*anyopaque,
+        alloc: Allocator,
+        credential_ref: []const u8,
+    ) generation_usage_provider.ResolveCredentialError!generation_usage_provider.ResolvedCredential {
+        const self: *App = @ptrCast(@alignCast(raw.?));
+        var credential = self.auth.resolveCredentialReference(
+            alloc,
+            credential_ref,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.Unavailable,
+        };
+        defer credential.deinit(alloc);
+        const tenant = if (credential.gatewayTeam()) |value| try alloc.dupe(u8, value) else null;
+        errdefer if (tenant) |value| alloc.free(value);
+        const token = credential.token;
+        credential.token = &.{};
+        return .{ .token = token, .tenant = tenant };
+    }
+
+    fn prepareGenerationUsageDispatch(
+        raw: ?*anyopaque,
+        alloc: Allocator,
+    ) generation_usage_provider.PrepareError!generation_usage_provider.Dispatch {
+        const self: *App = @ptrCast(@alignCast(raw.?));
+        const profiles = self.auth.connectionList();
+        if (profiles.len == 0) return error.Unavailable;
+        const inputs = try alloc.alloc(
+            generation_usage_provider.ConnectionInput,
+            profiles.len,
+        );
+        defer alloc.free(inputs);
+        const adapter = self.providerAdapter();
+        for (profiles, 0..) |profile, index| {
+            inputs[index] = .{
+                .id = profile.id,
+                .credential_ref = profile.credential_ref,
+                .provider = if (std.mem.eql(u8, profile.adapter_id, adapter.kind))
+                    adapter.generation_usage
+                else
+                    null,
+            };
+        }
+        return generation_usage_provider.Dispatch.init(alloc, inputs, .{
+            .context = self,
+            .resolve_fn = resolveGenerationUsageCredential,
+        });
     }
 
     pub fn admitSubagentWorkRoute(
@@ -556,13 +632,7 @@ const App = struct {
     notifications: builtin_hooks.notifications.State = .{},
     herdr: builtin_hooks.Client = .{},
 
-    session: SessionRuntime = SessionRuntime.init(
-        max_history_turns,
-        if (host_profile.generation_usage)
-            builtin_gateway.generation_usage_provider
-        else
-            generation_usage_provider.unavailable_provider,
-    ),
+    session: SessionRuntime = SessionRuntime.init(max_history_turns),
     session_persistence: app_session_runtime.Persistence = .{},
     prompt_history: PromptHistoryRuntime = .{},
     requested_resume: ?cli_surface.ResumeTarget = null,
@@ -721,6 +791,10 @@ const App = struct {
     }
 
     pub fn rebindAfterInit(self: *App) void {
+        self.session.usage.configureReconciliationSource(.{
+            .context = self,
+            .prepare_fn = prepareGenerationUsageDispatch,
+        });
         SessionAppRuntime.rebindSubagentHost(self);
     }
 

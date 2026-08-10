@@ -1,6 +1,7 @@
 const std = @import("std");
 const debug_trace = @import("../shared/debug_trace.zig");
 const io_mod = @import("../shared/io.zig");
+const generation_usage = @import("generation_usage_provider.zig");
 const session_usage = @import("session_usage.zig");
 
 const Allocator = std.mem.Allocator;
@@ -13,6 +14,11 @@ pub const RestoreOutcome = enum {
     restored,
     invalid,
     mismatched,
+};
+
+pub const PendingConnectionAuthority = union(enum) {
+    historical_vercel,
+    current: []const u8,
 };
 
 pub const Captured = union(enum) {
@@ -138,6 +144,7 @@ pub fn restoreIfMatching(
     session_dir: *io_mod.VerifiedDir,
     session_id: []const u8,
     continuity_at_ms: i64,
+    pending_authority: PendingConnectionAuthority,
     durable: *session_usage.Snapshot,
 ) !RestoreOutcome {
     var captured = try capture(alloc, session_dir);
@@ -147,6 +154,7 @@ pub fn restoreIfMatching(
         captured,
         session_id,
         continuity_at_ms,
+        pending_authority,
         durable,
     );
 }
@@ -156,11 +164,17 @@ pub fn restoreCaptured(
     captured: Captured,
     session_id: []const u8,
     continuity_at_ms: i64,
+    pending_authority: PendingConnectionAuthority,
     durable: *session_usage.Snapshot,
 ) !RestoreOutcome {
     const bytes = switch (captured) {
         .missing => {
-            try markContinuityGapIfNeeded(alloc, durable, continuity_at_ms);
+            try recoverCanonicalFallback(
+                alloc,
+                durable,
+                continuity_at_ms,
+                pending_authority,
+            );
             return .missing;
         },
         .invalid => |reason| {
@@ -169,7 +183,12 @@ pub fn restoreCaptured(
                 "event=usage_sidecar_invalid reason={s}",
                 .{reason},
             );
-            try markContinuityGapIfNeeded(alloc, durable, continuity_at_ms);
+            try recoverCanonicalFallback(
+                alloc,
+                durable,
+                continuity_at_ms,
+                pending_authority,
+            );
             return .invalid;
         },
         .encoded => |value| value,
@@ -177,14 +196,24 @@ pub fn restoreCaptured(
     var decoded = decode(alloc, bytes) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
         traceInvalid(err);
-        try markContinuityGapIfNeeded(alloc, durable, continuity_at_ms);
+        try recoverCanonicalFallback(
+            alloc,
+            durable,
+            continuity_at_ms,
+            pending_authority,
+        );
         return .invalid;
     };
     var decoded_owned = true;
     defer if (decoded_owned) decoded.deinit(alloc);
     if (!std.mem.eql(u8, decoded.session_id, session_id)) {
         traceInvalid(error.UsageSidecarSessionMismatch);
-        try markContinuityGapIfNeeded(alloc, durable, continuity_at_ms);
+        try recoverCanonicalFallback(
+            alloc,
+            durable,
+            continuity_at_ms,
+            pending_authority,
+        );
         return .invalid;
     }
 
@@ -193,7 +222,12 @@ pub fn restoreCaptured(
         decoded.snapshot,
     )) {
         carryRecoveryState(durable, &decoded.snapshot);
-        try markContinuityGapIfNeeded(alloc, durable, continuity_at_ms);
+        try recoverCanonicalFallback(
+            alloc,
+            durable,
+            continuity_at_ms,
+            pending_authority,
+        );
         debug_trace.logf(
             "session",
             "event=usage_sidecar_mismatched reason=billing_projection_changed",
@@ -227,10 +261,28 @@ fn mergeRichExtensions(
         target.reasoning_tokens = source.reasoning_tokens;
         target.request_count = source.request_count;
     }
-    for (durable.pending, rich.pending) |*target, source| {
+    for (durable.pending, rich.pending) |*target, *source| {
+        std.mem.swap([]u8, &target.connection_id, &source.connection_id);
         target.observed_at_ms = source.observed_at_ms;
     }
     carryRecoveryState(durable, rich);
+}
+
+fn recoverCanonicalFallback(
+    alloc: Allocator,
+    durable: *session_usage.Snapshot,
+    continuity_at_ms: i64,
+    pending_authority: PendingConnectionAuthority,
+) !void {
+    switch (pending_authority) {
+        .historical_vercel => {},
+        .current => |connection_id| try session_usage.rebindPendingConnection(
+            alloc,
+            durable,
+            connection_id,
+        ),
+    }
+    try markContinuityGapIfNeeded(alloc, durable, continuity_at_ms);
 }
 
 fn markContinuityGapIfNeeded(
@@ -338,8 +390,8 @@ test "usage sidecar restores rich fields only for its bound session and projecti
         5,
         .observed_generation,
         "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "vercel",
         "https://ai-gateway.vercel.sh",
-        null,
     );
     try usage.applyGeneration(alloc, .{
         .id = "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
@@ -376,6 +428,7 @@ test "usage sidecar restores rich fields only for its bound session and projecti
             &verified,
             "session-one",
             20,
+            .historical_vercel,
             &durable,
         ),
     );
@@ -390,6 +443,7 @@ test "usage sidecar restores rich fields only for its bound session and projecti
             &verified,
             "session-two",
             21,
+            .historical_vercel,
             &durable,
         ),
     );
@@ -407,6 +461,7 @@ test "usage sidecar restores rich fields only for its bound session and projecti
             &verified,
             "session-one",
             22,
+            .historical_vercel,
             &stale,
         ),
     );
@@ -425,6 +480,7 @@ test "usage sidecar restores rich fields only for its bound session and projecti
             &verified,
             "session-one",
             23,
+            .historical_vercel,
             &changed,
         ),
     );
@@ -449,8 +505,8 @@ test "non-billing rollback changes keep canonical values and rich metrics" {
         5,
         .observed_generation,
         "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "vercel",
         "https://ai-gateway.vercel.sh",
-        null,
     );
     try usage.applyGeneration(alloc, .{
         .id = "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
@@ -480,6 +536,7 @@ test "non-billing rollback changes keep canonical values and rich metrics" {
             &verified,
             "session-one",
             20,
+            .historical_vercel,
             &durable,
         ),
     );
@@ -491,7 +548,7 @@ test "non-billing rollback changes keep canonical values and rich metrics" {
     try std.testing.expectEqual(@as(usize, 0), durable.incidents.len);
 }
 
-test "missing and corrupt usage sidecars retain canonical usage with one fixed gap" {
+test "missing and corrupt sidecars retain current pending connection with one fixed gap" {
     const alloc = std.testing.allocator;
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
@@ -500,12 +557,21 @@ test "missing and corrupt usage sidecars retain canonical usage with one fixed g
     var usage = session_usage.Usage.initFresh();
     defer usage.deinit(alloc);
     const sequence = try usage.reserveInvocation();
-    usage.finishInvocation(sequence, 1, .unbilled);
+    try usage.finishObservedInvocation(
+        alloc,
+        sequence,
+        1,
+        .observed_generation,
+        "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "connection-a",
+        "scope-a",
+    );
     var rich = try usage.snapshot(alloc);
     defer rich.deinit(alloc);
 
     var missing = try legacyCopyForTest(alloc, rich);
     defer missing.deinit(alloc);
+    try std.testing.expectEqualStrings("vercel", missing.pending[0].connection_id);
     try std.testing.expectEqual(
         RestoreOutcome.missing,
         try restoreIfMatching(
@@ -513,11 +579,91 @@ test "missing and corrupt usage sidecars retain canonical usage with one fixed g
             &verified,
             "session-one",
             30,
+            .{ .current = "connection-a" },
             &missing,
         ),
     );
+    try std.testing.expectEqualStrings("connection-a", missing.pending[0].connection_id);
     try std.testing.expectEqual(@as(usize, 1), missing.incidents.len);
     try std.testing.expectEqual(@as(i64, 30), missing.incidents[0].occurred_at_ms);
+
+    const Probe = struct {
+        resolved_a: usize = 0,
+        resolved_vercel: usize = 0,
+        calls_a: usize = 0,
+        calls_vercel: usize = 0,
+        saw_a_credential: bool = false,
+
+        fn resolve(
+            raw: ?*anyopaque,
+            allocator: Allocator,
+            credential_ref: []const u8,
+        ) generation_usage.ResolveCredentialError!generation_usage.ResolvedCredential {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            if (std.mem.eql(u8, credential_ref, "credential-a")) {
+                self.resolved_a += 1;
+            } else if (std.mem.eql(u8, credential_ref, "credential-vercel")) {
+                self.resolved_vercel += 1;
+            } else {
+                return error.Unavailable;
+            }
+            return .{ .token = try allocator.dupe(u8, credential_ref) };
+        }
+
+        fn lookupA(
+            raw: ?*anyopaque,
+            _: Allocator,
+            input: generation_usage.LookupInput,
+        ) generation_usage.LookupError!generation_usage.LookupOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls_a += 1;
+            self.saw_a_credential = std.mem.eql(u8, "credential-a", input.credential);
+            return .preserve_pending;
+        }
+
+        fn lookupVercel(
+            raw: ?*anyopaque,
+            _: Allocator,
+            _: generation_usage.LookupInput,
+        ) generation_usage.LookupError!generation_usage.LookupOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls_vercel += 1;
+            return .preserve_pending;
+        }
+    };
+    var probe: Probe = .{};
+    var dispatch = try generation_usage.Dispatch.init(alloc, &.{
+        .{
+            .id = "connection-a",
+            .credential_ref = "credential-a",
+            .provider = .{ .context = &probe, .lookup_fn = Probe.lookupA },
+        },
+        .{
+            .id = "vercel",
+            .credential_ref = "credential-vercel",
+            .provider = .{ .context = &probe, .lookup_fn = Probe.lookupVercel },
+        },
+    }, .{ .context = &probe, .resolve_fn = Probe.resolve });
+    defer dispatch.deinit(alloc);
+    var cancel = std.atomic.Value(bool).init(false);
+    var outcome = try dispatch.lookup(
+        alloc,
+        missing.pending[0].connection_id,
+        missing.pending[0].id,
+        missing.pending[0].lookup_scope,
+        &cancel,
+    );
+    defer outcome.deinit(alloc);
+    switch (outcome) {
+        .preserve_pending => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 1), probe.resolved_a);
+    try std.testing.expectEqual(@as(usize, 0), probe.resolved_vercel);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls_a);
+    try std.testing.expectEqual(@as(usize, 0), probe.calls_vercel);
+    try std.testing.expect(probe.saw_a_credential);
+
     try std.testing.expectEqual(
         RestoreOutcome.missing,
         try restoreIfMatching(
@@ -525,9 +671,11 @@ test "missing and corrupt usage sidecars retain canonical usage with one fixed g
             &verified,
             "session-one",
             30,
+            .{ .current = "connection-a" },
             &missing,
         ),
     );
+    try std.testing.expectEqualStrings("connection-a", missing.pending[0].connection_id);
     try std.testing.expectEqual(@as(usize, 1), missing.incidents.len);
 
     try io_mod.durableReplaceVerified(
@@ -545,9 +693,11 @@ test "missing and corrupt usage sidecars retain canonical usage with one fixed g
             &verified,
             "session-one",
             31,
+            .{ .current = "connection-a" },
             &corrupt,
         ),
     );
+    try std.testing.expectEqualStrings("connection-a", corrupt.pending[0].connection_id);
     try std.testing.expectEqual(@as(usize, 1), corrupt.incidents.len);
     try std.testing.expectEqual(@as(i64, 31), corrupt.incidents[0].occurred_at_ms);
 }

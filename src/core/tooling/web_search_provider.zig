@@ -6,6 +6,7 @@ const web_search_policy = @import("web_search_policy.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Inputs = struct {
+    connection_id: []const u8 = "vercel",
     api_key: []const u8,
     gateway_team: ?[]const u8 = null,
     worker_model: []const u8,

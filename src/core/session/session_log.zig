@@ -1197,6 +1197,7 @@ pub const Root = struct {
                 boundary.usage_sidecar,
                 state.id,
                 state.updated_at_ms,
+                pendingConnectionAuthority(state),
                 usage,
             );
         }
@@ -2300,6 +2301,7 @@ fn restoreUsageSidecar(
             dir,
             state.id,
             state.updated_at_ms,
+            pendingConnectionAuthority(state.*),
             usage,
         );
         return outcome != .restored;
@@ -2349,6 +2351,7 @@ fn restoreEncodedUsageSidecarBestEffort(
             .{ .encoded = @constCast(encoded) },
             loaded.state.id,
             loaded.state.updated_at_ms,
+            pendingConnectionAuthority(loaded.state),
             usage,
         ) catch |err| {
             debug_trace.logf(
@@ -2358,6 +2361,15 @@ fn restoreEncodedUsageSidecarBestEffort(
             );
         };
     }
+}
+
+fn pendingConnectionAuthority(
+    state: session_codec.DurableSessionState,
+) session_usage_sidecar.PendingConnectionAuthority {
+    return if (state.preferences.connection_id) |connection_id|
+        .{ .current = connection_id }
+    else
+        .historical_vercel;
 }
 
 fn traceUsageSidecarWriteFailure(err: anyerror) void {
@@ -4786,8 +4798,8 @@ test "usage sidecar restores exact optional metrics after read-only and writable
         7,
         .observed_generation,
         "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "vercel",
         "https://ai-gateway.vercel.sh",
-        null,
     );
     try usage.applyGeneration(alloc, .{
         .id = "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
@@ -4964,8 +4976,8 @@ test "indeterminate canonical usage retry repairs the rich sidecar" {
         7,
         .observed_generation,
         "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "vercel",
         "https://ai-gateway.vercel.sh",
-        null,
     );
     try usage.applyGeneration(alloc, .{
         .id = "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
@@ -5036,8 +5048,8 @@ test "unwritable usage sidecar keeps canonical usage resumable and incomplete" {
         7,
         .observed_generation,
         "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "vercel",
         "https://ai-gateway.vercel.sh",
-        null,
     );
     try usage.applyGeneration(alloc, .{
         .id = "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",

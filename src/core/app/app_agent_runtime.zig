@@ -291,6 +291,10 @@ pub fn Runtime(comptime App: type) type {
             }
             if (comptime @hasField(App, "web_search_runtime")) {
                 app.web_search_runtime.configure(.{
+                    .connection_id = if (comptime @hasDecl(App, "activeConnectionId"))
+                        app.activeConnectionId()
+                    else
+                        "vercel",
                     .api_key = app.auth.apiKey() orelse "",
                     .gateway_team = app.auth.gatewayTeam(),
                     .worker_model = app.selected_model.items,

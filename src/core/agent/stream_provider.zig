@@ -1,7 +1,9 @@
 const std = @import("std");
+const account_usage_provider = @import("../gateway/account_usage_provider.zig");
 const model_capabilities = @import("../config/model_capabilities.zig");
 const image_attachments = @import("../images/image_attachments.zig");
 const route_snapshot = @import("../gateway/route_snapshot.zig");
+const generation_usage_provider = @import("../session/generation_usage_provider.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const types = @import("../shared/types.zig");
 const gateway_schema = @import("../tooling/gateway_schema.zig");
@@ -479,6 +481,8 @@ pub const ProviderAdapter = struct {
     /// Bounded G1 bridge for existing injected Vercel stream providers. G11
     /// removes this field after the old seam has no callers.
     legacy_provider: ?Provider = null,
+    account_usage: ?account_usage_provider.Provider = null,
+    generation_usage: ?generation_usage_provider.Provider = null,
     stream_fn: AdapterStreamFn,
 
     pub fn acceptsRoute(self: ProviderAdapter, route: *const route_snapshot.RouteSnapshot) bool {

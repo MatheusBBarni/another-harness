@@ -1262,10 +1262,24 @@ fn runNonInteractiveWithDeps(
             defer startup.deinit(alloc);
             try writeConfigDiagnostics(alloc, deps, startup.config_diagnostics);
 
-            var snapshot = cfg.gateway_provider.credits.fetch(alloc, .{
-                .credential = startup.apiKey(),
-                .tenant = startup.gatewayTeam(),
-            });
+            const adapter = cfg.gateway_provider.provider_adapter;
+            const selected_adapter_id = if (startup.connections) |*connections|
+                connections.selectedProfile().adapter_id
+            else
+                cfg.gateway_provider.connection_seed.adapter_id;
+            var snapshot = if (std.mem.eql(u8, selected_adapter_id, adapter.kind) and
+                adapter.account_usage != null)
+                adapter.account_usage.?.fetch(alloc, .{
+                    .credential = startup.apiKey(),
+                    .tenant = startup.gatewayTeam(),
+                })
+            else
+                output_contracts.CreditsSnapshot{
+                    .err_message = try alloc.dupe(
+                        u8,
+                        "account usage unavailable for selected connection",
+                    ),
+                };
             defer snapshot.deinit(alloc);
             const text = try snapshot.render(alloc, opts.format);
             defer alloc.free(text);
@@ -4556,7 +4570,7 @@ test "runIfRequested credits renders through the configured provider" {
     defer capture.deinit();
     var probe = CreditsProviderProbe{ .outcome = .success };
     var cfg = testConfig();
-    cfg.gateway_provider.credits = probe.provider();
+    cfg.gateway_provider.provider_adapter.account_usage = probe.provider();
 
     var deps = capture.deps();
     deps.load_startup_state = stubLoadStartupState;
@@ -4571,12 +4585,36 @@ test "runIfRequested credits renders through the configured provider" {
     );
 }
 
+test "account usage does not fall back across adapter kinds" {
+    var capture = CaptureOutput.init(std.testing.allocator);
+    defer capture.deinit();
+    var probe = CreditsProviderProbe{ .outcome = .success };
+    var cfg = testConfig();
+    cfg.gateway_provider.provider_adapter.kind = "other";
+    cfg.gateway_provider.provider_adapter.account_usage = probe.provider();
+    var deps = capture.deps();
+    deps.load_startup_state = stubLoadStartupState;
+
+    const result = try runIfRequestedWithDeps(
+        std.testing.allocator,
+        &.{ @constCast("credits"), @constCast("--json") },
+        cfg,
+        deps,
+    );
+    try std.testing.expectEqual(RunResult.handled_failure, result);
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"credits\",\"error\":\"account usage unavailable for selected connection\"}\n",
+        capture.stdout.written(),
+    );
+}
+
 test "runIfRequested credits failures use nonzero text and json contracts" {
     var text_capture = CaptureOutput.init(std.testing.allocator);
     defer text_capture.deinit();
     var text_probe = CreditsProviderProbe{ .outcome = .failure };
     var text_cfg = testConfig();
-    text_cfg.gateway_provider.credits = text_probe.provider();
+    text_cfg.gateway_provider.provider_adapter.account_usage = text_probe.provider();
     var text_deps = text_capture.deps();
     text_deps.load_startup_state = stubLoadStartupState;
 
@@ -4597,7 +4635,7 @@ test "runIfRequested credits failures use nonzero text and json contracts" {
     defer json_capture.deinit();
     var json_probe = CreditsProviderProbe{ .outcome = .failure };
     var json_cfg = testConfig();
-    json_cfg.gateway_provider.credits = json_probe.provider();
+    json_cfg.gateway_provider.provider_adapter.account_usage = json_probe.provider();
     var json_deps = json_capture.deps();
     json_deps.load_startup_state = stubLoadStartupState;
 
@@ -5127,7 +5165,7 @@ const CreditsProviderProbe = struct {
     calls: usize = 0,
     saw_expected_input: bool = false,
 
-    fn provider(self: *CreditsProviderProbe) gateway_provider.CreditsProvider {
+    fn provider(self: *CreditsProviderProbe) gateway_provider.account_usage_provider.Provider {
         return .{
             .context = self,
             .fetch_fn = fetch,
@@ -5137,7 +5175,7 @@ const CreditsProviderProbe = struct {
     fn fetch(
         raw: ?*anyopaque,
         alloc: Allocator,
-        input: gateway_provider.CreditsLookupInput,
+        input: gateway_provider.account_usage_provider.Input,
     ) output_contracts.CreditsSnapshot {
         const self: *CreditsProviderProbe = @ptrCast(@alignCast(raw.?));
         self.calls += 1;

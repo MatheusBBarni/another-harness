@@ -208,6 +208,7 @@ const AcpContext = struct {
     fn toolContext(self: *AcpContext) tool_runtime.Context {
         const session = if (self.state.active_session) |*active| active else unreachable;
         self.state.web_search_runtime.configure(.{
+            .connection_id = self.state.credential_connection_id orelse session_codec.legacy_connection_id,
             .api_key = session.api_key,
             .gateway_team = self.state.gateway_team,
             .worker_model = session.model,
@@ -2751,8 +2752,8 @@ test "ACP usage checkpoints maintain the profile recovery marker" {
         1,
         .observed_generation,
         "gen_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "vercel",
         "https://ai-gateway.vercel.sh",
-        null,
     );
     var pending = try usage.snapshot(alloc);
     defer pending.deinit(alloc);

@@ -5,7 +5,7 @@ const js_host_stream_provider = @import("gateway/js_host_stream_provider.zig");
 const background_process_provider = @import("core/execution/background_process_provider.zig");
 const context_contract = @import("core/workspace/context_contract.zig");
 const gateway_provider = @import("core/gateway/gateway_provider.zig");
-const generation_usage_provider = @import("core/session/generation_usage_provider.zig");
+const account_usage_provider = @import("core/gateway/account_usage_provider.zig");
 const host = @import("core/hosts/host.zig");
 const io_mod = @import("core/shared/io.zig");
 const model_catalog = @import("core/gateway/model_catalog.zig");
@@ -60,14 +60,13 @@ const js_host_gateway_provider = gateway_provider.Provider{
     .agent_stream = js_host_stream_provider.provider(),
     .provider_adapter = .{
         .kind = builtin_gateway.connection_seed.adapter_id,
+        .account_usage = .{ .fetch_fn = fetchCredits },
         .legacy_provider = js_host_stream_provider.provider(),
         .stream_fn = builtin_gateway.provider_adapter.stream_fn,
     },
     .oauth_transport = oauth_transport.unavailable_provider,
     .chat_url = .{ .resolve_fn = resolveChatUrl },
     .cli_model_catalog = .{ .fetch_fn = fetchCliModelCatalog },
-    .credits = .{ .fetch_fn = fetchCredits },
-    .generation_usage = generation_usage_provider.unavailable_provider,
     .web_search = unavailable_web_search_provider,
     .model_catalog = js_host_model_catalog.provider,
 };
@@ -108,7 +107,7 @@ fn fetchCliModelCatalog(
 fn fetchCredits(
     _: ?*anyopaque,
     _: Allocator,
-    _: gateway_provider.CreditsLookupInput,
+    _: account_usage_provider.Input,
 ) output_contracts.CreditsSnapshot {
     return .{};
 }
