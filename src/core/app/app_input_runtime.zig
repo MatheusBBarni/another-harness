@@ -83,6 +83,7 @@ fn classifyResumeFailure(err: anyerror) session_catalog.ResumeFailure {
         error.SessionAuthorityBoundaryUnavailable,
         error.SessionCommitBoundaryUnavailable,
         => .being_updated,
+        error.MissingSessionConnection => .select_connection,
         else => .unavailable,
     };
 }

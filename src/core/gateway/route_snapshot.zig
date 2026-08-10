@@ -4,6 +4,29 @@ const connection_registry = @import("connection_registry.zig");
 
 const Allocator = std.mem.Allocator;
 
+pub fn recoveryDescriptor(
+    route_model: []const u8,
+    resolved: model_capabilities.ModelDescriptor,
+) model_capabilities.ModelDescriptor {
+    return .{
+        .id = route_model,
+        .display_name = resolved.display_name,
+        .capabilities = resolved.capabilities,
+        .source = resolved.source,
+        .selected_fast_mode = false,
+        .fast_route = .same_model,
+    };
+}
+
+pub fn validateRecoveryProfile(
+    profile: connection_registry.Profile,
+    expected_adapter_kind: []const u8,
+) !void {
+    if (!std.mem.eql(u8, profile.adapter_id, expected_adapter_kind)) {
+        return error.RecoveryRouteAdapterChanged;
+    }
+}
+
 /// Owned, secret-free routing authority for one admitted turn.
 pub const RouteSnapshot = struct {
     connection_id: []const u8,
@@ -38,6 +61,63 @@ pub const RouteSnapshot = struct {
         model_descriptor: model_capabilities.ModelDescriptor,
         effective_endpoint: []const u8,
     ) !RouteSnapshot {
+        return admitWithReviewer(
+            alloc,
+            profile,
+            model_descriptor,
+            effective_endpoint,
+            profile.permission_review_model,
+        );
+    }
+
+    pub fn admitRecovery(
+        alloc: Allocator,
+        profile: connection_registry.Profile,
+        expected_adapter_kind: []const u8,
+        permission_review_model_id: ?[]const u8,
+        model_descriptor: model_capabilities.ModelDescriptor,
+        effective_endpoint: []const u8,
+    ) !RouteSnapshot {
+        try validateRecoveryProfile(profile, expected_adapter_kind);
+        return admitWithReviewer(
+            alloc,
+            profile,
+            model_descriptor,
+            effective_endpoint,
+            permission_review_model_id,
+        );
+    }
+
+    pub fn admitSelectedRecovery(
+        alloc: Allocator,
+        profile: connection_registry.Profile,
+        seed: connection_registry.Seed,
+        expected_adapter_kind: []const u8,
+        permission_review_model_id: ?[]const u8,
+        model_descriptor: model_capabilities.ModelDescriptor,
+        seed_endpoint: []const u8,
+    ) !RouteSnapshot {
+        const endpoint = if (std.mem.eql(u8, profile.id, seed.id))
+            seed_endpoint
+        else
+            profile.endpoint orelse return error.InvalidRouteEndpoint;
+        return admitRecovery(
+            alloc,
+            profile,
+            expected_adapter_kind,
+            permission_review_model_id,
+            model_descriptor,
+            endpoint,
+        );
+    }
+
+    fn admitWithReviewer(
+        alloc: Allocator,
+        profile: connection_registry.Profile,
+        model_descriptor: model_capabilities.ModelDescriptor,
+        effective_endpoint: []const u8,
+        permission_review_model: ?[]const u8,
+    ) !RouteSnapshot {
         if (model_descriptor.id.len == 0) return error.InvalidRouteModel;
         const protocol_value = profile.protocol orelse return error.InvalidRouteProtocol;
         if (effective_endpoint.len == 0) return error.InvalidRouteEndpoint;
@@ -54,7 +134,7 @@ pub const RouteSnapshot = struct {
         errdefer alloc.free(credential_ref);
         const primary_model_id = try alloc.dupe(u8, model_descriptor.id);
         errdefer alloc.free(primary_model_id);
-        const permission_review_model_id = if (profile.permission_review_model) |value|
+        const permission_review_model_id = if (permission_review_model) |value|
             try alloc.dupe(u8, value)
         else
             null;
@@ -264,4 +344,29 @@ test "selected route applies the seed override only to the seed connection" {
     );
     defer seed_route.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("https://override.invalid", seed_route.endpoint);
+}
+
+test "recovery route rejects an adapter mismatch before admission" {
+    const profile = connection_registry.Profile{
+        .id = @constCast("saved"),
+        .display_name = @constCast("Saved"),
+        .adapter_id = @constCast("changed-adapter"),
+        .endpoint = @constCast("https://saved.invalid"),
+        .protocol = @constCast("saved-protocol"),
+        .credential_ref = @constCast("saved-ref"),
+        .remembered_model = @constCast("saved-model"),
+        .permission_review_model = @constCast("current-reviewer"),
+    };
+
+    try std.testing.expectError(
+        error.RecoveryRouteAdapterChanged,
+        RouteSnapshot.admitRecovery(
+            std.testing.allocator,
+            profile,
+            "persisted-adapter",
+            "persisted-reviewer",
+            model_capabilities.configuredDescriptor("persisted-model", .{}),
+            profile.endpoint.?,
+        ),
+    );
 }

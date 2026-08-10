@@ -1136,10 +1136,15 @@ pub fn Runtime(comptime App: type) type {
             effort: types.ReasoningEffort,
             fast_mode: bool,
         ) !void {
+            const connection_id = if (comptime @hasField(App, "auth"))
+                (try app.auth.selectedConnectionProfile()).id
+            else
+                session_codec.legacy_connection_id;
             try replacePreferences(
                 app.alloc,
                 &app.session_persistence.workspace_preferences,
                 .{
+                    .connection_id = @constCast(connection_id),
                     .model = @constCast(configured_model),
                     .effort = effort,
                     .fast_mode = fast_mode,
@@ -1410,7 +1415,10 @@ pub fn Runtime(comptime App: type) type {
                     &admission,
                     session_id,
                     app.workspace_root,
-                    .{ .seed_preferences = app.session_persistence.workspace_preferences },
+                    .{
+                        .seed_preferences = app.session_persistence.workspace_preferences,
+                        .legacy_route_defaults = legacyRouteDefaults(app),
+                    },
                 );
             } else try loadResumeTargetForWrite(app, resume_target, .{});
             var loaded_owned = true;
@@ -1607,6 +1615,7 @@ pub fn Runtime(comptime App: type) type {
                 app.workspace_root,
                 .{
                     .seed_preferences = app.session_persistence.workspace_preferences,
+                    .legacy_route_defaults = legacyRouteDefaults(app),
                     .log = log_options,
                 },
             );
@@ -1619,6 +1628,10 @@ pub fn Runtime(comptime App: type) type {
         ) !void {
             var loaded_owned = true;
             errdefer if (loaded_owned) loaded.deinit(app.alloc);
+
+            if (comptime @hasDecl(App, "requireSessionConnection")) {
+                try app.requireSessionConnection(loaded.state.preferences.connection_id.?);
+            }
 
             var display = try readNativeResumeDisplay(app, loaded);
             defer display.deinit(app.alloc);
@@ -4588,6 +4601,14 @@ pub fn Runtime(comptime App: type) type {
     };
 }
 
+fn legacyRouteDefaults(app: anytype) ?session_codec.LegacyRouteDefaults {
+    const App = @TypeOf(app.*);
+    if (comptime @hasDecl(App, "legacySessionRouteDefaults")) {
+        return app.legacySessionRouteDefaults();
+    }
+    return null;
+}
+
 fn replacePreferences(
     alloc: Allocator,
     target: *?session_codec.DurableSessionPreferences,
@@ -5581,6 +5602,7 @@ fn writeSessionFixture(
         .updated_at_ms = 456,
         .conversation_language = session_runtime.ConversationLanguage.literal("en"),
         .preferences = .{
+            .connection_id = try alloc.dupe(u8, "vercel"),
             .model = try alloc.dupe(u8, "saved/model"),
             .effort = types.ReasoningEffort.literal("medium"),
             .fast_mode = false,
@@ -7078,6 +7100,12 @@ test "resumed recovery checkpoint replays its unfinished turn once" {
         );
         defer writable.deinit(alloc);
         const checkpoint = session_codec.RecoveryCheckpoint{
+            .version = 2,
+            .route_identity = .{
+                .connection_id = @constCast("vercel"),
+                .adapter_kind = @constCast("vercel_ai_gateway"),
+                .permission_review_model_id = @constCast("openai/gpt-5.4"),
+            },
             .turn_id = 41,
             .user = .{ .text = @constCast("unfinished prompt") },
             .assistant_source = @constCast("Partial output before EOF."),

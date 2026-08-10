@@ -3378,6 +3378,7 @@ test "processQueuedPrompt leaves parent delivery pending after pre-send failure"
     var first_gateway = FakeGateway.init(alloc, &first_completions);
     defer first_gateway.deinit();
     var hooks = FakeAgentRuntimeDeps.init(alloc);
+    hooks.enable_recovery_checkpoint = true;
     defer hooks.deinit();
     hooks.parent_turn_context_text = "parent delivery survives pre-send failure";
     hooks.parent_turn_context_sequence = 42;
@@ -3390,6 +3391,21 @@ test "processQueuedPrompt leaves parent delivery pending after pre-send failure"
 
     try std.testing.expectEqual(@as(usize, 1), hooks.parent_turn_prepare_count);
     try std.testing.expectEqual(@as(usize, 0), hooks.parent_turn_ack_count);
+    try std.testing.expectEqual(@as(usize, 2), hooks.recovery_checkpoints.items.len);
+    try std.testing.expectEqual(
+        session_codec.RecoveryDelivery.possibly_sent,
+        hooks.recovery_checkpoints.items[0].delivery,
+    );
+    try std.testing.expect(hooks.recovery_checkpoints.items[0].outstanding_reservation);
+    try std.testing.expectEqual(
+        session_codec.RecoveryDelivery.definitely_unsent,
+        hooks.recovery_checkpoints.items[1].delivery,
+    );
+    try std.testing.expect(!hooks.recovery_checkpoints.items[1].outstanding_reservation);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        hooks.recovery_checkpoints.items[1].consumed_provider_attempts,
+    );
     try expectBodyContains(
         &first_gateway,
         0,
@@ -4290,9 +4306,11 @@ test "processQueuedPrompt reserves and settles durable attempts before history c
     const reserved = hooks.recovery_checkpoints.items[0];
     try std.testing.expect(reserved.outstanding_reservation);
     try std.testing.expectEqual(@as(usize, 0), reserved.consumed_provider_attempts);
+    try std.testing.expectEqual(session_codec.RecoveryDelivery.possibly_sent, reserved.delivery);
     const settled = hooks.recovery_checkpoints.items[1];
     try std.testing.expect(!settled.outstanding_reservation);
     try std.testing.expectEqual(@as(usize, 1), settled.consumed_provider_attempts);
+    try std.testing.expectEqual(session_codec.RecoveryDelivery.possibly_sent, settled.delivery);
     try std.testing.expectEqual(@as(usize, 1), hooks.history_propagation_count);
 }
 
@@ -4353,6 +4371,12 @@ test "processQueuedPrompt preserves fallback route and budget until selection ch
     const alloc = std.testing.allocator;
     var fixture = PromptFixture{};
     const checkpoint = session_codec.RecoveryCheckpoint{
+        .version = 2,
+        .route_identity = .{
+            .connection_id = @constCast("vercel"),
+            .adapter_kind = @constCast("vercel_ai_gateway"),
+            .permission_review_model_id = null,
+        },
         .turn_id = 44,
         .user = .{ .text = @constCast("user prompt") },
         .assistant_source = @constCast("partial"),
@@ -4406,9 +4430,9 @@ test "processQueuedPrompt preserves fallback route and budget until selection ch
         try runFakePrompt(&gateway, &hooks, config, job);
 
         const reserved = hooks.recovery_checkpoints.items[0];
-        try std.testing.expectEqual(@as(usize, 4), reserved.max_provider_attempts);
-        try std.testing.expectEqual(@as(usize, 0), reserved.consumed_provider_attempts);
-        try std.testing.expect(!reserved.requested_fast_mode);
+        try std.testing.expectEqual(@as(usize, 10), reserved.max_provider_attempts);
+        try std.testing.expectEqual(@as(usize, 3), reserved.consumed_provider_attempts);
+        try std.testing.expect(reserved.requested_fast_mode);
         try std.testing.expect(!reserved.fast_mode);
     }
 }

@@ -440,6 +440,26 @@ fn credentialSourceFromReference(reference: []const u8) !?credentials.Source {
     return types.parseCredentialSource(reference) orelse error.InvalidCredentialReference;
 }
 
+pub fn resolveConnectionCredential(
+    alloc: Allocator,
+    transport: oauth_transport.Provider,
+    secret_store: host.SecretStore,
+    profile: connection_registry.Profile,
+    seed: connection_registry.Seed,
+    mode: credentials.LoadMode,
+) !credentials.Resolution {
+    if (!connectionUsesSeedAdapter(profile, seed)) {
+        return error.UnsupportedConnectionAdapter;
+    }
+    return credentials.resolvePreferring(
+        alloc,
+        transport,
+        secret_store,
+        mode,
+        try credentialSourceFromReference(profile.credential_ref),
+    );
+}
+
 fn loadSelectedConnectionCredential(
     state: *StartupState,
     alloc: Allocator,
@@ -450,21 +470,24 @@ fn loadSelectedConnectionCredential(
     mode: CredentialLoadMode,
 ) !void {
     const connections = &state.connections.?;
-    if (!connectionUsesSeedAdapter(profile, seed)) {
-        connections.markSelectedDisconnected(.unsupported_adapter);
-        return;
-    }
-    const preferred = credentialSourceFromReference(profile.credential_ref) catch {
-        connections.markSelectedDisconnected(.invalid_credential_reference);
-        return;
-    };
-    const resolution = try credentials.resolvePreferring(
+    const resolution = resolveConnectionCredential(
         alloc,
         transport,
         secret_store,
+        profile,
+        seed,
         mode,
-        preferred,
-    );
+    ) catch |err| switch (err) {
+        error.UnsupportedConnectionAdapter => {
+            connections.markSelectedDisconnected(.unsupported_adapter);
+            return;
+        },
+        error.InvalidCredentialReference => {
+            connections.markSelectedDisconnected(.invalid_credential_reference);
+            return;
+        },
+        else => return err,
+    };
     state.credential = resolution.credential;
     state.stored_key_status = resolution.stored_key_status;
     if (state.credential != null) {

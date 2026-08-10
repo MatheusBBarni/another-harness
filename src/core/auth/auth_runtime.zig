@@ -652,6 +652,11 @@ pub const Runtime = struct {
         return connections.selectedProfile();
     }
 
+    pub fn connectionProfile(self: *const Self, id: []const u8) !connection_registry.Profile {
+        const connections = if (self.connections) |*value| value else return error.ConnectionRegistryUnavailable;
+        return connections.profile(id);
+    }
+
     /// Resolves one owned credential from an admitted reference without
     /// consulting the currently selected connection.
     pub fn resolveCredentialReference(

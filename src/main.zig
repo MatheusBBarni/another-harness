@@ -1239,6 +1239,21 @@ const App = struct {
         return SessionAppRuntime.continuePausedRecovery(self);
     }
 
+    pub fn legacySessionRouteDefaults(_: *App) session_codec.LegacyRouteDefaults {
+        return .{
+            .connection_id = builtin_gateway.connection_seed.id,
+            .adapter_kind = builtin_gateway.connection_seed.adapter_id,
+            .permission_review_model_id = builtin_gateway.connection_seed.permission_review_model,
+        };
+    }
+
+    pub fn requireSessionConnection(self: *App, id: []const u8) !void {
+        _ = self.auth.connectionProfile(id) catch |err| switch (err) {
+            error.UnknownConnection => return error.MissingSessionConnection,
+            else => return err,
+        };
+    }
+
     pub fn queueRecoveryCheckpoint(
         self: *App,
         checkpoint: *const session_codec.RecoveryCheckpoint,
@@ -1268,8 +1283,28 @@ const App = struct {
         const prompt_copy = try std.heap.c_allocator.dupe(u8, prompt);
         errdefer std.heap.c_allocator.free(prompt_copy);
 
-        if (self.auth.gatewayCredential() == null) return error.MissingApiKey;
-        const profile = try self.auth.selectedConnectionProfile();
+        const connection_id = if (recovery_checkpoint) |checkpoint|
+            checkpoint.route_identity.?.connection_id
+        else if (self.session_persistence.session_preferences) |preferences|
+            preferences.connection_id orelse session_codec.legacy_connection_id
+        else
+            (try self.auth.selectedConnectionProfile()).id;
+        const profile = self.auth.connectionProfile(connection_id) catch |err| switch (err) {
+            error.UnknownConnection => return error.MissingSessionConnection,
+            else => return err,
+        };
+        if (recovery_checkpoint) |checkpoint| {
+            try route_snapshot.validateRecoveryProfile(
+                profile,
+                checkpoint.route_identity.?.adapter_kind,
+            );
+        }
+        const selected_profile = try self.auth.selectedConnectionProfile();
+        if (std.mem.eql(u8, profile.id, selected_profile.id) and
+            self.auth.gatewayCredential() == null)
+        {
+            return error.MissingApiKey;
+        }
 
         const authorized_image_catalog = try self.session.snapshotImageCatalog(
             std.heap.c_allocator,
@@ -1279,20 +1314,47 @@ const App = struct {
                 self.pending_images.items,
         );
         errdefer types.freeImageAttachmentSlice(std.heap.c_allocator, authorized_image_catalog);
-        var descriptor = self.resolvedModelDescriptor(self.selected_model.items);
+        var descriptor = if (recovery_checkpoint) |checkpoint| recovery_descriptor: {
+            const resolved = self.resolvedModelDescriptor(checkpoint.route_model);
+            break :recovery_descriptor route_snapshot.recoveryDescriptor(
+                checkpoint.route_model,
+                resolved,
+            );
+        } else self.resolvedModelDescriptor(self.selected_model.items);
         if (model_capabilities.requiresResolvedRequestCapabilities(
             authorized_image_catalog.len > 0,
             self.effort,
             self.fast_mode,
             descriptor.capabilities,
-        )) descriptor = try self.resolveModelDescriptorForRequest(self.selected_model.items);
-        var route = try route_snapshot.RouteSnapshot.admitSelected(
-            std.heap.c_allocator,
-            profile,
-            builtin_gateway.connection_seed,
-            descriptor,
-            builtin_gateway.defaultChatUrl(),
-        );
+        )) {
+            const model = if (recovery_checkpoint) |checkpoint|
+                checkpoint.route_model
+            else
+                self.selected_model.items;
+            const resolved = try self.resolveModelDescriptorForRequest(model);
+            descriptor = if (recovery_checkpoint) |checkpoint|
+                route_snapshot.recoveryDescriptor(checkpoint.route_model, resolved)
+            else
+                resolved;
+        }
+        var route = if (recovery_checkpoint) |checkpoint|
+            try route_snapshot.RouteSnapshot.admitSelectedRecovery(
+                std.heap.c_allocator,
+                profile,
+                builtin_gateway.connection_seed,
+                checkpoint.route_identity.?.adapter_kind,
+                checkpoint.route_identity.?.permission_review_model_id,
+                descriptor,
+                builtin_gateway.defaultChatUrl(),
+            )
+        else
+            try route_snapshot.RouteSnapshot.admitSelected(
+                std.heap.c_allocator,
+                profile,
+                builtin_gateway.connection_seed,
+                descriptor,
+                builtin_gateway.defaultChatUrl(),
+            );
         errdefer route.deinit(std.heap.c_allocator);
 
         const history_copy = try self.session.snapshotContextHistory(std.heap.c_allocator);

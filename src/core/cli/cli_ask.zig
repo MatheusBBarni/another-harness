@@ -375,6 +375,7 @@ const NotifyAttentionFn = *const fn (?*anyopaque) void;
 const PermissionApprovalPromptFn = *const fn (?*anyopaque, ?*anyopaque, WriteFn, []const u8, ?*anyopaque, NotifyAttentionFn) anyerror!PermissionApprovalPromptResult;
 const IsTtyFn = *const fn (?*anyopaque) bool;
 const LoadStartupStateFn = *const fn (Allocator, oauth_transport.Provider, host.SecretStore, []const u8, bool, usize, connection_registry.Seed) anyerror!app_lifecycle.StartupState;
+const ResolveConnectionCredentialFn = *const fn (Allocator, oauth_transport.Provider, host.SecretStore, connection_registry.Profile, connection_registry.Seed, credentials.LoadMode) anyerror!credentials.Resolution;
 const InitializeSessionStoresFn = *const fn (*AskContext) anyerror!void;
 const LoadSkillsFn = *const fn (
     Allocator,
@@ -397,6 +398,8 @@ const RunDeps = struct {
     stdout_is_tty: IsTtyFn = realStdoutIsTty,
     stderr_is_tty: IsTtyFn = realStderrIsTty,
     load_startup_state: LoadStartupStateFn = loadStartupStateDefault,
+    load_startup_state_without_credentials: LoadStartupStateFn = loadStartupStateWithoutCredentialsDefault,
+    resolve_connection_credential: ResolveConnectionCredentialFn = app_lifecycle.resolveConnectionCredential,
     initialize_session_stores: InitializeSessionStoresFn = initializeSessionStoresDefault,
     load_skills: LoadSkillsFn = app_runtime_setup.loadSkills,
     context_registry: context_contract.Registry,
@@ -485,6 +488,7 @@ const AskContext = struct {
     writable: ?session_store.LoadedWritableSession = null,
     session_write_mutex: std.Io.Mutex = .init,
     requested_resume: ?ResumeTarget = null,
+    connection_id: []const u8 = session_codec.legacy_connection_id,
     seed_model: []const u8 = "",
     command_timeout_ms: ?usize = null,
     session: SessionRuntime,
@@ -763,6 +767,7 @@ const AskContext = struct {
         errdefer if (store_owned) store.deinit(self.alloc);
 
         const seed_preferences = session_codec.DurableSessionPreferences{
+            .connection_id = @constCast(self.connection_id),
             .model = @constCast(self.seed_model),
             .effort = self.effort,
             .fast_mode = self.fast_mode,
@@ -773,7 +778,14 @@ const AskContext = struct {
                 self.alloc,
                 target,
                 self.workspace_root,
-                .{ .seed_preferences = seed_preferences },
+                .{
+                    .seed_preferences = seed_preferences,
+                    .legacy_route_defaults = .{
+                        .connection_id = self.cfg.gateway_provider.connection_seed.id,
+                        .adapter_kind = self.cfg.gateway_provider.connection_seed.adapter_id,
+                        .permission_review_model_id = self.cfg.gateway_provider.connection_seed.permission_review_model,
+                    },
+                },
             )
         else blk: {
             var state = try freshAskState(self, seed_preferences);
@@ -784,6 +796,7 @@ const AskContext = struct {
         errdefer if (writable_owned) writable.deinit(self.alloc);
 
         if (self.requested_resume != null) {
+            self.connection_id = writable.state.preferences.connection_id.?;
             try self.session.restoreWithPermissionState(
                 self.alloc,
                 writable.state.conversation_language,
@@ -1304,7 +1317,11 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
     defer alloc.free(owned_prompt);
 
     try checkHeadlessCancellation(options.deps);
-    var startup = try options.deps.load_startup_state(
+    const load_startup = if (options.resume_target == null)
+        options.deps.load_startup_state
+    else
+        options.deps.load_startup_state_without_credentials;
+    var startup = try load_startup(
         alloc,
         cfg.gateway_provider.oauth_transport,
         cfg.secret_store,
@@ -1345,7 +1362,7 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
     );
     try checkHeadlessCancellation(options.deps);
 
-    if (!options.continue_recovery and startup.credential == null) {
+    if (options.resume_target == null and startup.credential == null) {
         return missingCredentialResult(alloc, options);
     }
 
@@ -1372,6 +1389,7 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
     ctx.command_timeout_ms = options.command_timeout_ms;
     ctx.model = startup.selected_model;
     ctx.seed_model = startup.configured_model;
+    ctx.connection_id = startup.connections.?.selectedProfile().id;
     ctx.requested_resume = options.resume_target;
     ctx.agent_step_limit = startup.agent_step_limit;
     ctx.max_tool_result_bytes = startup.max_tool_result_bytes;
@@ -1425,8 +1443,43 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
         ctx.session.setConversationLanguageFromUserMessage(owned_prompt);
     }
 
-    const credential = startup.credential orelse
-        return missingCredentialResult(alloc, options);
+    const route_connection_id = if (recovery_checkpoint) |checkpoint|
+        checkpoint.route_identity.?.connection_id
+    else
+        ctx.connection_id;
+    const profile = startup.connections.?.profile(route_connection_id) catch |err| switch (err) {
+        error.UnknownConnection => {
+            try ctx.writeStderr("fx ask: saved connection is unavailable; select or restore that connection before resuming\n");
+            return error.MissingSessionConnection;
+        },
+    };
+    if (recovery_checkpoint) |checkpoint| {
+        try route_snapshot.validateRecoveryProfile(
+            profile,
+            checkpoint.route_identity.?.adapter_kind,
+        );
+    }
+    var owned_route_credential: ?credentials.Credential = null;
+    defer if (owned_route_credential) |*credential| credential.deinit(alloc);
+    const credential = if (options.resume_target == null and std.mem.eql(
+        u8,
+        profile.id,
+        startup.connections.?.selectedProfile().id,
+    ))
+        startup.credential orelse return missingCredentialResult(alloc, options)
+    else credential: {
+        const resolution = try options.deps.resolve_connection_credential(
+            alloc,
+            cfg.gateway_provider.oauth_transport,
+            cfg.secret_store,
+            profile,
+            cfg.gateway_provider.connection_seed,
+            .refresh_if_needed,
+        );
+        owned_route_credential = resolution.credential orelse
+            return missingCredentialResult(alloc, options);
+        break :credential owned_route_credential.?;
+    };
     const api_key = credential.token;
     ctx.api_key = api_key;
     ctx.gateway_team = credential.gatewayTeam();
@@ -1545,21 +1598,44 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
         checkpoint.turn_id
     else
         debug_trace.nextTurnId();
-    const profile = startup.connections.?.selectedProfile();
-    var descriptor = availableModelDescriptor(@ptrCast(&ctx), ctx.model);
+    var descriptor = if (recovery_checkpoint) |checkpoint| recovery_descriptor: {
+        const resolved = availableModelDescriptor(@ptrCast(&ctx), checkpoint.route_model);
+        break :recovery_descriptor route_snapshot.recoveryDescriptor(
+            checkpoint.route_model,
+            resolved,
+        );
+    } else availableModelDescriptor(@ptrCast(&ctx), ctx.model);
     if (model_capabilities.requiresResolvedRequestCapabilities(
         current_images.len > 0 or authorized_image_catalog.len > 0,
         ctx.effort,
         ctx.fast_mode,
         descriptor.capabilities,
-    )) descriptor = try resolveModelDescriptor(@ptrCast(&ctx), alloc, ctx.model);
-    var route = try route_snapshot.RouteSnapshot.admitSelected(
-        alloc,
-        profile,
-        cfg.gateway_provider.connection_seed,
-        descriptor,
-        cfg.gateway_chat_url,
-    );
+    )) {
+        const model = if (recovery_checkpoint) |checkpoint| checkpoint.route_model else ctx.model;
+        const resolved = try resolveModelDescriptor(@ptrCast(&ctx), alloc, model);
+        descriptor = if (recovery_checkpoint) |checkpoint|
+            route_snapshot.recoveryDescriptor(checkpoint.route_model, resolved)
+        else
+            resolved;
+    }
+    var route = if (recovery_checkpoint) |checkpoint|
+        try route_snapshot.RouteSnapshot.admitSelectedRecovery(
+            alloc,
+            profile,
+            cfg.gateway_provider.connection_seed,
+            checkpoint.route_identity.?.adapter_kind,
+            checkpoint.route_identity.?.permission_review_model_id,
+            descriptor,
+            cfg.gateway_chat_url,
+        )
+    else
+        try route_snapshot.RouteSnapshot.admitSelected(
+            alloc,
+            profile,
+            cfg.gateway_provider.connection_seed,
+            descriptor,
+            cfg.gateway_chat_url,
+        );
     defer route.deinit(alloc);
 
     const job: worker_runtime.QueuedPrompt = .{
@@ -3540,6 +3616,22 @@ fn loadStartupStateDefault(
     );
 }
 
+fn loadStartupStateWithoutCredentialsDefault(
+    alloc: Allocator,
+    _: oauth_transport.Provider,
+    _: host.SecretStore,
+    default_model: []const u8,
+    default_agent_step_limit: usize,
+    connection_seed: connection_registry.Seed,
+) !app_lifecycle.StartupState {
+    return app_lifecycle.loadStartupStateWithoutCredentials(
+        alloc,
+        default_model,
+        default_agent_step_limit,
+        connection_seed,
+    );
+}
+
 fn initializeSessionStoresDefault(ctx: *AskContext) !void {
     try ctx.initializeSessionStores();
 }
@@ -4273,6 +4365,53 @@ fn testNoMcpRuntime(_: Allocator, _: mcp_elicitation.Capabilities) !?*mcp_runtim
     return null;
 }
 
+fn testResolveConnectionCredential(
+    alloc: Allocator,
+    _: oauth_transport.Provider,
+    _: host.SecretStore,
+    _: connection_registry.Profile,
+    _: connection_registry.Seed,
+    _: credentials.LoadMode,
+) !credentials.Resolution {
+    return .{ .credential = .{
+        .token = try alloc.dupe(u8, "key"),
+        .source = .ai_gateway_api_key,
+    } };
+}
+
+var test_route_credential_resolution_calls: usize = 0;
+
+fn testCountRouteCredentialResolution(
+    alloc: Allocator,
+    transport: oauth_transport.Provider,
+    secret_store: host.SecretStore,
+    profile: connection_registry.Profile,
+    seed: connection_registry.Seed,
+    mode: credentials.LoadMode,
+) !credentials.Resolution {
+    test_route_credential_resolution_calls += 1;
+    return testResolveConnectionCredential(
+        alloc,
+        transport,
+        secret_store,
+        profile,
+        seed,
+        mode,
+    );
+}
+
+var test_rejected_recovery_provider_calls: usize = 0;
+
+fn testCountRejectedRecoveryProviderCall(
+    _: *const agent_runtime.AgentRuntimeDeps,
+    _: ?agent_runtime.SemanticPresentationSink,
+    _: agent_runtime.LifecycleContext,
+    _: agent_runtime.Config,
+    _: worker_runtime.QueuedPrompt,
+) !void {
+    test_rejected_recovery_provider_calls += 1;
+}
+
 fn testPromptRunDeps(stdout_capture: *TestCapture, stderr_capture: *TestCapture, load_startup_state: LoadStartupStateFn) RunDeps {
     return .{
         .stdout_ctx = stdout_capture,
@@ -4280,6 +4419,8 @@ fn testPromptRunDeps(stdout_capture: *TestCapture, stderr_capture: *TestCapture,
         .write_stdout = TestCapture.write,
         .write_stderr = TestCapture.write,
         .load_startup_state = load_startup_state,
+        .load_startup_state_without_credentials = load_startup_state,
+        .resolve_connection_credential = testResolveConnectionCredential,
         .initialize_session_stores = testSkipSessionStores,
         .load_skills = testLoadNoSkills,
         .context_registry = test_no_context_registry,
@@ -6768,6 +6909,81 @@ fn testAskDurableState(
         .total_input_tokens = 0,
         .total_output_tokens = 0,
     };
+}
+
+test "ask rejects a changed recovery adapter before credential and provider effects" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), "home");
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home);
+    const test_home = try TestAskHome.install(alloc, home);
+    defer test_home.deinit();
+
+    var store = try session_store.Store.initFromHome(alloc, home, "/tmp/fx-test");
+    defer store.deinit(alloc);
+    var state = try testAskDurableState(
+        alloc,
+        "/tmp/fx-test",
+        "ask-adapter-mismatch",
+    );
+    defer state.deinit(alloc);
+    state.preferences.connection_id = try alloc.dupe(u8, "vercel");
+    var writable = try store.startWritableSession(alloc, state);
+    const checkpoint = session_codec.RecoveryCheckpoint{
+        .version = 2,
+        .route_identity = .{
+            .connection_id = @constCast("vercel"),
+            .adapter_kind = @constCast("changed-adapter"),
+            .permission_review_model_id = @constCast("reviewer/model"),
+        },
+        .turn_id = 5,
+        .user = .{ .text = @constCast("resume") },
+        .assistant_source = @constCast("partial"),
+        .cause = .network_interrupted,
+        .action = .retrying_request,
+        .route_model = @constCast("model"),
+        .requested_fast_mode = false,
+        .fast_mode = false,
+        .max_provider_attempts = 10,
+        .consumed_provider_attempts = 1,
+    };
+    _ = try writable.appendEvent(
+        alloc,
+        .{ .recovery_checkpoint_set = .{ .checkpoint = checkpoint } },
+        2,
+        .retry_expected_tail,
+        .{},
+    );
+    writable.deinit(alloc);
+
+    var stdout_capture: TestCapture = .{};
+    defer stdout_capture.deinit(alloc);
+    var stderr_capture: TestCapture = .{};
+    defer stderr_capture.deinit(alloc);
+    var deps = testPromptRunDeps(
+        &stdout_capture,
+        &stderr_capture,
+        testPresentKeySavedStartup,
+    );
+    deps.initialize_session_stores = initializeSessionStoresDefault;
+    deps.resolve_connection_credential = testCountRouteCredentialResolution;
+    deps.process_queued_prompt = testCountRejectedRecoveryProviderCall;
+    test_route_credential_resolution_calls = 0;
+    test_rejected_recovery_provider_calls = 0;
+
+    try std.testing.expectError(
+        error.RecoveryRouteAdapterChanged,
+        runPromptInternal(alloc, "", null, testConfig(), .{
+            .output_mode = .json,
+            .resume_target = .{ .id = "ask-adapter-mismatch" },
+            .continue_recovery = true,
+            .deps = deps,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), test_route_credential_resolution_calls);
+    try std.testing.expectEqual(@as(usize, 0), test_rejected_recovery_provider_calls);
 }
 
 test "saved ask rejects a canonical one-off child during resume initialization" {

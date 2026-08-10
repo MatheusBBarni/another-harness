@@ -299,6 +299,11 @@ pub const Runtime = struct {
         return self.profiles.items[self.selected_index];
     }
 
+    pub fn profile(self: *const Self, id: []const u8) error{UnknownConnection}!Profile {
+        const index = self.indexOf(id) orelse return error.UnknownConnection;
+        return self.profiles.items[index];
+    }
+
     pub fn snapshot(self: *const Self) Snapshot {
         return .{
             .selected_id = self.selectedProfile().id,

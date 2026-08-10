@@ -561,21 +561,60 @@ pub fn handlePrompt(
     const current_images = if (recovery_checkpoint) |checkpoint| checkpoint.user.images else &.{};
     const authorized_image_catalog = try session.session_rt.snapshotImageCatalog(alloc, current_images);
     defer types.freeImageAttachmentSlice(alloc, authorized_image_catalog);
-    const profile = state.connections.?.selectedProfile();
-    var descriptor = availableModelDescriptor(@ptrCast(&ctx), session.model);
+    const connection_id = if (recovery_checkpoint) |checkpoint|
+        checkpoint.route_identity.?.connection_id
+    else if (session.writable) |*writable|
+        writable.state.preferences.connection_id.?
+    else if (session.wasm_state) |*durable|
+        durable.preferences.connection_id.?
+    else
+        state.connections.?.selectedProfile().id;
+    const profile = state.connections.?.profile(connection_id) catch
+        return error.MissingSessionConnection;
+    if (recovery_checkpoint) |checkpoint| {
+        try route_snapshot.validateRecoveryProfile(
+            profile,
+            checkpoint.route_identity.?.adapter_kind,
+        );
+    }
+    var descriptor = if (recovery_checkpoint) |checkpoint| recovery_descriptor: {
+        const resolved = availableModelDescriptor(@ptrCast(&ctx), checkpoint.route_model);
+        break :recovery_descriptor route_snapshot.recoveryDescriptor(
+            checkpoint.route_model,
+            resolved,
+        );
+    } else availableModelDescriptor(@ptrCast(&ctx), session.model);
     if (model_capabilities.requiresResolvedRequestCapabilities(
         current_images.len > 0 or authorized_image_catalog.len > 0,
         session.effort,
         session.fast_mode,
         descriptor.capabilities,
-    )) descriptor = try resolveModelDescriptor(@ptrCast(&ctx), alloc, session.model);
-    var route = try route_snapshot.RouteSnapshot.admitSelected(
-        alloc,
-        profile,
-        state.cfg.gateway_provider.connection_seed,
-        descriptor,
-        state.cfg.gateway_chat_url,
-    );
+    )) {
+        const model = if (recovery_checkpoint) |checkpoint| checkpoint.route_model else session.model;
+        const resolved = try resolveModelDescriptor(@ptrCast(&ctx), alloc, model);
+        descriptor = if (recovery_checkpoint) |checkpoint|
+            route_snapshot.recoveryDescriptor(checkpoint.route_model, resolved)
+        else
+            resolved;
+    }
+    var route = if (recovery_checkpoint) |checkpoint|
+        try route_snapshot.RouteSnapshot.admitSelectedRecovery(
+            alloc,
+            profile,
+            state.cfg.gateway_provider.connection_seed,
+            checkpoint.route_identity.?.adapter_kind,
+            checkpoint.route_identity.?.permission_review_model_id,
+            descriptor,
+            state.cfg.gateway_chat_url,
+        )
+    else
+        try route_snapshot.RouteSnapshot.admitSelected(
+            alloc,
+            profile,
+            state.cfg.gateway_provider.connection_seed,
+            descriptor,
+            state.cfg.gateway_chat_url,
+        );
     defer route.deinit(alloc);
 
     const job: worker_runtime.QueuedPrompt = .{
@@ -1012,10 +1051,19 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
 fn resolveRouteCredential(
     raw_ctx: *anyopaque,
     alloc: Allocator,
-    _: *const route_snapshot.RouteSnapshot,
+    route: *const route_snapshot.RouteSnapshot,
 ) !agent_runtime.RouteCredential {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
     const session = if (ctx.state.active_session) |*active| active else return error.NoActiveSession;
+    const admitted_connection = if (session.writable) |*writable|
+        writable.state.preferences.connection_id.?
+    else if (session.wasm_state) |*durable|
+        durable.preferences.connection_id.?
+    else
+        ctx.state.connections.?.selectedProfile().id;
+    if (!std.mem.eql(u8, route.connection_id, admitted_connection)) {
+        return error.RouteCredentialMismatch;
+    }
     const credential = try alloc.dupe(u8, session.api_key);
     errdefer alloc.free(credential);
     const tenant = if (ctx.state.gateway_team) |value| try alloc.dupe(u8, value) else null;
