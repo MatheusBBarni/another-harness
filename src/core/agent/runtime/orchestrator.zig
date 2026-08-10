@@ -2988,6 +2988,10 @@ fn processQueuedPromptLoop(
                     "[]"
                 else
                     config.gateway_tools_json,
+                .provider_tools = if (final_permission_response)
+                    &.{}
+                else
+                    config.provider_tools,
                 .messages = request_messages,
                 .tool_choice = tool_choice,
                 .selected_dynamic_tool_schemas = if (final_permission_response)

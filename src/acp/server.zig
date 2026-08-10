@@ -334,20 +334,23 @@ pub fn prepareConnectionCredential(
     var credential = resolution.credential orelse return error.MissingCredential;
     errdefer credential.deinit(alloc);
     var catalog_cancel_flag = std.atomic.Value(bool).init(false);
-    _ = try state.capability_resolver.resolve(
-        state.alloc,
-        state.cfg.gateway_provider.model_catalog,
-        .{
-            .access = credentials.catalogAccessForCredential(
-                credential.source,
-                credential.token,
-                credential.gatewayTeam(),
-            ),
-            .endpoint = state.cfg.gateway_models_path,
-            .cancel_flag = &catalog_cancel_flag,
-        },
-        model,
-    );
+    const adapter = state.cfg.gateway_provider.provider_adapter;
+    if (gateway_provider.modelCatalogForAdapter(profile.adapter_id, adapter)) |catalog| {
+        _ = try state.capability_resolver.resolve(
+            state.alloc,
+            catalog,
+            .{
+                .access = credentials.catalogAccessForCredential(
+                    credential.source,
+                    credential.token,
+                    credential.gatewayTeam(),
+                ),
+                .endpoint = state.cfg.gateway_models_path,
+                .cancel_flag = &catalog_cancel_flag,
+            },
+            model,
+        );
+    }
     return credential;
 }
 
@@ -619,9 +622,7 @@ pub fn runWithTransport(
         .alloc = alloc,
         .cfg = cfg,
         .writer = writer_value,
-        .web_search_runtime = web_search_runtime.Runtime.init(.{
-            .provider = cfg.gateway_provider.web_search,
-        }),
+        .web_search_runtime = web_search_runtime.Runtime.init(.{}),
         .background = background_runtime.BackgroundRuntime.init(
             cfg.background_process_provider,
         ),
@@ -1282,6 +1283,10 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
         });
     };
     defer startup.deinit(alloc);
+    try startup.normalizeModels(
+        alloc,
+        state.cfg.gateway_provider.provider_adapter.model_descriptors,
+    );
     try app_lifecycle.applyWorkspaceLaunch(
         &startup,
         alloc,

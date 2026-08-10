@@ -122,6 +122,7 @@ const web_search_runtime = @import("core/tooling/web_search_runtime.zig");
 const worker_runtime = @import("core/agent/worker_runtime.zig");
 const question_prompt = @import("core/agent/question_prompt.zig");
 const gateway_client = @import("gateway/client.zig");
+const model_catalog = @import("core/gateway/model_catalog.zig");
 const js_host_stream_provider = @import("gateway/js_host_stream_provider.zig");
 const js_host_model_catalog = @import("gateway/js_host_model_catalog.zig");
 const url_opener = @import("core/hosts/url_opener.zig");
@@ -473,9 +474,25 @@ const App = struct {
     }
 
     pub fn providerAdapter(self: *const Self) agent_stream_provider.ProviderAdapter {
-        var adapter = builtin_gateway.provider_adapter;
+        var adapter = if (comptime host_target.is_wasm)
+            agent_stream_provider.ProviderAdapter{
+                .kind = builtin_gateway.connection_seed.adapter_id,
+                .model_catalog = js_host_model_catalog.provider,
+                .model_descriptors = builtin_gateway.model_descriptor_provider,
+                .provider_tools = &.{.web_search},
+                .stream_fn = builtin_gateway.streamVercelAdapter,
+            }
+        else
+            builtin_gateway.provider_adapter;
         adapter.legacy_provider = self.agentStreamProvider();
         return adapter;
+    }
+
+    fn selectedModelCatalogProvider(self: *const Self) ?model_catalog.Provider {
+        const profile = self.auth.selectedConnectionProfile() catch return null;
+        const adapter = self.providerAdapter();
+        if (!std.mem.eql(u8, profile.adapter_id, adapter.kind)) return null;
+        return adapter.model_catalog;
     }
 
     pub fn activeConnectionId(self: *const Self) []const u8 {
@@ -623,9 +640,7 @@ const App = struct {
     permission_state: app_permission_runtime.State = .{},
     agent_step_limit: usize = default_max_agent_steps,
     web_fetch_runtime: web_fetch_runtime.Runtime = web_fetch_runtime.Runtime.init(.{}),
-    web_search_runtime: web_search_runtime.Runtime = web_search_runtime.Runtime.init(.{
-        .provider = if (host_profile.web_search) builtin_gateway.default_web_search_provider else null,
-    }),
+    web_search_runtime: web_search_runtime.Runtime = web_search_runtime.Runtime.init(.{}),
     web_search_models_path: []const u8 = builtin_gateway.models_path,
     lifecycle_runtime: hooks.Runtime = hooks.Runtime.init(std.heap.c_allocator),
     lifecycle_view: hooks.RuntimeView = hooks.RuntimeView.empty(),
@@ -1719,6 +1734,11 @@ const App = struct {
             .permission_mode = permission_mode,
             .permission_rules = permission_rules,
             .subagent_available = self.session_persistence.subagent_host != null,
+            .terminal_available = self.session_persistence.subagent_host != null and
+                tool_dispatch.ToolCapabilities.for_host(host.current()).terminalAvailable(),
+            .provider_tools = self.providerAdapter().provider_tools,
+            .fx_web_search_installed = host_profile.web_search and
+                self.providerAdapter().web_search != null,
         });
     }
 
@@ -1881,26 +1901,31 @@ const App = struct {
     }
 
     pub fn fetchModelIds(self: *App) !std.ArrayList([]u8) {
+        const provider = self.selectedModelCatalogProvider() orelse return error.Unavailable;
         return AgentAppRuntime.fetchModelIds(
             self,
-            if (comptime host_target.is_wasm) js_host_model_catalog.provider else builtin_gateway.model_catalog_provider,
+            provider,
             builtin_gateway.models_path,
         );
     }
 
     pub fn startModelCacheWarmup(self: *App) void {
+        const provider = self.selectedModelCatalogProvider() orelse {
+            debug_trace.logf("gateway", "model_cache_warmup_skipped reason=unsupported_adapter", .{});
+            return;
+        };
         if (comptime host_profile.cooperative_agent) {
             if (self.auth.credentialNeedsRefresh()) {
                 debug_trace.logf("auth", "model_cache_warmup_deferred reason=credential_refresh_required", .{});
                 return;
             }
             self.model_cache.loadCooperative(
-                js_host_model_catalog.provider,
+                provider,
                 self.auth.modelCatalogAccess(),
             );
         } else {
             self.model_cache.startWarmup(
-                builtin_gateway.model_catalog_provider,
+                provider,
                 self.auth.modelCatalogAccess(),
             );
         }

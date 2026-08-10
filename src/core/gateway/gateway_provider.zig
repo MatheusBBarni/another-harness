@@ -6,7 +6,6 @@ const oauth_transport = @import("../auth/oauth_transport.zig");
 const model_capabilities = @import("../config/model_capabilities.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const output_contracts = @import("../output/output_contracts.zig");
-const web_search_provider = @import("../tooling/web_search_provider.zig");
 const connection_registry = @import("connection_registry.zig");
 const model_catalog = @import("model_catalog.zig");
 const model_catalog_metadata = @import("model_catalog_metadata.zig");
@@ -25,50 +24,12 @@ pub const ChatUrlProvider = struct {
     }
 };
 
-pub const CliModelCatalogInput = struct {
-    access: credentials.CatalogAccess = .{ .public_only = .no_credential },
-    endpoint: []const u8,
-    cancel_flag: ?*std.atomic.Value(bool) = null,
-};
-
-pub const CliModelCatalogResult = union(enum) {
-    loaded: struct {
-        /// Owned model id strings; the caller frees them with `collections.freeStringList`.
-        ids: std.ArrayList([]u8),
-        provenance: model_catalog.Provenance,
-    },
-    failure: model_catalog.FailedOutcome,
-};
-
-pub const FetchCliModelCatalogFn = *const fn (
-    ?*anyopaque,
-    Allocator,
-    CliModelCatalogInput,
-) CliModelCatalogResult;
-
-pub const CliModelCatalogProvider = struct {
-    /// When set, context must remain valid until every in-flight `fetch` returns.
-    context: ?*anyopaque = null,
-    fetch_fn: FetchCliModelCatalogFn,
-
-    pub fn fetch(
-        self: CliModelCatalogProvider,
-        alloc: Allocator,
-        input: CliModelCatalogInput,
-    ) CliModelCatalogResult {
-        return self.fetch_fn(self.context, alloc, input);
-    }
-};
-
 pub const Provider = struct {
     connection_seed: connection_registry.Seed,
     agent_stream: agent_stream_provider.Provider,
     provider_adapter: agent_stream_provider.ProviderAdapter,
     oauth_transport: oauth_transport.Provider,
     chat_url: ChatUrlProvider,
-    cli_model_catalog: CliModelCatalogProvider,
-    web_search: web_search_provider.Provider,
-    model_catalog: model_catalog.Provider,
 };
 
 test "account usage lookup dispatches through the injected provider" {
@@ -113,6 +74,14 @@ const CapabilityResolverState = enum {
     ready,
     failed,
 };
+
+pub fn modelCatalogForAdapter(
+    admitted_adapter_kind: []const u8,
+    adapter: agent_stream_provider.ProviderAdapter,
+) ?model_catalog.Provider {
+    if (!std.mem.eql(u8, admitted_adapter_kind, adapter.kind)) return null;
+    return adapter.model_catalog;
+}
 
 pub const CapabilityResolver = struct {
     catalog: std.ArrayList(model_catalog.ModelCatalogEntry) = .empty,
@@ -268,6 +237,24 @@ const FakeCatalog = struct {
         };
     }
 };
+
+test "model catalog selection requires the admitted adapter kind" {
+    var fake = FakeCatalog{ .outcome = .ready };
+    const adapter = agent_stream_provider.ProviderAdapter{
+        .kind = "matching-adapter",
+        .model_catalog = fake.provider(),
+        .stream_fn = agent_stream_provider.unavailable_adapter.stream_fn,
+    };
+
+    const matching = modelCatalogForAdapter("matching-adapter", adapter).?;
+    try std.testing.expect(matching.context.? == @as(*anyopaque, @ptrCast(&fake)));
+    try std.testing.expect(modelCatalogForAdapter("other-adapter", adapter) == null);
+    try std.testing.expectEqual(@as(usize, 0), fake.calls);
+
+    var without_catalog = adapter;
+    without_catalog.model_catalog = null;
+    try std.testing.expect(modelCatalogForAdapter("matching-adapter", without_catalog) == null);
+}
 
 test "available capabilities never fetch and use a completed catalog snapshot" {
     const alloc = std.testing.allocator;

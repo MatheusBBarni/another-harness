@@ -8,13 +8,9 @@ const gateway_provider = @import("core/gateway/gateway_provider.zig");
 const account_usage_provider = @import("core/gateway/account_usage_provider.zig");
 const host = @import("core/hosts/host.zig");
 const io_mod = @import("core/shared/io.zig");
-const model_catalog = @import("core/gateway/model_catalog.zig");
 const js_host_model_catalog = @import("gateway/js_host_model_catalog.zig");
 const oauth_transport = @import("core/auth/oauth_transport.zig");
 const output_contracts = @import("core/output/output_contracts.zig");
-const web_search_contract = @import("core/tooling/web_search_contract.zig");
-const web_search_policy = @import("core/tooling/web_search_policy.zig");
-const web_search_provider = @import("core/tooling/web_search_provider.zig");
 const builtin_context = @import("builtins/context.zig");
 const builtin_gateway = @import("builtins/gateway.zig");
 const builtin_modes = @import("builtins/modes.zig");
@@ -61,47 +57,17 @@ const js_host_gateway_provider = gateway_provider.Provider{
     .provider_adapter = .{
         .kind = builtin_gateway.connection_seed.adapter_id,
         .account_usage = .{ .fetch_fn = fetchCredits },
+        .model_catalog = js_host_model_catalog.provider,
+        .model_descriptors = builtin_gateway.model_descriptor_provider,
         .legacy_provider = js_host_stream_provider.provider(),
         .stream_fn = builtin_gateway.provider_adapter.stream_fn,
     },
     .oauth_transport = oauth_transport.unavailable_provider,
     .chat_url = .{ .resolve_fn = resolveChatUrl },
-    .cli_model_catalog = .{ .fetch_fn = fetchCliModelCatalog },
-    .web_search = unavailable_web_search_provider,
-    .model_catalog = js_host_model_catalog.provider,
 };
 
 fn resolveChatUrl(_: ?*anyopaque, fallback: []const u8) []const u8 {
     return fallback;
-}
-
-fn fetchCliModelCatalog(
-    _: ?*anyopaque,
-    alloc: Allocator,
-    input: gateway_provider.CliModelCatalogInput,
-) gateway_provider.CliModelCatalogResult {
-    const result = model_catalog.fetchWithPublicFallback(js_host_model_catalog.provider, alloc, .{
-        .access = input.access,
-        .endpoint = input.endpoint,
-        .cancel_flag = input.cancel_flag,
-        .view = .full,
-    });
-    return switch (result) {
-        .loaded => |loaded| project: {
-            var catalog = loaded.catalog;
-            defer model_catalog.freeModelCatalog(alloc, &catalog);
-            const ids = model_catalog.projectModelIds(alloc, catalog.items) catch return .{ .failure = .{
-                .access = loaded.provenance.access,
-                .anonymous_fallback_used = loaded.provenance.anonymous_fallback_used,
-                .failure = .{ .category = .resource_exhausted },
-            } };
-            break :project .{ .loaded = .{
-                .ids = ids,
-                .provenance = loaded.provenance,
-            } };
-        },
-        .failed => |failed| .{ .failure = failed },
-    };
 }
 
 fn fetchCredits(
@@ -110,30 +76,4 @@ fn fetchCredits(
     _: account_usage_provider.Input,
 ) output_contracts.CreditsSnapshot {
     return .{};
-}
-
-const unavailable_web_search_policy = web_search_policy.WebSearchPolicy{
-    .preferred_backends = &.{},
-    .backend_policies = &.{},
-};
-
-const unavailable_web_search_provider = web_search_provider.Provider{
-    .policy = unavailable_web_search_policy,
-    .preferred_backends_fn = preferredWebSearchBackends,
-    .execute_fn = executeWebSearch,
-};
-
-fn preferredWebSearchBackends(_: ?*anyopaque) anyerror!?[]const web_search_contract.SearchBackendId {
-    return null;
-}
-
-fn executeWebSearch(
-    _: ?*anyopaque,
-    _: Allocator,
-    _: web_search_provider.Inputs,
-    _: web_search_contract.ProviderRequest,
-    _: ?web_search_contract.ProgressFn,
-    _: ?*anyopaque,
-) anyerror!web_search_contract.ProviderResponse {
-    return error.WebSearchUnavailable;
 }

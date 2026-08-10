@@ -121,10 +121,6 @@ pub const chat_url_provider = gateway_provider.ChatUrlProvider{
     .resolve_fn = resolveChatUrlForProvider,
 };
 
-pub const cli_model_catalog_provider = gateway_provider.CliModelCatalogProvider{
-    .fetch_fn = fetchCliModelCatalog,
-};
-
 pub const account_usage = account_usage_provider.Provider{
     .fetch_fn = fetchCredits,
 };
@@ -149,6 +145,10 @@ pub const provider_adapter = agent_stream_provider_contract.ProviderAdapter{
     .kind = connection_seed.adapter_id,
     .account_usage = account_usage,
     .generation_usage = generation_usage_provider,
+    .model_catalog = model_catalog_provider,
+    .model_descriptors = model_descriptors.provider,
+    .provider_tools = &.{.web_search},
+    .web_search = default_web_search_provider,
     .stream_fn = streamVercelAdapter,
 };
 
@@ -158,9 +158,6 @@ pub const provider = gateway_provider.Provider{
     .provider_adapter = provider_adapter,
     .oauth_transport = oauth_transport_provider,
     .chat_url = chat_url_provider,
-    .cli_model_catalog = cli_model_catalog_provider,
-    .web_search = default_web_search_provider,
-    .model_catalog = model_catalog_provider,
 };
 
 const AdapterEventBridge = struct {
@@ -571,6 +568,9 @@ pub fn buildAgentRequest(
     }
     if (request.response_format != null) return error.StructuredResponseRequiresVerifiedImages;
 
+    const adapter_tools_json = try buildVercelBaseToolsJson(alloc, request);
+    defer alloc.free(adapter_tools_json);
+
     if (request.vision_mode == .unavailable and request.selected_dynamic_tool_schemas.len == 0) {
         if (request.required_tool_call_id) |target_call_id| {
             const active = budget orelse return error.PendingToolReviewRequiresBudget;
@@ -590,7 +590,7 @@ pub fn buildAgentRequest(
             const body = if (budget) |active|
                 gateway_json.buildGatewayRequiredToolRequestBodyWithOptionsAndBudget(
                     alloc,
-                    request.serialized_tools,
+                    adapter_tools_json,
                     request.messages,
                     provider_options,
                     request.max_output_tokens,
@@ -599,7 +599,7 @@ pub fn buildAgentRequest(
             else
                 gateway_json.buildGatewayRequiredToolRequestBodyWithOptionsAndOutputLimit(
                     alloc,
-                    request.serialized_tools,
+                    adapter_tools_json,
                     request.messages,
                     provider_options,
                     request.max_output_tokens,
@@ -609,7 +609,7 @@ pub fn buildAgentRequest(
         const body = if (budget) |active|
             gateway_json.buildGatewayRequestBodyWithOptionsAndBudget(
                 alloc,
-                request.serialized_tools,
+                adapter_tools_json,
                 request.messages,
                 provider_options,
                 request.tool_choice,
@@ -619,7 +619,7 @@ pub fn buildAgentRequest(
         else
             gateway_json.buildGatewayRequestBodyWithOptionsAndOutputLimit(
                 alloc,
-                request.serialized_tools,
+                adapter_tools_json,
                 request.messages,
                 provider_options,
                 request.tool_choice,
@@ -663,7 +663,7 @@ pub fn buildAgentRequest(
     if (vision_schema) |schema| try schemas.append(alloc, schema);
     const tools_json = try tool_advertisement.buildGatewayToolsJsonWithSelectedDynamicSchemas(
         alloc,
-        request.serialized_tools,
+        adapter_tools_json,
         schemas.items,
     );
     defer alloc.free(tools_json);
@@ -704,6 +704,79 @@ fn finalizeAgentRequestBody(
     );
     alloc.free(body);
     return identified;
+}
+
+fn buildVercelBaseToolsJson(
+    alloc: Allocator,
+    request: agent_stream_provider_contract.ModelRequest,
+) ![]u8 {
+    const PositionedSchema = struct {
+        position: usize,
+        json: []const u8,
+    };
+    var provider_schemas: std.ArrayList(PositionedSchema) = .empty;
+    defer provider_schemas.deinit(alloc);
+    var owned_schemas: std.ArrayList([]u8) = .empty;
+    defer {
+        for (owned_schemas.items) |schema| alloc.free(schema);
+        owned_schemas.deinit(alloc);
+    }
+
+    for (request.provider_tools) |advertisement| {
+        const schema = switch (advertisement.tool) {
+            .web_search => try vercelWebSearchToolJson(alloc),
+        };
+        owned_schemas.append(alloc, schema) catch |err| {
+            alloc.free(schema);
+            return err;
+        };
+        try provider_schemas.append(alloc, .{
+            .position = advertisement.local_schema_position,
+            .json = schema,
+        });
+    }
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, request.serialized_tools, .{});
+    defer parsed.deinit();
+    if (parsed.value != .array) return error.InvalidToolArguments;
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    var provider_index: usize = 0;
+    var first = true;
+    try out.writer.writeByte('[');
+    for (0..parsed.value.array.items.len + 1) |position| {
+        while (provider_index < provider_schemas.items.len and
+            provider_schemas.items[provider_index].position == position)
+        {
+            if (!first) try out.writer.writeByte(',');
+            first = false;
+            try out.writer.writeAll(provider_schemas.items[provider_index].json);
+            provider_index += 1;
+        }
+        if (position < parsed.value.array.items.len) {
+            if (!first) try out.writer.writeByte(',');
+            first = false;
+            try std.json.Stringify.value(parsed.value.array.items[position], .{}, &out.writer);
+        }
+    }
+    if (provider_index != provider_schemas.items.len) return error.InvalidGatewayAdvertisement;
+    try out.writer.writeByte(']');
+    return out.toOwnedSlice();
+}
+
+fn vercelWebSearchToolJson(alloc: Allocator) ![]u8 {
+    const policy = default_web_search_policy;
+    const tools_json = try providerToolsJson(alloc, .{
+        .backend = try selectedWebSearchBackend(),
+        .max_results = policy.max_results,
+        .max_output_tokens = policy.max_output_tokens,
+        .max_output_chars = policy.max_output_chars,
+    });
+    defer alloc.free(tools_json);
+    if (tools_json.len < 2 or tools_json[0] != '[' or tools_json[tools_json.len - 1] != ']') {
+        return error.InvalidGatewayAdvertisement;
+    }
+    return alloc.dupe(u8, tools_json[1 .. tools_json.len - 1]);
 }
 
 fn writeVisionGatewaySchema(
@@ -767,6 +840,27 @@ test "agent request builder scopes the product user agent to GLM 5.2" {
         try std.testing.expect(user_agent == .string);
         try std.testing.expectEqualStrings(gateway_client.user_agent, user_agent.string);
     }
+}
+
+test "agent request builder serializes neutral provider search beside local tools" {
+    const messages = [_]shared_types.ChatMessage{.{ .role = .user, .content = "question" }};
+    const body = try agent_stream_provider.build(std.testing.allocator, .{
+        .model = "anthropic/claude",
+        .serialized_tools = "[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}]",
+        .provider_tools = &.{.{ .tool = .web_search, .local_schema_position = 1 }},
+        .messages = &messages,
+        .tool_choice = .auto,
+        .capabilities = model_descriptor_provider.fallback("anthropic/claude").capabilities,
+    });
+    defer std.testing.allocator.free(body);
+
+    try std.testing.expect(std.mem.find(u8, body, "\"name\":\"read_file\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"id\":\"gateway.perplexity_search\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"name\":\"web_search\"") == null);
+    try std.testing.expect(
+        std.mem.find(u8, body, "\"name\":\"read_file\"").? <
+            std.mem.find(u8, body, "\"name\":\"perplexity_search\"").?,
+    );
 }
 
 test "agent request builder overlays selected dynamic schemas" {
@@ -1093,11 +1187,11 @@ fn executeWebSearchProvider(
 ) !Response {
     return executeGatewayWorker(alloc, .{
         .connection_id = inputs.connection_id,
-        .api_key = inputs.api_key,
-        .team = inputs.gateway_team,
-        .model = inputs.worker_model,
-        .retry_count = inputs.gateway_retry_count,
-        .chat_url = inputs.gateway_chat_url,
+        .api_key = inputs.credential,
+        .team = inputs.tenant,
+        .model = inputs.model,
+        .retry_count = inputs.retry_count,
+        .chat_url = inputs.endpoint,
         .usage = inputs.usage,
         .usage_allocator = inputs.usage_allocator,
     }, request, on_progress, progress_ctx);
@@ -1113,35 +1207,6 @@ pub fn defaultChatUrl() []const u8 {
 
 fn resolveChatUrlForProvider(_: ?*anyopaque, fallback: []const u8) []const u8 {
     return chatUrl(fallback);
-}
-
-fn fetchCliModelCatalog(
-    _: ?*anyopaque,
-    alloc: Allocator,
-    input: gateway_provider.CliModelCatalogInput,
-) gateway_provider.CliModelCatalogResult {
-    const result = model_catalog.fetchWithPublicFallback(model_catalog_provider, alloc, .{
-        .access = input.access,
-        .endpoint = input.endpoint,
-        .cancel_flag = input.cancel_flag,
-        .view = .full,
-    });
-    return switch (result) {
-        .loaded => |loaded| project: {
-            var catalog = loaded.catalog;
-            defer freeModelCatalog(alloc, &catalog);
-            const ids = model_catalog.projectModelIds(alloc, catalog.items) catch return .{ .failure = .{
-                .access = loaded.provenance.access,
-                .anonymous_fallback_used = loaded.provenance.anonymous_fallback_used,
-                .failure = .{ .category = .resource_exhausted },
-            } };
-            break :project .{ .loaded = .{
-                .ids = ids,
-                .provenance = loaded.provenance,
-            } };
-        },
-        .failed => |failed| .{ .failure = failed },
-    };
 }
 
 pub fn resolveChatUrl(fallback: []const u8, override: ?[]const u8) []const u8 {
@@ -2279,10 +2344,10 @@ test "built-in web search provider preserves missing worker configuration error"
     try std.testing.expectError(error.MissingGatewaySearchConfiguration, default_web_search_provider.execute(
         std.testing.allocator,
         .{
-            .api_key = "",
-            .worker_model = "",
-            .gateway_retry_count = retry_count,
-            .gateway_chat_url = default_chat_url,
+            .credential = "",
+            .model = "",
+            .retry_count = retry_count,
+            .endpoint = default_chat_url,
         },
         .{
             .backend = perplexity_search_backend_id,
@@ -2324,25 +2389,6 @@ test "built-in gateway chat url ignores untrusted overrides and falls back" {
         "",
     }) |bad| {
         try std.testing.expectEqualStrings(fallback, resolveChatUrl(fallback, bad));
-    }
-}
-
-test "built-in CLI catalog provider preserves cancellation detail" {
-    var cancel_flag = std.atomic.Value(bool).init(true);
-    const result = cli_model_catalog_provider.fetch(std.testing.allocator, .{
-        .endpoint = models_path,
-        .cancel_flag = &cancel_flag,
-    });
-    switch (result) {
-        .failure => |failure| try std.testing.expectEqual(
-            model_catalog.FailureCategory.cancellation,
-            failure.failure.category,
-        ),
-        .loaded => |loaded| {
-            var ids = loaded.ids;
-            collections.freeStringList(std.testing.allocator, &ids);
-            return error.TestExpectedEqual;
-        },
     }
 }
 
