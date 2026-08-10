@@ -101,6 +101,7 @@ pub const ModelRequest = struct {
     serialized_tools: []const u8,
     messages: []const types.ChatMessage,
     tool_choice: types.ToolChoice,
+    require_tool_call: bool = false,
     selected_dynamic_tool_schemas: []const []const u8 = &.{},
     vision_mode: VisionMode = .unavailable,
     vision_tool_schema: ?gateway_schema.FunctionSchema = null,
@@ -249,6 +250,7 @@ pub const ProviderToolResult = struct {
 
 pub const StreamFailure = struct {
     category: Category,
+    retryable: bool = false,
     http_status: ?std.http.Status = null,
     delivery_ambiguous: bool = false,
     detail: ?[]const u8 = null,
@@ -681,6 +683,8 @@ test "provider adapter rejects wrong routes before traffic and handles cancellat
         .credential_ref = @constCast("fake_ref"),
         .primary_model_id = @constCast("test/model"),
         .permission_review_model_id = null,
+        .vision_model_id = null,
+        .subagent_model_id = @constCast("test/model"),
         .capabilities = .{},
         .capability_source = .configured,
         .selected_fast_mode = false,
