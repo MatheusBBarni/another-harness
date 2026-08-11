@@ -607,7 +607,7 @@ const App = struct {
             preferences.connection_id orelse session_codec.legacy_connection_id
         else
             (try self.auth.selectedConnectionProfile()).id;
-        const profile = self.auth.connectionProfile(connection_id) catch |err| switch (err) {
+        const profile = self.auth.connectionProfileForRoute(connection_id) catch |err| switch (err) {
             error.UnknownConnection => return error.MissingSessionConnection,
             else => return err,
         };
@@ -1434,7 +1434,7 @@ const App = struct {
             preferences.connection_id orelse session_codec.legacy_connection_id
         else
             (try self.auth.selectedConnectionProfile()).id;
-        const profile = self.auth.connectionProfile(connection_id) catch |err| switch (err) {
+        const profile = self.auth.connectionProfileForRoute(connection_id) catch |err| switch (err) {
             error.UnknownConnection => return error.MissingSessionConnection,
             else => return err,
         };

@@ -674,6 +674,18 @@ pub const Runtime = struct {
         return connections.profile(id);
     }
 
+    /// Returns the admitted connection with this session's acquired source.
+    /// A failed preference write must not make route resolution fall back.
+    pub fn connectionProfileForRoute(self: *const Self, id: []const u8) !connection_registry.Profile {
+        var profile = try self.connectionProfile(id);
+        if (!self.credentialMatchesSelectedConnection()) return profile;
+        const selected = try self.selectedConnectionProfile();
+        if (!std.mem.eql(u8, profile.id, selected.id)) return profile;
+        const credential = self.selected_credential orelse return profile;
+        profile.credential_ref = @constCast(@tagName(credential.source));
+        return profile;
+    }
+
     /// Resolves one owned credential from an admitted reference without
     /// consulting the currently selected connection.
     pub fn resolveCredentialReference(
@@ -2939,6 +2951,38 @@ test "auth runtime preserves every adapter acquisition outcome" {
     probe.outcome = .cancelled;
     try std.testing.expectError(error.Cancelled, runtime.resolveProfileCredential(alloc, profile, .if_needed, null));
     try std.testing.expectEqual(@as(usize, 5), probe.calls);
+}
+
+test "route profile preserves the acquired source when preference persistence fails" {
+    const alloc = std.testing.allocator;
+    var connections = try initTestConnectionRegistry(alloc);
+    try connections.add(.{
+        .id = "peer",
+        .display_name = "Peer",
+        .adapter_id = "test_peer",
+        .credential_ref = "peer_key",
+        .remembered_model = "model/peer",
+    });
+
+    var runtime: Runtime = .{};
+    defer runtime.deinit(alloc);
+    runtime.adoptConnections(alloc, &connections);
+    var credential = try makeTestCredential(alloc, "login-token", .fx_login, null, null);
+    defer credential.deinit(alloc);
+    _ = runtime.adoptCredential(alloc, &credential);
+
+    var persistence: ConnectionSelectionPersistence = .{};
+    runtime.connections.?.persistence = .{
+        .context = &persistence,
+        .write_fn = ConnectionSelectionPersistence.write,
+    };
+    try std.testing.expectError(
+        error.ConnectionWriteFailed,
+        runtime.rememberSelectedCredentialReference("fx_login"),
+    );
+    try std.testing.expectEqualStrings("automatic", (try runtime.selectedConnectionProfile()).credential_ref);
+    try std.testing.expectEqualStrings("fx_login", (try runtime.connectionProfileForRoute("vercel")).credential_ref);
+    try std.testing.expectEqualStrings("peer_key", (try runtime.connectionProfileForRoute("peer")).credential_ref);
 }
 
 test "credentials are bound to the selected connection and invalid auth disconnects it" {
