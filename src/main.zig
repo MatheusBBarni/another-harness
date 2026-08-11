@@ -47,6 +47,7 @@ const command_specs = @import("core/slash_commands/command_specs.zig");
 const builtin_context = @import("builtins/context.zig");
 const builtin_devbox = @import("builtins/devbox.zig");
 const builtin_gateway = @import("builtins/gateway.zig");
+const adapter_registry = @import("core/gateway/adapter_registry.zig");
 const gateway_provider = @import("core/gateway/gateway_provider.zig");
 const output_contracts = @import("core/output/output_contracts.zig");
 const generation_usage_provider = @import("core/session/generation_usage_provider.zig");
@@ -358,6 +359,22 @@ fn currentBuild() update_target.CurrentBuild {
     };
 }
 
+const wasm_provider_adapter = agent_stream_provider.ProviderAdapter{
+    .kind = builtin_gateway.connection_seed.adapter_id,
+    .auth = builtin_gateway.auth_provider_for_transport(&js_host_auth.oauth_provider),
+    .model_catalog = js_host_model_catalog.provider,
+    .model_descriptors = builtin_gateway.model_descriptor_provider,
+    .provider_tools = &.{.web_search},
+    .stream_fn = builtin_gateway.streamVercelAdapter,
+};
+
+const wasm_production_adapters = [_]agent_stream_provider.ProviderAdapter{wasm_provider_adapter};
+
+const production_adapter_registry = if (host_target.is_wasm)
+    adapter_registry.AdapterRegistry{ .adapters = &wasm_production_adapters }
+else
+    builtin_gateway.production_adapter_registry;
+
 const App = struct {
     pub const app_version = version;
     pub const host_profile = if (host_target.is_wasm) host_runtime_profile.wasm else host_runtime_profile.native;
@@ -475,13 +492,7 @@ const App = struct {
 
     pub fn providerAdapter(self: *const Self) agent_stream_provider.ProviderAdapter {
         var adapter = if (comptime host_target.is_wasm)
-            agent_stream_provider.ProviderAdapter{
-                .kind = builtin_gateway.connection_seed.adapter_id,
-                .model_catalog = js_host_model_catalog.provider,
-                .model_descriptors = builtin_gateway.model_descriptor_provider,
-                .provider_tools = &.{.web_search},
-                .stream_fn = builtin_gateway.streamVercelAdapter,
-            }
+            wasm_provider_adapter
         else
             builtin_gateway.provider_adapter;
         adapter.legacy_provider = self.agentStreamProvider();
@@ -633,7 +644,7 @@ const App = struct {
         else
             oauth_transport.unavailable_provider,
         if (host_target.is_wasm) host.unavailable_secret_store else native_host.secret_store,
-        builtin_gateway.production_adapter_registry,
+        production_adapter_registry,
     ),
     selected_model: std.ArrayList(u8) = .empty,
     model_cache: model_cache_runtime.Runtime = model_cache_runtime.Runtime.init(std.heap.c_allocator, builtin_gateway.models_path),
@@ -756,7 +767,7 @@ const App = struct {
                 .skill_root_policy = if (comptime host_target.is_wasm) wasm_skill_root_policy else builtin_skills.root_policy,
                 .terminal_title = ui_render.terminal_title,
                 .connection_seed = builtin_gateway.connection_seed,
-                .adapter_registry = builtin_gateway.production_adapter_registry,
+                .adapter_registry = production_adapter_registry,
                 .model_descriptors = builtin_gateway.model_descriptor_provider,
             },
         );

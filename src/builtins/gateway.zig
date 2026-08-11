@@ -146,26 +146,28 @@ pub const agent_stream_provider = agent_stream_provider_contract.Provider{
     .stream_fn = streamAgentCompletion,
 };
 
-const VercelAuthContext = struct {
-    transport: oauth_transport.Provider,
-};
+/// The transport must outlive every operation through the returned provider.
+pub fn auth_provider_for_transport(transport: *const oauth_transport.Provider) adapter_auth.Provider {
+    return .{
+        .kind = connection_seed.adapter_id,
+        .context = transport,
+        .acquire_fn = acquireVercelCredential,
+        .logout_fn = logoutVercel,
+        .start_sign_in_fn = startVercelSignIn,
+        .load_teams_fn = loadVercelTeams,
+        .invalidate_fn = invalidateVercelCredential,
+        .status_fn = loadVercelStatus,
+    };
+}
 
-const vercel_auth_context = VercelAuthContext{
-    .transport = oauth_transport_provider,
-};
+fn native_auth_provider() adapter_auth.Provider {
+    var value = auth_provider_for_transport(&oauth_transport_provider);
+    value.login_fn = runVercelLogin;
+    value.teams_fn = runVercelTeams;
+    return value;
+}
 
-pub const auth_provider = adapter_auth.Provider{
-    .kind = connection_seed.adapter_id,
-    .context = &vercel_auth_context,
-    .acquire_fn = acquireVercelCredential,
-    .login_fn = runVercelLogin,
-    .logout_fn = logoutVercel,
-    .teams_fn = runVercelTeams,
-    .start_sign_in_fn = startVercelSignIn,
-    .load_teams_fn = loadVercelTeams,
-    .invalidate_fn = invalidateVercelCredential,
-    .status_fn = loadVercelStatus,
-};
+pub const auth_provider = native_auth_provider();
 
 pub const provider_adapter = agent_stream_provider_contract.ProviderAdapter{
     .kind = connection_seed.adapter_id,
@@ -194,8 +196,8 @@ pub const provider = gateway_provider.Provider{
     .chat_url = chat_url_provider,
 };
 
-fn vercelContext(raw: *const anyopaque) *const VercelAuthContext {
-    return @ptrCast(@alignCast(raw));
+fn vercelTransport(raw: *const anyopaque) oauth_transport.Provider {
+    return @as(*const oauth_transport.Provider, @ptrCast(@alignCast(raw))).*;
 }
 
 fn credentialSourceFromReference(reference: []const u8) !?credentials.Source {
@@ -274,7 +276,7 @@ fn acquireVercelCredential(
     alloc: Allocator,
     request: adapter_auth.Request,
 ) Allocator.Error!adapter_auth.Acquisition {
-    const context = vercelContext(raw);
+    const transport = vercelTransport(raw);
 
     const resolution = switch (request.mode) {
         .stored, .if_needed => acquisition: {
@@ -284,7 +286,7 @@ fn acquireVercelCredential(
             const resolved = switch (request.source_resolution) {
                 .allow_fallback => credentials.resolvePreferring(
                     alloc,
-                    context.transport,
+                    transport,
                     request.host.secret_store,
                     if (request.mode == .stored) .stored else .refresh_if_needed,
                     source,
@@ -292,7 +294,7 @@ fn acquireVercelCredential(
                 .exact => if (source) |selected|
                     credentials.resolveExact(
                         alloc,
-                        context.transport,
+                        transport,
                         request.host.secret_store,
                         if (request.mode == .stored) .stored else .refresh_if_needed,
                         selected,
@@ -311,7 +313,7 @@ fn acquireVercelCredential(
             if (!std.mem.eql(u8, source_id, @tagName(credentials.Source.fx_login))) {
                 return .{ .failed = .{ .category = .unavailable } };
             }
-            const credential = credentials.refreshFxLoginCredential(alloc, context.transport) catch |err| {
+            const credential = credentials.refreshFxLoginCredential(alloc, transport) catch |err| {
                 if (err == error.OutOfMemory) return error.OutOfMemory;
                 return normalizedAcquisitionFailure(err);
             };
@@ -333,7 +335,7 @@ fn runVercelLogin(
     _: connection_registry.Profile,
     auth_host: adapter_auth.AuthHost,
 ) Allocator.Error!adapter_auth.OperationOutcome {
-    login_flow.runLogin(alloc, vercelContext(raw).transport, auth_host.url_opener) catch |err| {
+    login_flow.runLogin(alloc, vercelTransport(raw), auth_host.url_opener) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
         const failure = normalizeAuthFailure(err);
         return if (failure.category == .cancelled) .cancelled else .{ .failed = failure };
@@ -347,7 +349,7 @@ fn logoutVercel(
     _: connection_registry.Profile,
     _: adapter_auth.AuthHost,
 ) Allocator.Error!adapter_auth.LogoutOutcome {
-    const result = login_flow.logout(alloc, vercelContext(raw).transport) catch |err| {
+    const result = login_flow.logout(alloc, vercelTransport(raw)) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
         return .{ .failed = normalizeAuthFailure(err) };
     };
@@ -364,7 +366,7 @@ fn runVercelTeams(
     _: connection_registry.Profile,
     _: adapter_auth.AuthHost,
 ) Allocator.Error!adapter_auth.OperationOutcome {
-    login_flow.runTeams(alloc, vercelContext(raw).transport) catch |err| {
+    login_flow.runTeams(alloc, vercelTransport(raw)) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
         const failure = normalizeAuthFailure(err);
         return if (failure.category == .cancelled) .cancelled else .{ .failed = failure };
@@ -430,7 +432,7 @@ fn startVercelSignIn(
 ) Allocator.Error!adapter_auth.StartSignInOutcome {
     const state = try alloc.create(VercelSignIn);
     state.* = .{};
-    const started = state.runtime.start(alloc, vercelContext(raw).transport) catch |err| {
+    const started = state.runtime.start(alloc, vercelTransport(raw)) catch |err| {
         state.runtime.deinit(alloc);
         alloc.destroy(state);
         if (err == error.OutOfMemory) return error.OutOfMemory;
@@ -505,7 +507,7 @@ fn loadVercelTeams(
     _: connection_registry.Profile,
     _: adapter_auth.AuthHost,
 ) Allocator.Error!adapter_auth.TeamsOutcome {
-    var selection = login_flow.loadTeamSelection(alloc, vercelContext(raw).transport) catch |err| {
+    var selection = login_flow.loadTeamSelection(alloc, vercelTransport(raw)) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
         const failure = normalizeAuthFailure(err);
         return if (failure.category == .cancelled) .cancelled else .{ .failed = failure };
@@ -3892,12 +3894,8 @@ test "exact conditional fx login refresh failure is normalized without fallback"
     try oauth_session.saveNewSession(alloc, session);
 
     var refresh_probe: ConditionalRefreshProbe = .{};
-    const context = VercelAuthContext{ .transport = refresh_probe.provider() };
-    const test_provider = adapter_auth.Provider{
-        .kind = connection_seed.adapter_id,
-        .context = &context,
-        .acquire_fn = acquireVercelCredential,
-    };
+    const transport = refresh_probe.provider();
+    const test_provider = auth_provider_for_transport(&transport);
     var store = AdapterAuthStoreProbe{ .value = "stored-fallback-secret" };
     const outcome = try test_provider.acquire(alloc, .{
         .profile = adapterAuthTestProfile(connection_seed.adapter_id, "fx_login"),
