@@ -1786,7 +1786,7 @@ fn refreshGatewayCredentialForJob(
             "source={s} mode={s} err={s}",
             .{ @tagName(source), @tagName(mode), @errorName(err) },
         );
-        return false;
+        return err;
     } orelse return false;
     secret.zeroAndFree(alloc, route_credential.credential);
     route_credential.credential = refreshed;

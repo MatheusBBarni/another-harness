@@ -536,7 +536,7 @@ const App = struct {
             }
         }
         profile.credential_ref = @constCast(route.credential_ref);
-        var credential = try self.auth.resolveProfileCredential(alloc, profile, .if_needed, null);
+        var credential = try self.auth.resolveExactProfileCredential(alloc, profile, .if_needed, null);
         defer credential.deinit(alloc);
         const tenant = if (credential.gatewayTeam()) |value| try alloc.dupe(u8, value) else null;
         errdefer if (tenant) |value| alloc.free(value);
@@ -3438,6 +3438,84 @@ test "native app preserves the built-in tool set without workspace metadata" {
     const advertised = app.toolAdvertisementSet();
     try std.testing.expect(advertised.order.ptr == builtin_tools.advertisement_set.order.ptr);
     try std.testing.expectEqual(builtin_tools.advertisement_set.order.len, advertised.order.len);
+}
+
+test "interactive route credential resolution keeps the admitted source exact" {
+    const adapter_auth = @import("core/gateway/adapter_auth.zig");
+    const connection_registry = @import("core/gateway/connection_registry.zig");
+    const Probe = struct {
+        calls: usize = 0,
+        fallback_reads: usize = 0,
+
+        fn acquire(
+            raw: *const anyopaque,
+            alloc: std.mem.Allocator,
+            request: adapter_auth.Request,
+        ) std.mem.Allocator.Error!adapter_auth.Acquisition {
+            const self: *@This() = @ptrCast(@alignCast(@constCast(raw)));
+            self.calls += 1;
+            if (request.source_resolution == .exact) {
+                return .{ .failed = .{ .category = .unavailable } };
+            }
+            self.fallback_reads += 1;
+            return .{ .acquired = .{
+                .secret_bytes = try alloc.dupe(u8, "fallback-secret"),
+                .source = .{ .id = "ai_gateway_api_key", .label = "fallback", .refreshable = false },
+                .catalog_access = .authenticated,
+            } };
+        }
+    };
+    const alloc = std.testing.allocator;
+    var probe: Probe = .{};
+    const adapters = [_]agent_stream_provider.ProviderAdapter{.{
+        .kind = "test_adapter",
+        .auth = .{
+            .kind = "test_adapter",
+            .context = &probe,
+            .acquire_fn = Probe.acquire,
+        },
+        .stream_fn = agent_stream_provider.unavailable_adapter.stream_fn,
+    }};
+    var app = App{ .alloc = alloc };
+    app.auth.adapter_registry = try adapter_registry.AdapterRegistry.init(&adapters);
+    var connections = try connection_registry.Runtime.init(alloc, .{
+        .id = "test",
+        .display_name = "Test",
+        .adapter_id = "test_adapter",
+        .endpoint = "https://example.invalid",
+        .protocol = "test",
+        .credential_ref = "fx_login",
+        .remembered_model = "test/model",
+    }, null, .unavailable);
+    app.auth.adoptConnections(alloc, &connections);
+    defer app.auth.deinit(alloc);
+
+    const route = route_snapshot.RouteSnapshot{
+        .connection_id = "test",
+        .adapter_kind = "test_adapter",
+        .endpoint = "https://example.invalid",
+        .protocol = "test",
+        .credential_ref = "fx_login",
+        .primary_model_id = "test/model",
+        .permission_review_model_id = null,
+        .vision_model_id = null,
+        .subagent_model_id = "test/model",
+        .capabilities = .{},
+        .capability_source = .@"adapter-static",
+        .selected_fast_mode = false,
+        .fast_model_suffix = null,
+    };
+    var failed = false;
+    if (app.resolveRouteCredential(alloc, &route)) |value| {
+        var credential = value;
+        credential.deinit(alloc);
+    } else |err| {
+        failed = true;
+        try std.testing.expectEqual(error.CredentialAcquisitionFailed, err);
+    }
+    try std.testing.expect(failed);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.fallback_reads);
 }
 
 fn fullEntryConfig() app_entry_runtime.Config {

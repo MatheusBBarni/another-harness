@@ -92,7 +92,7 @@ pub const Request = struct {
     profile: connection_registry.Profile,
     host: AuthHost,
     mode: RefreshMode,
-    source_resolution: SourceResolution = .allow_fallback,
+    source_resolution: SourceResolution,
     current_source_id: ?[]const u8 = null,
     cancel_flag: ?*const std.atomic.Value(bool) = null,
 
@@ -494,6 +494,7 @@ test "profile mismatch and cancellation precede adapter effects" {
         .profile = testProfile("other"),
         .host = auth_host,
         .mode = .if_needed,
+        .source_resolution = .exact,
     }));
     try std.testing.expectEqual(@as(usize, 0), state.acquire_calls);
 
@@ -502,6 +503,7 @@ test "profile mismatch and cancellation precede adapter effects" {
         .profile = testProfile("peer"),
         .host = auth_host,
         .mode = .if_needed,
+        .source_resolution = .exact,
         .cancel_flag = &cancelled,
     });
     try std.testing.expect(outcome == .cancelled);
@@ -513,6 +515,7 @@ test "profile mismatch and cancellation precede adapter effects" {
         .profile = testProfile("peer"),
         .host = auth_host,
         .mode = .if_needed,
+        .source_resolution = .exact,
         .cancel_flag = &cancelled,
     });
     try std.testing.expect(late_cancelled == .cancelled);
@@ -535,6 +538,7 @@ test "adapter acquisition reports allocation failure without publishing a creden
         .profile = testProfile("peer"),
         .host = .{ .secret_store = host_contract.unavailable_secret_store },
         .mode = .if_needed,
+        .source_resolution = .exact,
     }));
     try std.testing.expectEqual(@as(usize, 1), state.acquire_calls);
 }

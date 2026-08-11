@@ -2003,6 +2003,7 @@ fn refreshGatewayCredential(
             .if_needed => .if_needed,
             .force => .force,
         },
+        .source_resolution = .exact,
         .current_source_id = @tagName(source),
         .cancel_flag = ctx.cancelFlag(),
     });
@@ -3975,12 +3976,16 @@ test "ask refresh handles every adapter acquisition outcome without fallback" {
     const RefreshProbe = struct {
         outcome: enum { acquired, missing, failed, cancelled } = .acquired,
         calls: usize = 0,
+        exact_calls: usize = 0,
+        saw_if_needed: bool = false,
         saw_force: bool = false,
 
         fn acquire(raw: *const anyopaque, alloc: Allocator, request: adapter_auth.Request) Allocator.Error!adapter_auth.Acquisition {
             const self: *@This() = @ptrCast(@alignCast(@constCast(raw)));
             self.calls += 1;
-            self.saw_force = request.mode == .force;
+            self.exact_calls += @intFromBool(request.source_resolution == .exact);
+            self.saw_if_needed = self.saw_if_needed or request.mode == .if_needed;
+            self.saw_force = self.saw_force or request.mode == .force;
             return switch (self.outcome) {
                 .acquired => .{ .acquired = .{
                     .secret_bytes = try alloc.dupe(u8, "refreshed-secret"),
@@ -4017,7 +4022,7 @@ test "ask refresh handles every adapter acquisition outcome without fallback" {
     ctx.connection_credential_ref = "fx_login";
     ctx.model = "model";
 
-    const refreshed = (try refreshGatewayCredential(&ctx, std.testing.allocator, .fx_login, .force)).?;
+    const refreshed = (try refreshGatewayCredential(&ctx, std.testing.allocator, .fx_login, .if_needed)).?;
     @memset(refreshed, 0);
     std.testing.allocator.free(refreshed);
     probe.outcome = .missing;
@@ -4025,7 +4030,7 @@ test "ask refresh handles every adapter acquisition outcome without fallback" {
     probe.outcome = .failed;
     try std.testing.expectError(
         error.CredentialRefreshFailed,
-        refreshGatewayCredential(&ctx, std.testing.allocator, .fx_login, .force),
+        refreshGatewayCredential(&ctx, std.testing.allocator, .fx_login, .if_needed),
     );
     probe.outcome = .cancelled;
     try std.testing.expectError(
@@ -4033,6 +4038,8 @@ test "ask refresh handles every adapter acquisition outcome without fallback" {
         refreshGatewayCredential(&ctx, std.testing.allocator, .fx_login, .force),
     );
     try std.testing.expectEqual(@as(usize, 4), probe.calls);
+    try std.testing.expectEqual(probe.calls, probe.exact_calls);
+    try std.testing.expect(probe.saw_if_needed);
     try std.testing.expect(probe.saw_force);
 }
 

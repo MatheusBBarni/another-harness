@@ -714,6 +714,22 @@ pub const Runtime = struct {
         );
     }
 
+    pub fn resolveExactProfileCredential(
+        self: *const Self,
+        alloc: Allocator,
+        profile: connection_registry.Profile,
+        mode: adapter_auth.RefreshMode,
+        current_source_id: ?[]const u8,
+    ) !credentials.Credential {
+        return self.resolveProfileCredentialWithSourceResolution(
+            alloc,
+            profile,
+            mode,
+            current_source_id,
+            .exact,
+        );
+    }
+
     fn resolveProfileCredentialWithSourceResolution(
         self: *const Self,
         alloc: Allocator,
