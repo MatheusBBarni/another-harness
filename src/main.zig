@@ -505,6 +505,8 @@ const App = struct {
         alloc: Allocator,
         route: *const route_snapshot.RouteSnapshot,
     ) !agent_runtime.RouteCredential {
+        var profile = try self.auth.connectionProfile(route.connection_id);
+        if (!std.mem.eql(u8, profile.adapter_id, route.adapter_kind)) return error.RouteAdapterMismatch;
         const selected = try self.auth.selectedConnectionProfile();
         if (std.mem.eql(u8, route.connection_id, selected.id)) {
             if (self.auth.gatewayCredential()) |credential| {
@@ -522,7 +524,8 @@ const App = struct {
                 return result;
             }
         }
-        var credential = try self.auth.resolveCredentialReference(alloc, route.credential_ref);
+        profile.credential_ref = @constCast(route.credential_ref);
+        var credential = try self.auth.resolveProfileCredential(alloc, profile, .if_needed, null);
         defer credential.deinit(alloc);
         const tenant = if (credential.gatewayTeam()) |value| try alloc.dupe(u8, value) else null;
         errdefer if (tenant) |value| alloc.free(value);
@@ -630,6 +633,7 @@ const App = struct {
         else
             oauth_transport.unavailable_provider,
         if (host_target.is_wasm) host.unavailable_secret_store else native_host.secret_store,
+        builtin_gateway.production_adapter_registry,
     ),
     selected_model: std.ArrayList(u8) = .empty,
     model_cache: model_cache_runtime.Runtime = model_cache_runtime.Runtime.init(std.heap.c_allocator, builtin_gateway.models_path),
@@ -752,6 +756,7 @@ const App = struct {
                 .skill_root_policy = if (comptime host_target.is_wasm) wasm_skill_root_policy else builtin_skills.root_policy,
                 .terminal_title = ui_render.terminal_title,
                 .connection_seed = builtin_gateway.connection_seed,
+                .adapter_registry = builtin_gateway.production_adapter_registry,
                 .model_descriptors = builtin_gateway.model_descriptor_provider,
             },
         );
