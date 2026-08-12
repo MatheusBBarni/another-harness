@@ -32,8 +32,11 @@ pub const FailureCategory = enum {
     session_changed,
     invalid_selection,
     persistence,
-    cancelled,
 };
+
+test "cancellation is not an ordinary adapter auth failure" {
+    try std.testing.expect(std.meta.stringToEnum(FailureCategory, "cancelled") == null);
+}
 
 pub const Failure = struct {
     category: FailureCategory,

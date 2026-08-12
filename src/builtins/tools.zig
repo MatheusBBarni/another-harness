@@ -1645,7 +1645,7 @@ test "built-in tool lookup and metadata use registered defaults" {
 }
 
 test "built-in list_files owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, list_files);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, list_files);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("list_files", list_files.name);
@@ -1674,7 +1674,7 @@ test "built-in list_files owns product metadata schema and callbacks" {
 }
 
 test "built-in glob_files owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, glob_files);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, glob_files);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("glob_files", glob_files.name);
@@ -1705,7 +1705,7 @@ test "built-in glob_files owns product metadata schema and callbacks" {
 }
 
 test "built-in grep_files owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, grep_files);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, grep_files);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("grep_files", grep_files.name);
@@ -1744,7 +1744,7 @@ test "built-in grep_files owns product metadata schema and callbacks" {
 }
 
 test "built-in read_file owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, read_file);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, read_file);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("read_file", read_file.name);
@@ -1774,7 +1774,7 @@ test "built-in read_file owns product metadata schema and callbacks" {
 }
 
 test "built-in write_file owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, write_file);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, write_file);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("write_file", write_file.name);
@@ -1805,7 +1805,7 @@ test "built-in write_file owns product metadata schema and callbacks" {
 }
 
 test "built-in edit_file owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, edit_file);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, edit_file);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("edit_file", edit_file.name);
@@ -1835,7 +1835,7 @@ test "built-in edit_file owns product metadata schema and callbacks" {
 }
 
 test "built-in delete_file owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, delete_file);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, delete_file);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("delete_file", delete_file.name);
@@ -1863,7 +1863,7 @@ test "built-in delete_file owns product metadata schema and callbacks" {
 }
 
 test "built-in rename_file owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, rename_file);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, rename_file);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("rename_file", rename_file.name);
@@ -1893,7 +1893,7 @@ test "built-in rename_file owns product metadata schema and callbacks" {
 }
 
 test "built-in copy_file owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, copy_file);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, copy_file);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("copy_file", copy_file.name);
@@ -1922,7 +1922,7 @@ test "built-in copy_file owns product metadata schema and callbacks" {
 }
 
 test "built-in create_folder owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, create_folder);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, create_folder);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("create_folder", create_folder.name);
@@ -1950,7 +1950,7 @@ test "built-in create_folder owns product metadata schema and callbacks" {
 }
 
 test "built-in file_info owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, file_info);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, file_info);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("file_info", file_info.name);
@@ -1978,7 +1978,7 @@ test "built-in file_info owns product metadata schema and callbacks" {
 }
 
 test "built-in memory owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, memory);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, memory);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("memory", memory.name);
@@ -2032,7 +2032,7 @@ test "built-in memory owns product metadata schema and callbacks" {
 }
 
 test "built-in semantic_search owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, semantic_search);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, semantic_search);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("semantic_search", semantic_search.name);
@@ -2057,7 +2057,7 @@ test "built-in semantic_search owns product metadata schema and callbacks" {
 }
 
 test "built-in open_file owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, open_file);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, open_file);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("open_file", open_file.name);
@@ -2086,7 +2086,7 @@ test "built-in open_file owns product metadata schema and callbacks" {
 }
 
 test "built-in web_fetch owns product metadata and schema" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, web_fetch);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, web_fetch);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("web_fetch", web_fetch.name);
@@ -2118,7 +2118,7 @@ test "built-in web_search declares neutral provider advertisement" {
 }
 
 fn expectWebSearchSchemaContains(needle: []const u8) !void {
-    const json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, web_search);
+    const json = try tool_specs.toolInputSchemaJson(std.testing.allocator, web_search);
     defer std.testing.allocator.free(json);
     try std.testing.expect(std.mem.find(u8, json, needle) != null);
 }
@@ -2144,7 +2144,7 @@ test "built-in web_search owns product metadata and schema" {
 }
 
 test "built-in terminal owns captured and durable command metadata" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, terminal);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, terminal);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("terminal", terminal.name);
@@ -2168,7 +2168,7 @@ test "built-in provider advertisements declare provider execution" {
 }
 
 test "built-in skill owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, skill);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, skill);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("skill", skill.name);
@@ -2195,7 +2195,7 @@ test "built-in skill owns product metadata schema and callbacks" {
 }
 
 test "built-in subagent owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, subagent);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, subagent);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("subagent", subagent.name);
@@ -2234,7 +2234,7 @@ test "built-in install_skill registers run_command compatibility" {
 }
 
 test "built-in install_skill owns product metadata and schema" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, install_skill);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, install_skill);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("install_skill", install_skill.name);
@@ -2254,7 +2254,7 @@ test "built-in install_skill owns product metadata and schema" {
 }
 
 test "built-in mcp_search_tools owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, mcp_search_tools);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, mcp_search_tools);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("mcp_search_tools", mcp_search_tools.name);
@@ -2280,15 +2280,15 @@ test "built-in mcp_search_tools owns product metadata schema and callbacks" {
 }
 
 test "built-in mcp_select_tool owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, mcp_select_tool);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, mcp_select_tool);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("mcp_select_tool", mcp_select_tool.name);
     try std.testing.expectEqualStrings(mcp_select_tool_description, mcp_select_tool.description);
-    try std.testing.expect(std.mem.find(u8, schema_json, "\"name\":\"mcp_select_tool\"") != null);
+    try std.testing.expectEqualStrings("mcp_select_tool", mcp_select_tool.gateway_schema.name);
     try std.testing.expect(std.mem.find(u8, schema_json, "\"name\":{\"type\":\"string\"") != null);
     try std.testing.expect(std.mem.find(u8, schema_json, "\"required\":[\"name\"]") != null);
-    try std.testing.expect(std.mem.find(u8, schema_json, "executable schema is advertised on the next model step") != null);
+    try std.testing.expect(std.mem.find(u8, schema_json, "Exact dynamic MCP tool name discovered in configured metadata") != null);
     try std.testing.expect(std.mem.find(u8, schema_json, "mcp_search_tools") == null);
     try std.testing.expectEqual(tool_dispatch.ExecutorKind.mcp_select_tool, mcp_select_tool.executor_kind);
     try std.testing.expectEqual(types.ToolActivityKind.read, mcp_select_tool.activity_kind);
@@ -2306,7 +2306,7 @@ test "built-in mcp_select_tool owns product metadata schema and callbacks" {
 }
 
 test "built-in ask_user_question owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, ask_user_question);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, ask_user_question);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("ask_user_question", ask_user_question.name);
@@ -2318,7 +2318,7 @@ test "built-in ask_user_question owns product metadata schema and callbacks" {
     try std.testing.expect(std.mem.find(u8, ask_user_question.description, "gh/auth/tool blockers") != null);
     try std.testing.expect(std.mem.find(u8, ask_user_question.description, "interactive runs") != null);
     try std.testing.expect(std.mem.find(u8, ask_user_question.description, "noninteractive runs should surface a blocker in freeform text") != null);
-    try std.testing.expect(std.mem.find(u8, schema_json, "\"name\":\"ask_user_question\"") != null);
+    try std.testing.expectEqualStrings("ask_user_question", ask_user_question.gateway_schema.name);
     try std.testing.expect(std.mem.find(u8, schema_json, "\"questions\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":4") != null);
     try std.testing.expect(std.mem.find(u8, schema_json, "\"options\":{\"type\":\"array\",\"minItems\":2,\"maxItems\":6") != null);
     try std.testing.expect(std.mem.find(u8, schema_json, "Specific blocking decision shown to the user") != null);
@@ -2389,7 +2389,7 @@ test "built-in ask_user_question dispatch returns noninteractive sentinel before
 }
 
 test "built-in vision owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, vision);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, vision);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("vision", vision.name);
@@ -2462,7 +2462,7 @@ test "built-in vision dispatch uses supplied runtime provider" {
 }
 
 test "built-in read_tool_result owns product metadata schema and callbacks" {
-    const schema_json = try tool_specs.toolGatewaySchemaJson(std.testing.allocator, read_tool_result);
+    const schema_json = try tool_specs.toolInputSchemaJson(std.testing.allocator, read_tool_result);
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("read_tool_result", read_tool_result.name);
@@ -2619,6 +2619,6 @@ test "production registry keeps vision route-filtered from ordinary projections"
     defer read_only.deinit(std.testing.allocator);
 
     inline for (&.{ &full, &read_only }) |projection| {
-        try std.testing.expect(std.mem.find(u8, projection.tools_json, "\"name\":\"vision\"") == null);
+        try std.testing.expect(!projection.contains("vision"));
     }
 }

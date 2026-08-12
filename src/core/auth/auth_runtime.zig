@@ -751,7 +751,6 @@ pub const Runtime = struct {
             .missing => return error.MissingCredential,
             .failed => |failure| return switch (failure.category) {
                 .configuration => error.InvalidCredentialReference,
-                .cancelled => error.Cancelled,
                 else => error.CredentialAcquisitionFailed,
             },
             .cancelled => return error.Cancelled,
@@ -1659,7 +1658,6 @@ fn errorForAuthFailure(failure: adapter_auth.Failure) anyerror {
         .session_changed => error.AuthSessionChanged,
         .invalid_selection => error.AuthSelectionInvalid,
         .persistence => error.AuthPersistence,
-        .cancelled => error.Cancelled,
         .unavailable => error.AuthUnavailable,
     };
 }

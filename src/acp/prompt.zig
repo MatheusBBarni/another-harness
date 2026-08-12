@@ -12,6 +12,7 @@ const server = @import("server.zig");
 const sessions = @import("sessions.zig");
 const agent_runtime = @import("../core/agent/agent_runtime.zig");
 const agent_stream_provider = @import("../core/agent/stream_provider.zig");
+const gateway_schema = @import("../core/tooling/gateway_schema.zig");
 const diff_mod = @import("../core/output/diff.zig");
 const file_mutation = @import("../core/tooling/file_mutation.zig");
 const file_mutation_contract = @import("../core/tooling/file_mutation_contract.zig");
@@ -648,7 +649,7 @@ pub fn handlePrompt(
     var agent_config = buildAgentConfig(state, session, .{
         .skills_prompt_section = skills_section,
         .explicit_skills_prompt_section = explicit_skills.text,
-        .gateway_tools_json = tool_projection.tools_json,
+        .model_tools = tool_projection.tools,
         .provider_tools = tool_projection.provider_tools,
         .custom_tool_guidance = tool_projection.custom_guidance,
     });
@@ -742,7 +743,7 @@ pub fn runSubagentChild(
         .model_prompt_overlay = state.cfg.prompt_policy.modelPromptOverlay(admission.model),
         .skills_prompt_section = bounded_skills.text,
         .explicit_skills_prompt_section = explicit_skills.text,
-        .gateway_tools_json = child_projection.tools_json,
+        .model_tools = child_projection.tools,
         .provider_tools = child_projection.provider_tools,
         .custom_tool_guidance = child_projection.custom_guidance,
         .context_registry = state.cfg.context_registry,
@@ -811,7 +812,7 @@ fn refreshProjectContext(
 const AgentConfigSections = struct {
     skills_prompt_section: []const u8,
     explicit_skills_prompt_section: []const u8,
-    gateway_tools_json: []const u8,
+    model_tools: []const gateway_schema.FunctionSchema,
     provider_tools: []const agent_stream_provider.ProviderToolAdvertisement = &.{},
     custom_tool_guidance: []const u8,
 };
@@ -824,7 +825,7 @@ fn buildAgentConfig(state: *server.ServerState, session: *server.ActiveSessionSt
         .explicit_skills_prompt_section = sections.explicit_skills_prompt_section,
         .gateway_retry_count = state.cfg.gateway_retry_count,
         .gateway_chat_url = state.cfg.gateway_chat_url,
-        .gateway_tools_json = sections.gateway_tools_json,
+        .model_tools = sections.model_tools,
         .provider_tools = sections.provider_tools,
         .custom_tool_guidance = sections.custom_tool_guidance,
         .agent_step_limit = session.agent_step_limit,
@@ -1077,7 +1078,7 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
         .push_system_notice = pushSystemNotice,
         .push_context_notice = pushContextNotice,
         .push_command_output_complete = pushCommandOutputComplete,
-        .push_http_error = pushHttpError,
+        .push_provider_failure = pushProviderFailure,
         .resolve_route_credential = resolveRouteCredential,
         .available_model_descriptor = availableModelDescriptor,
         .resolve_model_descriptor = resolveModelDescriptor,
@@ -2039,19 +2040,23 @@ fn pushDiffBlock(raw_ctx: *anyopaque, payload: agent_runtime.DiffEntryPayload) !
 
 fn pushCommandOutputComplete(_: *anyopaque, _: ?types.ToolLifecycleId) !void {}
 
-fn pushHttpError(raw_ctx: *anyopaque, status: std.http.Status, detail: []const u8, credential_source: ?types.CredentialSource) !void {
+fn pushProviderFailure(raw_ctx: *anyopaque, category: agent_stream_provider.StreamFailure.Category, _: ?u16, detail: []const u8, credential_source: ?types.CredentialSource) !void {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
     var buf: [1024]u8 = undefined;
-    const auth_failure = auth_runtime.FailureSnapshot.fromHttp(status, credential_source);
+    const auth_failure = auth_runtime.FailureSnapshot.fromHttp(switch (category) {
+        .authentication => .unauthorized,
+        .authorization => .forbidden,
+        else => .ok,
+    }, credential_source);
     const owned_message = if (auth_failure) |failure|
         try failure.renderText(ctx.alloc)
     else
         null;
     defer if (owned_message) |message| ctx.alloc.free(message);
     const msg = owned_message orelse if (detail.len > 0)
-        std.fmt.bufPrint(&buf, "HTTP {d}: {s}", .{ @intFromEnum(status), detail }) catch "HTTP error"
+        detail
     else
-        std.fmt.bufPrint(&buf, "HTTP {d}", .{@intFromEnum(status)}) catch "HTTP error";
+        std.fmt.bufPrint(&buf, "Provider request failed ({s})", .{@tagName(category)}) catch "Provider request failed";
     ctx.sendAgentText(msg) catch {};
 }
 
@@ -3255,9 +3260,10 @@ test "ACP auth failure emits a valid detail-free JSON-RPC notification" {
     );
 
     const deps = agentRuntimeDeps(&ctx);
-    try deps.push_http_error(
+    try deps.push_provider_failure(
         deps.ctx,
-        .unauthorized,
+        .authentication,
+        401,
         "provider rejected access-token-secret",
         state.active_session.?.credential_source,
     );
@@ -4597,9 +4603,7 @@ test "ACP full advertisement includes direct provider search with explicit permi
         .provider_tools = &.{.web_search},
     });
     defer projection.deinit(std.testing.allocator);
-    const json = projection.tools_json;
-
-    try std.testing.expect(std.mem.find(u8, json, "\"name\":\"web_search\"") == null);
+    try std.testing.expect(!projection.contains("web_search"));
     try std.testing.expectEqual(@as(usize, 1), projection.provider_tools.len);
     try std.testing.expectEqual(.web_search, projection.provider_tools[0].tool);
     try std.testing.expectEqualStrings(builtin_tools.web_search.description, projection.custom_guidance);
@@ -4627,7 +4631,7 @@ test "ACP prompt agent config carries request options from active session" {
     const config = buildAgentConfig(&state, session, .{
         .skills_prompt_section = "",
         .explicit_skills_prompt_section = "",
-        .gateway_tools_json = "[]",
+        .model_tools = &.{},
         .custom_tool_guidance = "acp custom tool guidance",
     });
 
@@ -4635,7 +4639,7 @@ test "ACP prompt agent config carries request options from active session" {
     try std.testing.expectEqual(types.ReasoningEffort.literal("high"), config.effort);
     try std.testing.expectEqual(@as(usize, 17), config.context_limits.project_instruction_file_bytes.effectiveBytes());
     try std.testing.expectEqual(config_runtime.context_limits.Source.command_line, config.context_limits.project_instruction_file_bytes.source);
-    try std.testing.expectEqualStrings("[]", config.gateway_tools_json);
+    try std.testing.expectEqual(@as(usize, 0), config.model_tools.len);
     try std.testing.expectEqualStrings("acp custom tool guidance", config.custom_tool_guidance);
     try std.testing.expectEqualStrings("ACP test model overlay", config.model_prompt_overlay.?);
     var ctx = AcpContext{ .alloc = alloc, .state = &state, .session_id = "session_1" };

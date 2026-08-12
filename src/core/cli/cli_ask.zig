@@ -29,7 +29,6 @@ const workspace_access = @import("../workspace/workspace_access.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const diff_mod = @import("../output/diff.zig");
 const file_mutation = @import("../tooling/file_mutation.zig");
-const gateway_error_format = @import("../shared/gateway_error_format.zig");
 const image_attachments = @import("../images/image_attachments.zig");
 const hooks = @import("../hooks/hooks.zig");
 const notification_sound = @import("../notifications/sound.zig");
@@ -280,7 +279,7 @@ fn runAskChild(
         .model_prompt_overlay = ctx.cfg.prompt_policy.modelPromptOverlay(admission.model),
         .skills_prompt_section = ctx.subagent_skills_prompt,
         .explicit_skills_prompt_section = ctx.subagent_explicit_skills_prompt,
-        .gateway_tools_json = child_projection.tools_json,
+        .model_tools = child_projection.tools,
         .provider_tools = child_projection.provider_tools,
         .custom_tool_guidance = child_projection.custom_guidance,
         .context_registry = ctx.deps.context_registry,
@@ -1750,7 +1749,7 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
         .explicit_skills_prompt_section = explicit_skills.text,
         .gateway_retry_count = cfg.gateway_retry_count,
         .gateway_chat_url = cfg.gateway_chat_url,
-        .gateway_tools_json = tool_projection.tools_json,
+        .model_tools = tool_projection.tools,
         .provider_tools = tool_projection.provider_tools,
         .custom_tool_guidance = tool_projection.custom_guidance,
         .agent_step_limit = startup.agent_step_limit,
@@ -1948,7 +1947,7 @@ fn agentRuntimeDeps(ctx: *AskContext) agent_runtime.AgentRuntimeDeps {
         .push_context_notice = pushContextNotice,
         .push_route_recovery_status = pushRouteRecoveryStatus,
         .push_command_output_complete = pushCommandOutputComplete,
-        .push_http_error = pushHttpError,
+        .push_provider_failure = pushProviderFailure,
         .resolve_route_credential = resolveRouteCredential,
         .refresh_gateway_credential = refreshGatewayCredential,
         .available_model_capabilities = availableModelCapabilities,
@@ -3065,15 +3064,19 @@ fn pushDiffBlock(raw_ctx: *anyopaque, payload: agent_runtime.DiffEntryPayload) !
 
 fn pushCommandOutputComplete(_: *anyopaque, _: ?types.ToolLifecycleId) !void {}
 
-fn pushHttpError(raw_ctx: *anyopaque, status: std.http.Status, detail: []const u8, credential_source: ?types.CredentialSource) !void {
+fn pushProviderFailure(raw_ctx: *anyopaque, category: agent_stream_provider.StreamFailure.Category, _: ?u16, detail: []const u8, credential_source: ?types.CredentialSource) !void {
     const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
     ctx.failed = true;
-    const auth_failure = auth_runtime.FailureSnapshot.fromHttp(status, credential_source);
+    const auth_failure = auth_runtime.FailureSnapshot.fromHttp(switch (category) {
+        .authentication => .unauthorized,
+        .authorization => .forbidden,
+        else => .ok,
+    }, credential_source);
     ctx.auth_failure = auth_failure;
     const message = if (auth_failure) |failure|
         try failure.renderText(ctx.alloc)
     else
-        try gateway_error_format.formatHttpErrorMessage(ctx.alloc, status, detail);
+        try std.fmt.allocPrint(ctx.alloc, "{s}", .{if (detail.len > 0) detail else @tagName(category)});
     defer ctx.alloc.free(message);
     try ctx.writeStderr("fx ask: ");
     try ctx.writeStderr(message);
@@ -4191,11 +4194,10 @@ fn testProcessQueuedPromptChecksRealTools(deps: *const agent_runtime.AgentRuntim
     try std.testing.expect(semantic_presentation == null);
     const ctx: *AskContext = @ptrCast(@alignCast(deps.ctx));
     try std.testing.expectEqualStrings("inspect", ctx.mode_id);
-    try std.testing.expect(!std.mem.eql(u8, cfg.gateway_tools_json, "[]"));
-    try std.testing.expect(std.mem.find(u8, cfg.gateway_tools_json, "\"name\":\"read_file\"") != null);
-    try std.testing.expect(std.mem.find(u8, cfg.gateway_tools_json, "\"name\":\"terminal\"") != null);
-    try std.testing.expect(std.mem.find(u8, cfg.gateway_tools_json, "\"name\":\"run_command\"") == null);
-    try std.testing.expect(std.mem.find(u8, cfg.gateway_tools_json, "\"name\":\"web_search\"") == null);
+    try std.testing.expect(cfg.model_tools.len > 0);
+    try std.testing.expect(tool_advertisement.containsDescriptor(cfg.model_tools, "read_file"));
+    try std.testing.expect(tool_advertisement.containsDescriptor(cfg.model_tools, "terminal"));
+    try std.testing.expect(!tool_advertisement.containsDescriptor(cfg.model_tools, "web_search"));
     try std.testing.expectEqual(@as(usize, 1), cfg.provider_tools.len);
     try std.testing.expectEqual(.web_search, cfg.provider_tools[0].tool);
     try std.testing.expectEqualStrings(test_builtin_tools.web_search.description, cfg.custom_tool_guidance);
@@ -4205,8 +4207,8 @@ fn testProcessQueuedPromptChecksRealTools(deps: *const agent_runtime.AgentRuntim
 
 fn testProcessQueuedPromptChecksInjectedToolSet(deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, _: agent_runtime.LifecycleContext, cfg: agent_runtime.Config, _: worker_runtime.QueuedPrompt) !void {
     try std.testing.expect(semantic_presentation == null);
-    try std.testing.expect(std.mem.find(u8, cfg.gateway_tools_json, "\"name\":\"read_file\"") != null);
-    try std.testing.expect(std.mem.find(u8, cfg.gateway_tools_json, "\"name\":\"run_command\"") == null);
+    try std.testing.expect(tool_advertisement.containsDescriptor(cfg.model_tools, "read_file"));
+    try std.testing.expect(!tool_advertisement.containsDescriptor(cfg.model_tools, "terminal"));
     try std.testing.expectEqualStrings("", cfg.custom_tool_guidance);
 
     const ctx: *AskContext = @ptrCast(@alignCast(deps.ctx));
@@ -4217,20 +4219,22 @@ fn testProcessQueuedPromptChecksInjectedToolSet(deps: *const agent_runtime.Agent
 
 fn testProcessQueuedPromptHttp413(deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, _: agent_runtime.LifecycleContext, _: agent_runtime.Config, _: worker_runtime.QueuedPrompt) !void {
     try std.testing.expect(semantic_presentation == null);
-    try deps.push_http_error(
+    try deps.push_provider_failure(
         deps.ctx,
-        .payload_too_large,
-        "provider payload rejected\n\nprompt_too_long=true\nProvider rejected the prompt as too large. Latest local tool evidence remains in session history/result handles; no local tool actions were replayed.",
+        .request_too_large,
+        413,
+        "HTTP 413: provider payload rejected\n\nprompt_too_long=true\nProvider rejected the prompt as too large. Latest local tool evidence remains in session history/result handles; no local tool actions were replayed.",
         null,
     );
 }
 
 fn testProcessQueuedPromptRestrictedProvider(deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, _: agent_runtime.LifecycleContext, _: agent_runtime.Config, _: worker_runtime.QueuedPrompt) !void {
     try std.testing.expect(semantic_presentation == null);
-    try deps.push_http_error(
+    try deps.push_provider_failure(
         deps.ctx,
-        .forbidden,
-        "{\"error\":{\"message\":\"Your team has restricted access to this provider. Contact the owner of the account for more details. Providers considered: wafer\",\"type\":\"no_providers_available\",\"param\":{\"name\":\"RestrictedProvidersError\",\"message\":\"Your team has restricted access to this provider. Contact the owner of the account for more details. Providers considered: wafer\"}},\"providerMetadata\":{\"gateway\":{\"routing\":{}}}}",
+        .authorization,
+        403,
+        "API access denied · HTTP 403 · Provider: wafer · Your team has restricted access to this provider. Contact the owner of the account for more details. Providers considered: wafer",
         null,
     );
 }
@@ -4238,9 +4242,10 @@ fn testProcessQueuedPromptRestrictedProvider(deps: *const agent_runtime.AgentRun
 fn testProcessQueuedPromptUnauthorized(deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, _: agent_runtime.LifecycleContext, _: agent_runtime.Config, job: worker_runtime.QueuedPrompt) !void {
     try std.testing.expect(semantic_presentation == null);
     const ctx: *AskContext = @ptrCast(@alignCast(deps.ctx));
-    try deps.push_http_error(
+    try deps.push_provider_failure(
         deps.ctx,
-        .unauthorized,
+        .authentication,
+        401,
         "provider rejected secret-key body",
         ctx.credential_source,
     );

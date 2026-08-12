@@ -34,6 +34,7 @@ const text_utils = @import("../shared/text_utils.zig");
 const tool_args = @import("../tooling/tool_args.zig");
 const tool_admission = @import("../tooling/tool_admission.zig");
 const tool_advertisement = @import("../tooling/tool_advertisement.zig");
+const gateway_schema = @import("../tooling/gateway_schema.zig");
 const tool_dispatch = @import("../tooling/tool_dispatch.zig");
 const tool_mcp_runtime = @import("../tooling/tool_mcp_runtime.zig");
 const context_contract = @import("../workspace/context_contract.zig");
@@ -1047,7 +1048,7 @@ pub fn Runtime(comptime App: type) type {
                 .model_prompt_overlay = prompt_policy.modelPromptOverlay(admission.model),
                 .skills_prompt_section = bounded_skills.text,
                 .explicit_skills_prompt_section = explicit_skills.text,
-                .gateway_tools_json = child_projection.tools_json,
+                .model_tools = child_projection.tools,
                 .provider_tools = child_projection.provider_tools,
                 .custom_tool_guidance = child_projection.custom_guidance,
                 .context_registry = app.contextRegistry(),
@@ -1104,7 +1105,7 @@ pub fn Runtime(comptime App: type) type {
                 else
                     null,
                 .gateway_chat_url = gateway_chat_url,
-                .gateway_tools_json = tool_projection.tools_json,
+                .model_tools = tool_projection.tools,
                 .provider_tools = tool_projection.provider_tools,
                 .custom_tool_guidance = tool_projection.custom_guidance,
                 .agent_step_limit = app.agent_step_limit,
@@ -1582,12 +1583,12 @@ const FakeApp = struct {
         else
             null;
         if (self.snapshot_tools_error) |err| return err;
-        const tools_json = try alloc.dupe(u8, "[]");
-        errdefer alloc.free(tools_json);
+        const tools = try alloc.alloc(gateway_schema.FunctionSchema, 0);
+        errdefer alloc.free(tools);
         const provider_tools = try alloc.alloc(agent_stream_provider.ProviderToolAdvertisement, 0);
         errdefer alloc.free(provider_tools);
         return .{
-            .tools_json = tools_json,
+            .tools = tools,
             .provider_tools = provider_tools,
             .custom_guidance = try alloc.dupe(u8, self.snapshot_custom_guidance),
         };
@@ -1607,12 +1608,12 @@ const FakeApp = struct {
         else
             null;
         if (self.snapshot_tools_error) |err| return err;
-        const tools_json = try alloc.dupe(u8, "[]");
-        errdefer alloc.free(tools_json);
+        const tools = try alloc.alloc(gateway_schema.FunctionSchema, 0);
+        errdefer alloc.free(tools);
         const provider_tools = try alloc.alloc(agent_stream_provider.ProviderToolAdvertisement, 0);
         errdefer alloc.free(provider_tools);
         return .{
-            .tools_json = tools_json,
+            .tools = tools,
             .provider_tools = provider_tools,
             .custom_guidance = try alloc.dupe(u8, self.snapshot_custom_guidance),
         };
@@ -2923,12 +2924,12 @@ test "app agent runtime queued prompt config uses captured job settings over sta
         .fast_mode = true,
         .effort = types.ReasoningEffort.literal("high"),
     };
-    const tools_json = try alloc.dupe(u8, "[]");
-    errdefer alloc.free(tools_json);
+    const tools = try alloc.alloc(gateway_schema.FunctionSchema, 0);
+    errdefer alloc.free(tools);
     const custom_guidance = try alloc.dupe(u8, "app custom tool guidance");
     const provider_tools = try alloc.alloc(agent_stream_provider.ProviderToolAdvertisement, 0);
     var tool_projection = tool_advertisement.EffectiveToolProjection{
-        .tools_json = tools_json,
+        .tools = tools,
         .provider_tools = provider_tools,
         .custom_guidance = custom_guidance,
     };
@@ -2939,7 +2940,7 @@ test "app agent runtime queued prompt config uses captured job settings over sta
     try std.testing.expectEqual(types.ReasoningEffort.literal("high"), config.effort);
     try std.testing.expectEqual(@as(usize, 8192), config.max_tool_result_bytes);
     try std.testing.expectEqual(types.ToolChoice.none, config.first_call_tool_choice);
-    try std.testing.expectEqualStrings(tool_projection.tools_json, config.gateway_tools_json);
+    try std.testing.expectEqual(tool_projection.tools.len, config.model_tools.len);
     try std.testing.expectEqualStrings(tool_projection.custom_guidance, config.custom_tool_guidance);
     try std.testing.expectEqualStrings(test_prompt_policy.system_prompt, config.system_prompt);
     try std.testing.expectEqualStrings("test model overlay", config.model_prompt_overlay.?);

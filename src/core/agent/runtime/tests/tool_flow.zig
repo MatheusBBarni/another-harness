@@ -1259,8 +1259,7 @@ test "selected dynamic MCP allow returned after cancellation never executes" {
     hooks.exec_plans = &.{
         .{ .result = .{
             .model_output = "selected",
-            .selected_dynamic_tool_name = "mcp_fixture_echo",
-            .selected_dynamic_tool_schema_json = "{\"type\":\"function\",\"name\":\"mcp_fixture_echo\",\"description\":\"Echo\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}",
+            .selected_dynamic_tool = .{ .name = "mcp_fixture_echo", .description = "Echo" },
         } },
         .{ .result = .{ .model_output = "must not execute" } },
     };
