@@ -3094,7 +3094,8 @@ fn processQueuedPromptLoop(
                 runtime_assistant_stream.pushTokenProgressUpdate(&stream_ctx, summary_accumulator.finishTokenRequestWithoutUsage(gateway_delivery.load() == .possibly_sent)) catch |progress_err| {
                     debug_trace.logf("agent", "token progress publication failed source=gateway_error err={s}", .{@errorName(progress_err)});
                 };
-                const cancel_requested = config.cancel_flag.load(.seq_cst) or err == error.Cancelled;
+                if (err == error.Cancelled) config.cancel_flag.store(true, .seq_cst);
+                const cancel_requested = config.cancel_flag.load(.seq_cst);
                 const network_failure = gateway_attempt_evidence.network_failure;
                 const delivery_state = if (network_failure) |evidence|
                     evidence.delivery

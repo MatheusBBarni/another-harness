@@ -2688,6 +2688,24 @@ test "processQueuedPrompt does not dispatch a cancelled admitted route" {
     try std.testing.expectEqual(types.TurnPresentationOutcome.interrupted, hooks.finalized_outcome.?);
 }
 
+test "processQueuedPrompt publishes normalized adapter cancellation to the turn" {
+    const alloc = std.testing.allocator;
+    const completions = [_]FakeCompletion{.{ .stream_error = error.Cancelled }};
+    var gateway = FakeGateway.init(alloc, &completions);
+    defer gateway.deinit();
+    var fixture = PromptFixture{};
+    var hooks = FakeAgentRuntimeDeps.init(alloc);
+    defer hooks.deinit();
+
+    try runFakePrompt(&gateway, &hooks, fixture.config(), fixture.job());
+
+    try std.testing.expect(fixture.cancel_flag.load(.seq_cst));
+    try std.testing.expectEqual(@as(usize, 1), gateway.request_models.items.len);
+    try std.testing.expectEqual(@as(usize, 1), hooks.interrupted_history_count);
+    try std.testing.expectEqual(@as(usize, 1), hooks.finalization_count);
+    try std.testing.expectEqual(types.TurnPresentationOutcome.interrupted, hooks.finalized_outcome.?);
+}
+
 test "processQueuedPrompt keeps exact model identity and emits Gateway Fast" {
     const alloc = std.testing.allocator;
     const completions = [_]FakeCompletion{.{ .content = "Done" }};
