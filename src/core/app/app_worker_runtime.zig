@@ -7,6 +7,7 @@ const file_mutation_contract = @import("../tooling/file_mutation_contract.zig");
 const command_output_content = @import("../tooling/command_output_content.zig");
 const io_mod = @import("../shared/io.zig");
 const permission_request = @import("../permissions/permission_request.zig");
+const session_runtime = @import("../session/session.zig");
 const task_helpers = @import("../tasks/task_helpers.zig");
 const text_utils = @import("../shared/text_utils.zig");
 const types = @import("../shared/types.zig");
@@ -868,6 +869,18 @@ pub fn Runtime(comptime App: type) type {
                         try applyToolLifecycle(app, handlers.tool_lifecycle, lifecycle);
                     },
                     .finish_prompt => |finished| {
+                        const publish_cancelled_notice = app.stream.active and switch (finished.turn) {
+                            .interrupted => |turn| turn.terminal_reason == .cancelled,
+                            else => false,
+                        };
+                        if (publish_cancelled_notice) {
+                            if (!try requireAssistantTextDrain(handlers)) {
+                                try retainClaimedEventAndSuffix(app, &batch, "cancelled_notice_drain_blocked");
+                                drain_owns_current = false;
+                                break :events;
+                            }
+                            try handlers.semantic_notice(handlers.ctx, session_runtime.interrupted_turn_notice);
+                        }
                         try flushPendingCommandOutputAtTurnBoundary(app, handlers);
                         resetStream(app, false);
                         app.shell.render_requests.request(.footer);
@@ -2962,6 +2975,49 @@ test "core.app_worker_runtime cancellation suppresses payloads but retains turn 
     try std.testing.expectEqual(@as(usize, 0), app.shell.toolActivityRecordCount());
     try std.testing.expectEqual(@as(usize, 0), app.shell.lifecyclePinCount());
     try std.testing.expectEqual(@as(u64, 1), app.shell.finalizedToolTurnWatermark());
+}
+
+test "core.app_worker_runtime cancelled active stream publishes one terminal notice" {
+    var app = FakeApp.init(std.testing.allocator);
+    defer app.deinit();
+    app.worker.processing = true;
+    app.stream.active = true;
+    app.worker.worker_cancel_requested.store(true, .seq_cst);
+
+    try app.worker.pushEvent(std.heap.c_allocator, .{ .finish_prompt = .{
+        .turn = .{ .interrupted = .{
+            .user = .{ .text = @constCast("cancel me"), .images = &.{} },
+        } },
+        .terminal_outcome = .interrupted,
+    } });
+
+    const Capture = struct {
+        notice_count: usize = 0,
+        history_count: usize = 0,
+
+        fn notice(raw: *anyopaque, value: types.SemanticNotice) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.notice_count += 1;
+            try std.testing.expectEqual(session_runtime.interrupted_turn_notice.tone, value.tone);
+            try std.testing.expectEqualStrings(session_runtime.interrupted_turn_notice.body, value.body);
+        }
+
+        fn history(raw: *anyopaque, _: types.FinishedPrompt) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.history_count += 1;
+        }
+    };
+    var capture = Capture{};
+    var handlers = NoopBridge.handlers(&app);
+    handlers.ctx = @ptrCast(&capture);
+    handlers.semantic_notice = Capture.notice;
+    handlers.append_history_turn = Capture.history;
+
+    try Runtime(FakeApp).tick(&app, noopTaskCompletion, handlers);
+
+    try std.testing.expectEqual(@as(usize, 1), capture.notice_count);
+    try std.testing.expectEqual(@as(usize, 1), capture.history_count);
+    try std.testing.expect(!app.stream.active);
 }
 
 test "core.app_worker_runtime cancellation snapshot stays coupled to detached event prefix" {
