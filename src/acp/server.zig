@@ -217,6 +217,7 @@ pub const ServerState = struct {
     api_key: []u8 = &.{},
     credential_source: ?types.CredentialSource = null,
     credential_connection_id: ?[]const u8 = null,
+    credential_adapter_kind: ?[]const u8 = null,
     gateway_team: ?[]u8 = null,
     connections: ?connection_registry.Runtime = null,
     selected_model: []u8 = &.{},
@@ -314,22 +315,35 @@ pub fn prepareConnectionCredential(
     profile: connection_registry.Profile,
     model: []const u8,
 ) !credentials.Credential {
+    _ = try state.cfg.gateway_provider.adapter_registry.resolveAuthForProfile(profile);
     if (state.credential_connection_id) |connection_id| {
-        if (state.api_key.len > 0 and std.mem.eql(u8, connection_id, profile.id)) {
+        if (state.api_key.len > 0 and
+            std.mem.eql(u8, connection_id, profile.id) and
+            (if (state.credential_adapter_kind) |kind|
+                std.mem.eql(u8, kind, profile.adapter_id)
+            else
+                false) and
+            state.credential_source != null and
+            (std.mem.eql(u8, profile.credential_ref, "automatic") or
+                if (state.credential_source) |source|
+                    std.mem.eql(u8, profile.credential_ref, @tagName(source))
+                else
+                    false))
+        {
             return .{
                 .token = try alloc.dupe(u8, state.api_key),
-                .source = state.credential_source orelse .ai_gateway_api_key,
+                .source = state.credential_source.?,
                 .team_id = if (state.gateway_team) |team| try alloc.dupe(u8, team) else null,
             };
         }
     }
     const resolution = try app_lifecycle.resolveConnectionCredential(
         alloc,
-        state.cfg.gateway_provider.oauth_transport,
+        state.cfg.gateway_provider.adapter_registry,
         state.cfg.secret_store,
         profile,
-        state.cfg.gateway_provider.connection_seed,
         .refresh_if_needed,
+        null,
     );
     var credential = resolution.credential orelse return error.MissingCredential;
     errdefer credential.deinit(alloc);
@@ -402,12 +416,14 @@ pub fn configureGenerationUsageSource(state: *ServerState) void {
 pub fn adoptConnectionCredential(
     state: *ServerState,
     connection_id: []const u8,
+    adapter_kind: []const u8,
     credential: credentials.Credential,
 ) void {
     if (state.api_key.len > 0) state.alloc.free(state.api_key);
     if (state.gateway_team) |team| state.alloc.free(team);
     state.credential_source = credential.source;
     state.credential_connection_id = connection_id;
+    state.credential_adapter_kind = adapter_kind;
     state.api_key = credential.token;
     if (credential.team_id) |team| {
         state.gateway_team = team;

@@ -567,8 +567,18 @@ pub fn handlePrompt(
         durable.preferences.connection_id.?
     else
         state.connections.?.selectedProfile().id;
-    const profile = state.connections.?.profile(connection_id) catch
+    var profile = state.connections.?.profile(connection_id) catch
         return error.MissingSessionConnection;
+    const credential_source = session.credential_source orelse return error.MissingCredential;
+    const credential_adapter_kind = state.credential_adapter_kind orelse
+        return error.RouteCredentialMismatch;
+    if (!std.mem.eql(u8, profile.adapter_id, credential_adapter_kind) or
+        (!std.mem.eql(u8, profile.credential_ref, "automatic") and
+            !std.mem.eql(u8, profile.credential_ref, @tagName(credential_source))))
+    {
+        return error.RouteCredentialMismatch;
+    }
+    profile.credential_ref = @constCast(@tagName(credential_source));
     ctx.connection_adapter_kind = profile.adapter_id;
     if (recovery_checkpoint) |checkpoint| {
         try route_snapshot.validateRecoveryProfile(
@@ -750,40 +760,9 @@ pub fn runSubagentChild(
         .context_enabled = state.context_enabled,
         .project_context = state.context_snapshot.modelVisibleBytes(),
         .lifecycle_view = state.lifecycle_view,
-        .route_credential_ctx = state,
-        .resolve_route_credential_fn = resolveAcpChildRouteCredential,
+        .route_credential_ctx = &ctx,
+        .resolve_route_credential_fn = resolveRouteCredential,
     }, turn, message, admission, cancel);
-}
-
-fn resolveAcpChildRouteCredential(
-    raw: *anyopaque,
-    alloc: Allocator,
-    route: *const route_snapshot.RouteSnapshot,
-) !agent_runtime.RouteCredential {
-    const state: *server.ServerState = @ptrCast(@alignCast(raw));
-    const preferred = if (std.mem.eql(u8, route.credential_ref, "automatic"))
-        null
-    else
-        types.parseCredentialSource(route.credential_ref) orelse
-            return error.InvalidCredentialReference;
-    const resolution = try credentials.resolvePreferring(
-        alloc,
-        state.cfg.gateway_provider.oauth_transport,
-        state.cfg.secret_store,
-        .refresh_if_needed,
-        preferred,
-    );
-    var credential = resolution.credential orelse return error.MissingCredential;
-    defer credential.deinit(alloc);
-    const tenant = if (credential.gatewayTeam()) |value| try alloc.dupe(u8, value) else null;
-    errdefer if (tenant) |value| alloc.free(value);
-    const token = credential.token;
-    credential.token = &.{};
-    return .{
-        .credential = token,
-        .tenant = tenant,
-        .legacy_source = credential.source,
-    };
 }
 
 fn refreshProjectContext(
@@ -1096,23 +1075,22 @@ fn resolveRouteCredential(
 ) !agent_runtime.RouteCredential {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
     const session = if (ctx.state.active_session) |*active| active else return error.NoActiveSession;
-    const admitted_connection = if (session.writable) |*writable|
-        writable.state.preferences.connection_id.?
-    else if (session.wasm_state) |*durable|
-        durable.preferences.connection_id.?
-    else
-        ctx.state.connections.?.selectedProfile().id;
-    if (!std.mem.eql(u8, route.connection_id, admitted_connection)) {
+    const source = session.credential_source orelse return error.RouteCredentialMismatch;
+    const connection_id = ctx.state.credential_connection_id orelse return error.RouteCredentialMismatch;
+    const adapter_kind = ctx.state.credential_adapter_kind orelse return error.RouteCredentialMismatch;
+    if (!std.mem.eql(u8, route.connection_id, connection_id) or
+        !std.mem.eql(u8, route.adapter_kind, adapter_kind) or
+        !std.mem.eql(u8, route.credential_ref, @tagName(source)))
+    {
         return error.RouteCredentialMismatch;
     }
-    const credential = try alloc.dupe(u8, session.api_key);
-    errdefer alloc.free(credential);
-    const tenant = if (ctx.state.gateway_team) |value| try alloc.dupe(u8, value) else null;
-    return .{
-        .credential = credential,
-        .tenant = tenant,
+    var result = agent_runtime.RouteCredential{
+        .credential = try alloc.dupe(u8, session.api_key),
         .legacy_source = session.credential_source,
     };
+    errdefer result.deinit(alloc);
+    result.tenant = if (ctx.state.gateway_team) |value| try alloc.dupe(u8, value) else null;
+    return result;
 }
 
 fn persistUsageCheckpoint(
@@ -3506,6 +3484,7 @@ test "fake non-Vercel adapter completes an ACP root turn on its admitted route" 
             try std.testing.expectEqualStrings("test_non_vercel", request.route.adapter_kind);
             try std.testing.expectEqualStrings("fake-protocol", request.route.protocol);
             try std.testing.expectEqualStrings("fake://acp", request.route.endpoint);
+            try std.testing.expectEqualStrings("ai_gateway_api_key", request.route.credential_ref);
             try std.testing.expectEqualStrings("fake-key", request.credential);
             try events.emit(.provider_admitted);
             try events.emit(.{ .finish = .{ .reason = .stop } });
@@ -3536,14 +3515,18 @@ test "fake non-Vercel adapter completes an ACP root turn on its admitted route" 
             .adapter_id = "test_non_vercel",
             .endpoint = "fake://acp",
             .protocol = "fake-protocol",
-            .credential_ref = "fake-ref",
+            .credential_ref = "ai_gateway_api_key",
             .remembered_model = "test-model",
         },
         null,
         .unavailable,
     );
     state.api_key = try alloc.dupe(u8, "fake-key");
+    state.credential_source = .ai_gateway_api_key;
+    state.credential_connection_id = "fake";
+    state.credential_adapter_kind = "test_non_vercel";
     state.active_session.?.api_key = state.api_key;
+    state.active_session.?.credential_source = state.credential_source;
     var msg = jsonrpc.Message{
         .id = .{ .integer = 1 },
         .method = "session/prompt",
@@ -3554,6 +3537,59 @@ test "fake non-Vercel adapter completes an ACP root turn on its admitted route" 
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
     try std.testing.expect(outcome == .stop_reason);
     try std.testing.expectEqual(acp_types.StopReason.end_turn, outcome.stop_reason);
+}
+
+test "ACP root and child credentials require the exact admitted route" {
+    const alloc = std.testing.allocator;
+    var state = try initTestAcpState(alloc, "/tmp/workspace", .auto);
+    defer state.deinit();
+    const seed = state.cfg.gateway_provider.connection_seed;
+    state.api_key = try alloc.dupe(u8, "admitted-secret");
+    state.gateway_team = try alloc.dupe(u8, "team");
+    state.credential_source = .fx_login;
+    state.credential_connection_id = seed.id;
+    state.credential_adapter_kind = seed.adapter_id;
+    state.active_session.?.api_key = state.api_key;
+    state.active_session.?.credential_source = state.credential_source;
+    const profile = connection_registry.Profile{
+        .id = @constCast(seed.id),
+        .display_name = @constCast(seed.display_name),
+        .adapter_id = @constCast(seed.adapter_id),
+        .endpoint = if (seed.endpoint) |value| @constCast(value) else null,
+        .protocol = if (seed.protocol) |value| @constCast(value) else null,
+        .credential_ref = @constCast("fx_login"),
+        .remembered_model = @constCast("model"),
+        .internal_models = .{},
+    };
+    var route = try route_snapshot.RouteSnapshot.admitSelected(
+        alloc,
+        profile,
+        seed,
+        model_capabilities.configuredDescriptor("model", .{}),
+        state.cfg.gateway_chat_url,
+    );
+    defer route.deinit(alloc);
+    var ctx = AcpContext{
+        .alloc = alloc,
+        .state = &state,
+        .session_id = state.active_session.?.session_id,
+        .connection_adapter_kind = profile.adapter_id,
+    };
+
+    var root = try resolveRouteCredential(&ctx, alloc, &route);
+    defer root.deinit(alloc);
+    try std.testing.expectEqualStrings("admitted-secret", root.credential);
+    try std.testing.expectEqualStrings("team", root.tenant.?);
+
+    var mismatched = route;
+    mismatched.credential_ref = "stored_key";
+    try std.testing.expectError(error.RouteCredentialMismatch, resolveRouteCredential(&ctx, alloc, &mismatched));
+    mismatched = route;
+    mismatched.adapter_kind = "peer";
+    try std.testing.expectError(error.RouteCredentialMismatch, resolveRouteCredential(&ctx, alloc, &mismatched));
+    mismatched = route;
+    mismatched.connection_id = "other";
+    try std.testing.expectError(error.RouteCredentialMismatch, resolveRouteCredential(&ctx, alloc, &mismatched));
 }
 
 test "mismatched ACP adapter forces static capabilities without provider traffic" {
@@ -3605,27 +3641,6 @@ test "mismatched ACP adapter forces static capabilities without provider traffic
             self.model_calls += 1;
             try events.emit(.{ .finish = .{ .reason = .stop } });
         }
-
-        fn secretStoreDisabled(_: ?*anyopaque) bool {
-            return false;
-        }
-
-        fn loadSecret(
-            _: ?*anyopaque,
-            alloc: Allocator,
-        ) host.SecretStoreLoadError!?[]u8 {
-            return try alloc.dupe(u8, "fake-key");
-        }
-
-        fn storeSecret(
-            _: ?*anyopaque,
-            _: Allocator,
-            _: []const u8,
-        ) host.SecretStoreWriteError!void {}
-
-        fn storeSecretInteractively(_: ?*anyopaque) host.SecretStoreWriteError!bool {
-            return false;
-        }
     };
 
     const alloc = std.testing.allocator;
@@ -3666,22 +3681,12 @@ test "mismatched ACP adapter forces static capabilities without provider traffic
     adapter.web_search = search;
     adapter.stream_fn = Traffic.stream;
     state.cfg.gateway_provider.provider_adapter = adapter;
-    state.cfg.secret_store = .{
-        .backend_label = "test",
-        .is_disabled_fn = Traffic.secretStoreDisabled,
-        .load_fn = Traffic.loadSecret,
-        .store_fn = Traffic.storeSecret,
-        .store_interactive_fn = Traffic.storeSecretInteractively,
-    };
     state.active_session.?.effort = types.ReasoningEffort.literal("high");
     const profile = state.connections.?.selectedProfile();
-    const credential = try server.prepareConnectionCredential(
-        &state,
-        alloc,
-        profile,
-        state.active_session.?.model,
-    );
-    server.adoptConnectionCredential(&state, profile.id, credential);
+    state.api_key = try alloc.dupe(u8, "fake-key");
+    state.credential_source = .stored_key;
+    state.credential_connection_id = profile.id;
+    state.credential_adapter_kind = profile.adapter_id;
     state.active_session.?.api_key = state.api_key;
     state.active_session.?.credential_source = state.credential_source;
     var msg = jsonrpc.Message{
