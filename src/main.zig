@@ -519,11 +519,9 @@ const App = struct {
         var profile = try self.auth.connectionProfile(route.connection_id);
         if (!std.mem.eql(u8, profile.adapter_id, route.adapter_kind)) return error.RouteAdapterMismatch;
         const selected = try self.auth.selectedConnectionProfile();
-        if (std.mem.eql(u8, route.connection_id, selected.id)) {
+        if (std.mem.eql(u8, profile.id, selected.id)) {
             if (self.auth.gatewayCredential()) |credential| {
-                if (!std.mem.eql(u8, route.credential_ref, "automatic") and
-                    !std.mem.eql(u8, route.credential_ref, @tagName(credential.source)))
-                {
+                if (!std.mem.eql(u8, route.credential_ref, @tagName(credential.source))) {
                     return error.RouteCredentialMismatch;
                 }
                 var result = agent_runtime.RouteCredential{
