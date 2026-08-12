@@ -870,7 +870,8 @@ pub fn Runtime(comptime App: type) type {
                     },
                     .finish_prompt => |finished| {
                         const publish_cancelled_notice = app.stream.active and switch (finished.turn) {
-                            .interrupted => |turn| turn.terminal_reason == .cancelled,
+                            .interrupted => |turn| turn.terminal_reason == .cancelled and
+                                turn.tool_call == null,
                             else => false,
                         };
                         if (publish_cancelled_notice) {
@@ -2977,7 +2978,7 @@ test "core.app_worker_runtime cancellation suppresses payloads but retains turn 
     try std.testing.expectEqual(@as(u64, 1), app.shell.finalizedToolTurnWatermark());
 }
 
-test "core.app_worker_runtime cancelled active stream publishes one terminal notice" {
+test "core.app_worker_runtime cancelled active stream publishes only the unrepresented terminal notice" {
     var app = FakeApp.init(std.testing.allocator);
     defer app.deinit();
     app.worker.processing = true;
@@ -3017,6 +3018,24 @@ test "core.app_worker_runtime cancelled active stream publishes one terminal not
 
     try std.testing.expectEqual(@as(usize, 1), capture.notice_count);
     try std.testing.expectEqual(@as(usize, 1), capture.history_count);
+    try std.testing.expect(!app.stream.active);
+
+    app.stream.active = true;
+    try app.worker.pushEvent(std.heap.c_allocator, .{ .finish_prompt = .{
+        .turn = .{ .interrupted = .{
+            .user = .{ .text = @constCast("cancel a command"), .images = &.{} },
+            .tool_call = .{
+                .id = "call-command",
+                .name = "run_command",
+                .arguments_json = "{\"command\":\"sleep 30\"}",
+            },
+        } },
+        .terminal_outcome = .interrupted,
+    } });
+    try Runtime(FakeApp).tick(&app, noopTaskCompletion, handlers);
+
+    try std.testing.expectEqual(@as(usize, 1), capture.notice_count);
+    try std.testing.expectEqual(@as(usize, 2), capture.history_count);
     try std.testing.expect(!app.stream.active);
 }
 
