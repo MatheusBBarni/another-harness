@@ -637,7 +637,6 @@ pub fn Runtime(comptime App: type) type {
 
             const cancel_requested = taken.cancel_requested;
             var interrupted_segment = cancel_requested or batchSegmentEndsInterrupted(batch.events.items);
-            var cancelled_tool_terminal_presented = false;
             var first_event = true;
 
             events: while (batch.claim()) |event| {
@@ -682,7 +681,6 @@ pub fn Runtime(comptime App: type) type {
 
                 switch (event) {
                     .begin_prompt => |prompt| {
-                        cancelled_tool_terminal_presented = false;
                         if (!try requireAssistantTextDrain(handlers)) {
                             try retainClaimedEventAndSuffix(app, &batch, "assistant_text_drain_blocked");
                             drain_owns_current = false;
@@ -696,7 +694,6 @@ pub fn Runtime(comptime App: type) type {
                         try handlers.write_user_prompt(handlers.ctx, prompt);
                     },
                     .begin_prompt_with_skill_bindings => |begin| {
-                        cancelled_tool_terminal_presented = false;
                         if (!try requireAssistantTextDrain(handlers)) {
                             try retainClaimedEventAndSuffix(app, &batch, "assistant_text_drain_blocked");
                             drain_owns_current = false;
@@ -869,9 +866,9 @@ pub fn Runtime(comptime App: type) type {
                             },
                             .progress, .terminal, .turn_finished => {},
                         }
-                        try applyToolLifecycle(app, handlers.tool_lifecycle, lifecycle);
-                        cancelled_tool_terminal_presented = cancelled_tool_terminal_presented or
-                            (interrupted_segment and switch (lifecycle) {
+                        const terminal_presented = try applyToolLifecycle(app, handlers.tool_lifecycle, lifecycle);
+                        app.stream.cancelled_tool_terminal_presented = app.stream.cancelled_tool_terminal_presented or
+                            (terminal_presented and switch (lifecycle) {
                                 .terminal => |terminal| terminal.outcome.kind == .cancelled,
                                 .provisional, .authoritative_started, .progress, .turn_finished => false,
                             });
@@ -880,7 +877,7 @@ pub fn Runtime(comptime App: type) type {
                         const publish_cancelled_notice = app.stream.active and switch (finished.turn) {
                             .interrupted => |turn| turn.terminal_reason == .cancelled and
                                 turn.tool_call == null and
-                                !cancelled_tool_terminal_presented,
+                                !app.stream.cancelled_tool_terminal_presented,
                             else => false,
                         };
                         if (publish_cancelled_notice) {
@@ -964,7 +961,7 @@ pub fn Runtime(comptime App: type) type {
             app: *App,
             presenter: activity_runtime.LifecyclePresenter,
             lifecycle: types.ToolLifecycleEvent,
-        ) !void {
+        ) !bool {
             const starts_tool_stretch = switch (lifecycle) {
                 .provisional, .authoritative_started => true,
                 .progress, .terminal, .turn_finished => false,
@@ -1004,6 +1001,7 @@ pub fn Runtime(comptime App: type) type {
                 app.shell.render_requests.requestAnimationReset();
             }
             app.shell.render_requests.request(.footer);
+            return transition.terminal_record != null;
         }
 
         fn markAssistantText(app: *App) void {
@@ -3050,8 +3048,11 @@ test "core.app_worker_runtime cancelled active stream publishes only the unrepre
 
     app.worker.processing = true;
     app.stream.active = true;
+    app.worker.worker_cancel_requested.store(false, .seq_cst);
     try queueToolStart(&app, 3, "call-read", "read_file");
     try queueToolTerminal(&app, 3, "call-read", .cancelled, "Cancelled read");
+    try Runtime(FakeApp).tick(&app, noopTaskCompletion, handlers);
+
     try queueTurnFinished(&app, 3, .interrupted);
     try app.worker.pushEvent(std.heap.c_allocator, .{ .finish_prompt = .{
         .turn = .{ .interrupted = .{
