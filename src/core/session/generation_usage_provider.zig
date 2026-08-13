@@ -82,12 +82,51 @@ pub const ResolvedCredential = struct {
     token: []u8,
     tenant: ?[]u8 = null,
 
+    pub fn initCopy(
+        alloc: Allocator,
+        token: []const u8,
+        tenant: ?[]const u8,
+    ) Allocator.Error!ResolvedCredential {
+        var result = ResolvedCredential{ .token = try alloc.dupe(u8, token) };
+        errdefer result.deinit(alloc);
+        result.tenant = if (tenant) |value| try alloc.dupe(u8, value) else null;
+        return result;
+    }
+
     pub fn deinit(self: *ResolvedCredential, alloc: Allocator) void {
         secret.zeroAndFree(alloc, self.token);
         if (self.tenant) |tenant| alloc.free(tenant);
         self.* = undefined;
     }
 };
+
+test "resolved credential copy owns allocation failures" {
+    const Case = struct {
+        fn run(alloc: Allocator) !void {
+            var credential = try ResolvedCredential.initCopy(alloc, "secret", "team");
+            defer credential.deinit(alloc);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Case.run, .{});
+}
+
+test "resolved credential copy zeros a token when tenant allocation fails" {
+    var buffer: ["secret".len]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&buffer);
+    const backing = fixed.allocator();
+    const vtable = Allocator.VTable{
+        .alloc = backing.vtable.alloc,
+        .resize = backing.vtable.resize,
+        .remap = backing.vtable.remap,
+        .free = Allocator.noFree,
+    };
+    const alloc = Allocator{ .ptr = backing.ptr, .vtable = &vtable };
+    try std.testing.expectError(
+        error.OutOfMemory,
+        ResolvedCredential.initCopy(alloc, "secret", "team"),
+    );
+    for (buffer) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+}
 
 pub const ResolveCredentialError = Allocator.Error || error{
     Cancelled,

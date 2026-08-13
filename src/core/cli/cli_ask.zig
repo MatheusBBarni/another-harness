@@ -709,12 +709,11 @@ const AskContext = struct {
     ) generation_usage_provider.ResolveCredentialError!generation_usage_provider.ResolvedCredential {
         const self: *AskContext = @ptrCast(@alignCast(raw.?));
         if (self.api_key.len == 0) return error.Unavailable;
-        const token = try alloc.dupe(u8, self.api_key);
-        errdefer alloc.free(token);
-        return .{
-            .token = token,
-            .tenant = if (self.gateway_team) |team| try alloc.dupe(u8, team) else null,
-        };
+        return generation_usage_provider.ResolvedCredential.initCopy(
+            alloc,
+            self.api_key,
+            self.gateway_team,
+        );
     }
 
     fn prepareGenerationUsageDispatch(
@@ -1094,13 +1093,16 @@ fn freshAskState(
 }
 
 pub fn run(alloc: Allocator, args: []const [:0]const u8, cfg: Config, context_registry: context_contract.Registry, tool_set: tool_set_contract.ToolSet) !u8 {
-    return runWithDeps(alloc, args, cfg, .{
-        .load_startup_state = app_lifecycle.loadStartupState,
+    return runWithDeps(alloc, args, cfg, productionRunDeps(cfg, context_registry, tool_set));
+}
+
+fn productionRunDeps(cfg: Config, context_registry: context_contract.Registry, tool_set: tool_set_contract.ToolSet) RunDeps {
+    return .{
         .context_registry = context_registry,
         .tool_set = tool_set,
         .load_mcp_runtime = cfg.load_mcp_runtime,
         .install_headless_interrupt = true,
-    });
+    };
 }
 
 fn selectOutputMode(quiet: bool, json: bool, stdout_is_tty: bool, no_color: bool) OutputMode {
@@ -1401,10 +1403,6 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
         cfg.saved_directories_suppressed,
     );
     try checkHeadlessCancellation(options.deps);
-
-    if (options.resume_target == null and startup.credential == null) {
-        return missingCredentialResult(alloc, options);
-    }
 
     var owned_resumed_model: ?[]u8 = null;
     defer if (owned_resumed_model) |model| alloc.free(model);
@@ -4051,9 +4049,11 @@ fn testMissingKeyStartup(alloc: Allocator, _: oauth_transport.Provider, _: host.
     errdefer state.deinit(alloc);
     state.workspace_root = try alloc.dupe(u8, "/tmp/fx-test");
     state.selected_model = try alloc.dupe(u8, default_model);
+    var profile = connection_seed.profile(default_model, null);
+    profile.credential_ref = "test_missing";
     state.connections = try connection_registry.Runtime.init(
         alloc,
-        connection_seed.profile(default_model, null),
+        profile,
         null,
         .unavailable,
     );
@@ -4595,10 +4595,11 @@ fn testResolveConnectionCredential(
     alloc: Allocator,
     _: adapter_registry.AdapterRegistry,
     _: host.SecretStore,
-    _: connection_registry.Profile,
+    profile: connection_registry.Profile,
     _: credentials.LoadMode,
     _: ?*const std.atomic.Value(bool),
 ) !credentials.Resolution {
+    if (std.mem.eql(u8, profile.credential_ref, "test_missing")) return .{};
     return .{ .credential = .{
         .token = try alloc.dupe(u8, "key"),
         .source = .ai_gateway_api_key,
@@ -4624,6 +4625,21 @@ fn testCountRouteCredentialResolution(
         mode,
         cancel_flag,
     );
+}
+
+fn testCountSuccessfulRouteCredentialResolution(
+    alloc: Allocator,
+    _: adapter_registry.AdapterRegistry,
+    _: host.SecretStore,
+    _: connection_registry.Profile,
+    _: credentials.LoadMode,
+    _: ?*const std.atomic.Value(bool),
+) !credentials.Resolution {
+    test_route_credential_resolution_calls += 1;
+    return .{ .credential = .{
+        .token = try alloc.dupe(u8, "key"),
+        .source = .ai_gateway_api_key,
+    } };
 }
 
 var test_rejected_recovery_provider_calls: usize = 0;
@@ -4660,6 +4676,37 @@ fn testPromptRunDepsWithProcess(stdout_capture: *TestCapture, stderr_capture: *T
     var deps = testPromptRunDeps(stdout_capture, stderr_capture, testPresentKeyStartup);
     deps.process_queued_prompt = process;
     return deps;
+}
+
+test "production Ask loads configuration before registry credential acquisition" {
+    const deps = productionRunDeps(
+        testConfig(),
+        test_no_context_registry,
+        test_builtin_tools.advertisement_set,
+    );
+    try std.testing.expect(deps.load_startup_state == loadStartupStateWithoutCredentialsDefault);
+    try std.testing.expect(deps.resolve_connection_credential == app_lifecycle.resolveConnectionCredential);
+}
+
+test "fresh Ask acquires one credential after credential-free startup" {
+    const alloc = std.testing.allocator;
+    var stdout_capture: TestCapture = .{};
+    defer stdout_capture.deinit(alloc);
+    var stderr_capture: TestCapture = .{};
+    defer stderr_capture.deinit(alloc);
+    var deps = testPromptRunDeps(&stdout_capture, &stderr_capture, testMissingKeyStartup);
+    deps.resolve_connection_credential = testCountSuccessfulRouteCredentialResolution;
+    test_route_credential_resolution_calls = 0;
+
+    const exit_code = try runWithDeps(
+        alloc,
+        &.{ "--no-save", "hello" },
+        testConfig(),
+        deps,
+    );
+
+    try std.testing.expectEqual(@as(u8, 0), exit_code);
+    try std.testing.expectEqual(@as(usize, 1), test_route_credential_resolution_calls);
 }
 
 test "fake non-Vercel adapter completes an Ask root turn on its admitted route" {

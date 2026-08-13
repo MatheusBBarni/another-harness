@@ -14,6 +14,7 @@ const app_runtime_setup = @import("../core/app/app_runtime_setup.zig");
 const builtin_skills = @import("../builtins/skills.zig");
 const builtin_tools = @import("../builtins/tools.zig");
 const credentials = @import("../core/auth/credentials.zig");
+const secret = @import("../core/auth/secret.zig");
 const debug_trace = @import("../core/shared/debug_trace.zig");
 const gateway_provider = @import("../core/gateway/gateway_provider.zig");
 const connection_registry = @import("../core/gateway/connection_registry.zig");
@@ -268,7 +269,7 @@ pub const ServerState = struct {
         };
         self.workspace_access.deinit(self.alloc);
         if (self.workspace_root.len > 0) self.alloc.free(self.workspace_root);
-        if (self.api_key.len > 0) self.alloc.free(self.api_key);
+        if (self.api_key.len > 0) secret.zeroAndFree(self.alloc, self.api_key);
         if (self.gateway_team) |team| self.alloc.free(team);
         if (self.selected_model.len > 0) self.alloc.free(self.selected_model);
         if (self.configured_model.len > 0) self.alloc.free(self.configured_model);
@@ -330,11 +331,12 @@ pub fn prepareConnectionCredential(
                 else
                     false))
         {
-            return .{
-                .token = try alloc.dupe(u8, state.api_key),
-                .source = state.credential_source.?,
-                .team_id = if (state.gateway_team) |team| try alloc.dupe(u8, team) else null,
-            };
+            return copyRetainedCredential(
+                alloc,
+                state.api_key,
+                state.credential_source.?,
+                state.gateway_team,
+            );
         }
     }
     const resolution = try app_lifecycle.resolveConnectionCredential(
@@ -368,6 +370,21 @@ pub fn prepareConnectionCredential(
     return credential;
 }
 
+fn copyRetainedCredential(
+    alloc: Allocator,
+    token: []const u8,
+    source: credentials.Source,
+    team: ?[]const u8,
+) Allocator.Error!credentials.Credential {
+    var result = credentials.Credential{
+        .token = try alloc.dupe(u8, token),
+        .source = source,
+    };
+    errdefer result.deinit(alloc);
+    result.team_id = if (team) |value| try alloc.dupe(u8, value) else null;
+    return result;
+}
+
 fn resolveGenerationUsageCredential(
     raw: ?*anyopaque,
     alloc: Allocator,
@@ -375,12 +392,11 @@ fn resolveGenerationUsageCredential(
 ) generation_usage_provider.ResolveCredentialError!generation_usage_provider.ResolvedCredential {
     const state: *ServerState = @ptrCast(@alignCast(raw.?));
     if (state.api_key.len == 0) return error.Unavailable;
-    const token = try alloc.dupe(u8, state.api_key);
-    errdefer alloc.free(token);
-    return .{
-        .token = token,
-        .tenant = if (state.gateway_team) |team| try alloc.dupe(u8, team) else null,
-    };
+    return generation_usage_provider.ResolvedCredential.initCopy(
+        alloc,
+        state.api_key,
+        state.gateway_team,
+    );
 }
 
 fn prepareGenerationUsageDispatch(
@@ -419,7 +435,7 @@ pub fn adoptConnectionCredential(
     adapter_kind: []const u8,
     credential: credentials.Credential,
 ) void {
-    if (state.api_key.len > 0) state.alloc.free(state.api_key);
+    if (state.api_key.len > 0) secret.zeroAndFree(state.alloc, state.api_key);
     if (state.gateway_team) |team| state.alloc.free(team);
     state.credential_source = credential.source;
     state.credential_connection_id = connection_id;
@@ -1863,6 +1879,69 @@ test "ACP legacy URL publication owns partial allocations" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Case.run, .{});
+}
+
+test "ACP retained credential copy owns allocation failures" {
+    const Case = struct {
+        fn run(alloc: Allocator) !void {
+            var credential = try copyRetainedCredential(
+                alloc,
+                "secret",
+                .fx_login,
+                "team",
+            );
+            defer credential.deinit(alloc);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Case.run, .{});
+}
+
+test "ACP retained credential copy zeros a token when team allocation fails" {
+    var buffer: ["secret".len]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&buffer);
+    const backing = fixed.allocator();
+    const vtable = Allocator.VTable{
+        .alloc = backing.vtable.alloc,
+        .resize = backing.vtable.resize,
+        .remap = backing.vtable.remap,
+        .free = Allocator.noFree,
+    };
+    const alloc = Allocator{ .ptr = backing.ptr, .vtable = &vtable };
+    try std.testing.expectError(
+        error.OutOfMemory,
+        copyRetainedCredential(alloc, "secret", .fx_login, "team"),
+    );
+    for (buffer) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+}
+
+test "ACP credential replacement zeros the previous token" {
+    var buffer: [64]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&buffer);
+    const backing = fixed.allocator();
+    const vtable = Allocator.VTable{
+        .alloc = backing.vtable.alloc,
+        .resize = backing.vtable.resize,
+        .remap = backing.vtable.remap,
+        .free = Allocator.noFree,
+    };
+    const alloc = Allocator{ .ptr = backing.ptr, .vtable = &vtable };
+    const previous = try alloc.dupe(u8, "old-secret");
+    const replacement = try alloc.dupe(u8, "new-secret");
+    var state = ServerState{
+        .alloc = alloc,
+        .cfg = undefined,
+        .writer = jsonrpc.Writer.init(),
+        .api_key = previous,
+    };
+
+    adoptConnectionCredential(&state, "connection", "adapter", .{
+        .token = replacement,
+        .source = .fx_login,
+    });
+    defer secret.zeroAndFree(alloc, state.api_key);
+
+    for (buffer[0.."old-secret".len]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    try std.testing.expectEqualStrings("new-secret", state.api_key);
 }
 
 test "ACP legacy URL state requires consent and completion" {
