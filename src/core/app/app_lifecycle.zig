@@ -726,7 +726,9 @@ pub fn bootstrapInteractiveApp(cfg: BootstrapConfig) !StartupState {
         cfg.connection_seed,
     );
     errdefer state.deinit(cfg.alloc);
-    try state.normalizeModels(cfg.alloc, cfg.model_descriptors);
+    const profile = state.connections.?.selectedProfile();
+    const adapter = try cfg.adapter_registry.resolveProfile(profile);
+    try state.normalizeModels(cfg.alloc, adapter.model_descriptors);
 
     state.credential_onboarding_skipped = credentialOnboardingDisabled();
 

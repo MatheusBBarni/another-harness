@@ -859,7 +859,7 @@ pub const FakeAgentRuntimeDeps = struct {
         return builtin_gateway.model_descriptor_provider.fallback(model);
     }
 
-    fn refreshGatewayCredential(raw: *anyopaque, alloc: Allocator, source: types.CredentialSource, mode: runtime_deps.CredentialRefreshMode) !?[]u8 {
+    fn refreshGatewayCredential(raw: *anyopaque, alloc: Allocator, _: *const route_snapshot.RouteSnapshot, source: types.CredentialSource, mode: runtime_deps.CredentialRefreshMode) !?[]u8 {
         const self: *FakeAgentRuntimeDeps = @ptrCast(@alignCast(raw));
         try self.credential_refresh_sources.append(self.alloc, source);
         try self.credential_refresh_modes.append(self.alloc, mode);

@@ -261,7 +261,7 @@ pub const AgentRuntimeDeps = struct {
     push_command_output_complete: *const fn (ctx: *anyopaque, lifecycle_id: ?types.ToolLifecycleId) anyerror!void,
     push_provider_failure: *const fn (ctx: *anyopaque, category: agent_stream_provider.StreamFailure.Category, response_code: ?u16, detail: []const u8, credential_source: ?types.CredentialSource) anyerror!void,
     resolve_route_credential: *const fn (ctx: *anyopaque, alloc: Allocator, route: *const route_snapshot.RouteSnapshot) anyerror!RouteCredential = routeCredentialUnavailable,
-    refresh_gateway_credential: ?*const fn (ctx: *anyopaque, alloc: Allocator, source: types.CredentialSource, mode: CredentialRefreshMode) anyerror!?[]u8 = null,
+    refresh_gateway_credential: ?*const fn (ctx: *anyopaque, alloc: Allocator, route: *const route_snapshot.RouteSnapshot, source: types.CredentialSource, mode: CredentialRefreshMode) anyerror!?[]u8 = null,
     request_route_recovery: ?*const fn (ctx: *anyopaque, arena: Allocator, request: RouteRecoveryRequest) anyerror!RouteRecoveryDecision = null,
     /// Read-only admission compatibility callbacks. Root surfaces resolve the
     /// descriptor before the loop; G11 removes these unused loop-era fields.

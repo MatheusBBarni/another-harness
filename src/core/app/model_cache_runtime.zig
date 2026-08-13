@@ -264,6 +264,8 @@ pub const Runtime = struct {
 
     alloc: Allocator,
     models_path: []const u8,
+    descriptor_provider: model_catalog.ModelDescriptorProvider,
+    adapter_kind: ?[]const u8 = null,
     catalog: std.ArrayList(model_catalog.ModelCatalogEntry) = .empty,
     mutex: std.Io.Mutex = .init,
     thread: ?std.Thread = null,
@@ -276,9 +278,18 @@ pub const Runtime = struct {
     menu: ModelMenu = .{},
 
     pub fn init(alloc: Allocator, models_path: []const u8) Self {
+        return initWithDescriptorProvider(alloc, models_path, model_catalog.configured_model_descriptor_provider);
+    }
+
+    pub fn initWithDescriptorProvider(
+        alloc: Allocator,
+        models_path: []const u8,
+        descriptor_provider: model_catalog.ModelDescriptorProvider,
+    ) Self {
         return .{
             .alloc = alloc,
             .models_path = models_path,
+            .descriptor_provider = descriptor_provider,
         };
     }
 
@@ -440,6 +451,38 @@ pub const Runtime = struct {
         self.cancel_requested.store(false, .seq_cst);
     }
 
+    pub fn selectAdapter(
+        self: *Self,
+        kind: []const u8,
+        descriptors: model_catalog.ModelDescriptorProvider,
+    ) void {
+        self.finishThreadIfDone();
+        self.mutex.lockUncancelable(io_mod.getIo());
+        const changed = self.adapter_kind == null or
+            !std.mem.eql(u8, self.adapter_kind.?, kind);
+        self.mutex.unlock(io_mod.getIo());
+        if (changed) {
+            self.cancelAndJoin();
+            self.mutex.lockUncancelable(io_mod.getIo());
+            self.menu.deinit(self.alloc);
+            model_catalog.freeModelCatalog(self.alloc, &self.catalog);
+            self.catalog = .empty;
+            self.outcome = .{};
+            self.state = .idle;
+            self.completion_pending = false;
+            self.last_attempt_ms = 0;
+            self.requested_access = null;
+            self.adapter_kind = kind;
+            self.descriptor_provider = descriptors;
+            self.mutex.unlock(io_mod.getIo());
+            self.cancel_requested.store(false, .seq_cst);
+            return;
+        }
+        self.mutex.lockUncancelable(io_mod.getIo());
+        self.descriptor_provider = descriptors;
+        self.mutex.unlock(io_mod.getIo());
+    }
+
     pub fn isLoading(self: *Self) bool {
         self.finishThreadIfDone();
         self.mutex.lockUncancelable(io_mod.getIo());
@@ -504,27 +547,73 @@ pub const Runtime = struct {
         return model_catalog_metadata.fromCatalogEntry(entry.*);
     }
 
+    pub fn availableDescriptorWith(
+        self: *Self,
+        adapter_kind: []const u8,
+        descriptors: model_catalog.ModelDescriptorProvider,
+        model: []const u8,
+    ) model_capabilities.ModelDescriptor {
+        self.finishThreadIfDone();
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        if (self.adapter_kind == null or
+            !std.mem.eql(u8, self.adapter_kind.?, adapter_kind) or
+            self.state != .ready)
+        {
+            return descriptors.fallback(model);
+        }
+        return descriptors.resolve(self.catalog.items, model);
+    }
+
     pub fn resolveForRequest(
         self: *Self,
         model: []const u8,
         cancel_flag: *std.atomic.Value(bool),
-    ) model_capabilities.ResolveError!model_capabilities.Capabilities {
+    ) model_capabilities.ResolveError!model_capabilities.ModelDescriptor {
+        const fallback = self.descriptor_provider.fallback(model);
+        return self.resolveForRequestCommon(null, self.descriptor_provider, model, cancel_flag, fallback);
+    }
+
+    pub fn resolveForRequestWith(
+        self: *Self,
+        adapter_kind: []const u8,
+        descriptors: model_catalog.ModelDescriptorProvider,
+        model: []const u8,
+        cancel_flag: *std.atomic.Value(bool),
+    ) model_capabilities.ResolveError!model_capabilities.ModelDescriptor {
+        const fallback = descriptors.fallback(model);
+        return self.resolveForRequestCommon(adapter_kind, descriptors, model, cancel_flag, fallback);
+    }
+
+    fn resolveForRequestCommon(
+        self: *Self,
+        expected_adapter_kind: ?[]const u8,
+        descriptors: model_catalog.ModelDescriptorProvider,
+        model: []const u8,
+        cancel_flag: *std.atomic.Value(bool),
+        fallback: model_capabilities.ModelDescriptor,
+    ) model_capabilities.ResolveError!model_capabilities.ModelDescriptor {
         while (true) {
             self.finishThreadIfDone();
             self.mutex.lockUncancelable(io_mod.getIo());
+            if (expected_adapter_kind) |expected| {
+                if (self.adapter_kind == null or
+                    !std.mem.eql(u8, self.adapter_kind.?, expected))
+                {
+                    self.mutex.unlock(io_mod.getIo());
+                    return fallback;
+                }
+            }
             const state = self.state;
             if (state == .ready) {
-                const metadata = if (findCatalogModel(self.catalog.items, model)) |entry|
-                    model_catalog_metadata.fromCatalogEntry(entry.*)
-                else
-                    null;
+                const descriptor = descriptors.resolve(self.catalog.items, model);
                 self.mutex.unlock(io_mod.getIo());
                 debug_trace.logf(
                     "gateway",
                     "interactive model catalog lookup outcome={s} model={s}",
-                    .{ if (metadata != null) "ready_hit" else "missing_entry", model },
+                    .{ if (descriptor.source == .catalog) "ready_hit" else "missing_entry", model },
                 );
-                return model_capabilities.resolveCapabilities(model, metadata);
+                return descriptor;
             }
             self.mutex.unlock(io_mod.getIo());
 
@@ -902,6 +991,32 @@ test "model cache clears an old failure after a clean empty refresh" {
     var snapshot = (try runtime.snapshotCachedModelIds(std.testing.allocator)).?;
     defer collections.freeStringList(std.testing.allocator, &snapshot);
     try std.testing.expectEqualStrings("public/original", snapshot.items[0]);
+}
+
+test "model cache adapter switch clears the prior provider catalog" {
+    var runtime = Runtime.initWithDescriptorProvider(
+        std.testing.allocator,
+        "/v1/models",
+        test_builtin_gateway.model_descriptor_provider,
+    );
+    defer runtime.deinit();
+    runtime.selectAdapter("adapter-a", test_builtin_gateway.model_descriptor_provider);
+    var provider_a = AuthChangeCatalog{ .model_id = "provider-a/model" };
+    runtime.loadCooperative(provider_a.provider(), .{ .public_only = .no_credential });
+    try std.testing.expectEqualStrings(
+        "provider-a/model",
+        runtime.catalogModelCompletion("provider-a/model").?,
+    );
+
+    runtime.selectAdapter("adapter-b", test_builtin_gateway.model_descriptor_provider);
+    try std.testing.expect(runtime.catalogModelCompletion("provider-a/model") == null);
+    var provider_b = AuthChangeCatalog{ .model_id = "provider-b/model" };
+    runtime.loadCooperative(provider_b.provider(), .{ .public_only = .no_credential });
+    try std.testing.expectEqual(@as(usize, 1), provider_b.calls);
+    try std.testing.expectEqualStrings(
+        "provider-b/model",
+        runtime.catalogModelCompletion("provider-b/model").?,
+    );
 }
 
 test "cooperative model cache retries a ready catalog after a retryable fallback failure" {

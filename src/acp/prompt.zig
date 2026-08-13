@@ -93,7 +93,7 @@ const AcpContext = struct {
     alloc: Allocator,
     state: *server.ServerState,
     session_id: []const u8,
-    connection_adapter_kind: []const u8 = "",
+    provider_adapter: agent_stream_provider.ProviderAdapter = agent_stream_provider.unavailable_adapter,
     /// Tool-call IDs already announced with a pending update. Keys are owned
     /// copies of provider call ids so the ID stays stable from permission
     /// review through execution.
@@ -222,7 +222,7 @@ const AcpContext = struct {
             .max_command_output_bytes = self.state.cfg.max_command_output_bytes,
             .max_tool_result_bytes = session.max_tool_result_bytes,
             .api_key = session.api_key,
-            .provider_adapter = self.state.cfg.gateway_provider.provider_adapter,
+            .provider_adapter = self.provider_adapter,
             .agent_stream_provider = self.state.cfg.gateway_provider.agent_stream,
             .credential_source = session.credential_source,
             .oauth_transport = self.state.cfg.gateway_provider.oauth_transport,
@@ -510,14 +510,43 @@ pub fn handlePrompt(
         recovery_checkpoint = try checkpoint.dupe(alloc);
     }
 
+    const connection_id = if (recovery_checkpoint) |checkpoint|
+        checkpoint.route_identity.?.connection_id
+    else if (session.writable) |*writable|
+        writable.state.preferences.connection_id.?
+    else if (session.wasm_state) |*durable|
+        durable.preferences.connection_id.?
+    else
+        state.connections.?.selectedProfile().id;
+    var profile = state.connections.?.profile(connection_id) catch
+        return error.MissingSessionConnection;
+    const credential_source = session.credential_source orelse return error.MissingCredential;
+    const credential_adapter_kind = state.credential_adapter_kind orelse
+        return error.RouteCredentialMismatch;
+    if (!std.mem.eql(u8, profile.adapter_id, credential_adapter_kind) or
+        (!std.mem.eql(u8, profile.credential_ref, "automatic") and
+            !std.mem.eql(u8, profile.credential_ref, @tagName(credential_source))))
+    {
+        return error.RouteCredentialMismatch;
+    }
+    profile.credential_ref = @constCast(@tagName(credential_source));
+    const profile_adapter = try state.cfg.gateway_provider.adapter_registry.resolveProfile(profile);
+    ctx.provider_adapter = profile_adapter;
+    if (recovery_checkpoint) |checkpoint| {
+        try route_snapshot.validateRecoveryProfile(
+            profile,
+            checkpoint.route_identity.?.adapter_kind,
+        );
+    }
+
     var tool_projection = try state.cfg.mode_registry.buildGatewayToolProjection(alloc, activeToolSet(state), captured_mode, .{
         .permission_mode = captured_permission_mode,
         .permission_rules = session.permission_rules,
         .mcp_runtime = session.mcp,
         .subagent_available = state.subagent_host != null,
+        .provider_tools = profile_adapter.provider_tools,
         .terminal_available = state.subagent_host != null and
             tool_dispatch.ToolCapabilities.for_host(host.current()).terminalAvailable(),
-        .provider_tools = state.cfg.gateway_provider.provider_adapter.provider_tools,
     });
     defer tool_projection.deinit(alloc);
 
@@ -559,33 +588,6 @@ pub fn handlePrompt(
     const current_images = if (recovery_checkpoint) |checkpoint| checkpoint.user.images else &.{};
     const authorized_image_catalog = try session.session_rt.snapshotImageCatalog(alloc, current_images);
     defer types.freeImageAttachmentSlice(alloc, authorized_image_catalog);
-    const connection_id = if (recovery_checkpoint) |checkpoint|
-        checkpoint.route_identity.?.connection_id
-    else if (session.writable) |*writable|
-        writable.state.preferences.connection_id.?
-    else if (session.wasm_state) |*durable|
-        durable.preferences.connection_id.?
-    else
-        state.connections.?.selectedProfile().id;
-    var profile = state.connections.?.profile(connection_id) catch
-        return error.MissingSessionConnection;
-    const credential_source = session.credential_source orelse return error.MissingCredential;
-    const credential_adapter_kind = state.credential_adapter_kind orelse
-        return error.RouteCredentialMismatch;
-    if (!std.mem.eql(u8, profile.adapter_id, credential_adapter_kind) or
-        (!std.mem.eql(u8, profile.credential_ref, "automatic") and
-            !std.mem.eql(u8, profile.credential_ref, @tagName(credential_source))))
-    {
-        return error.RouteCredentialMismatch;
-    }
-    profile.credential_ref = @constCast(@tagName(credential_source));
-    ctx.connection_adapter_kind = profile.adapter_id;
-    if (recovery_checkpoint) |checkpoint| {
-        try route_snapshot.validateRecoveryProfile(
-            profile,
-            checkpoint.route_identity.?.adapter_kind,
-        );
-    }
     var descriptor = if (recovery_checkpoint) |checkpoint| recovery_descriptor: {
         const resolved = availableModelDescriptor(@ptrCast(&ctx), checkpoint.route_model);
         break :recovery_descriptor route_snapshot.recoveryDescriptor(
@@ -627,6 +629,7 @@ pub fn handlePrompt(
             state.cfg.gateway_chat_url,
         );
     defer route.deinit(alloc);
+    ctx.provider_adapter = try state.cfg.gateway_provider.adapter_registry.resolveRoute(&route);
 
     const job: worker_runtime.QueuedPrompt = .{
         .turn_id = if (recovery_checkpoint) |checkpoint| checkpoint.turn_id else 0,
@@ -713,12 +716,15 @@ pub fn runSubagentChild(
         .alloc = alloc,
         .state = state,
         .session_id = session_id,
-        .connection_adapter_kind = if (admission.route) |route| route.adapter_kind else "",
         .captured_mode = captured_mode,
         .captured_permission_mode = admission.permission_mode,
         .captured_sandbox_backend = admission.sandbox_backend,
     };
     defer ctx.deinitPublishedToolCalls();
+    const route = admission.route orelse return error.AdmissionFailed;
+    const provider_adapter = state.cfg.gateway_provider.adapter_registry.resolveRoute(&route) catch
+        return error.ProviderFailed;
+    ctx.provider_adapter = provider_adapter;
     var child_projection = state.cfg.mode_registry.buildGatewayToolProjection(
         alloc,
         builtin_tools.advertisement_set,
@@ -728,8 +734,8 @@ pub fn runSubagentChild(
             .permission_rules = admission.rules,
             .mcp_runtime = mcp,
             .subagent_available = true,
+            .provider_tools = provider_adapter.provider_tools,
             .terminal_available = tool_dispatch.ToolCapabilities.for_host(host.current()).terminalAvailable(),
-            .provider_tools = state.cfg.gateway_provider.provider_adapter.provider_tools,
         },
     ) catch return error.OutOfMemory;
     defer child_projection.deinit(alloc);
@@ -1018,7 +1024,7 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
     const session = if (ctx.state.active_session) |*active| active else unreachable;
     return .{
         .ctx = @ptrCast(ctx),
-        .provider_adapter = ctx.state.cfg.gateway_provider.provider_adapter,
+        .provider_adapter = ctx.provider_adapter,
         .agent_stream_provider = ctx.state.cfg.gateway_provider.agent_stream,
         .flush_assistant_stream_per_content_chunk = host_target.is_wasm,
         .tool_registry = ctx.toolRegistry(),
@@ -1153,13 +1159,10 @@ fn resolveModelCapabilities(
     model: []const u8,
 ) model_capabilities.ResolveError!model_capabilities.Capabilities {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    const adapter = ctx.state.cfg.gateway_provider.provider_adapter;
+    const adapter = ctx.provider_adapter;
     const descriptors = adapter.model_descriptors;
     const session = if (ctx.state.active_session) |*active| active else return descriptors.fallback(model).capabilities;
-    const catalog = gateway_provider.modelCatalogForAdapter(
-        ctx.connection_adapter_kind,
-        adapter,
-    ) orelse return descriptors.fallback(model).capabilities;
+    const catalog = adapter.model_catalog orelse return descriptors.fallback(model).capabilities;
     return ctx.state.capability_resolver.resolve(
         ctx.state.alloc,
         catalog,
@@ -1177,17 +1180,14 @@ fn availableModelCapabilities(
     model: []const u8,
 ) model_capabilities.Capabilities {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    const adapter = ctx.state.cfg.gateway_provider.provider_adapter;
-    if (gateway_provider.modelCatalogForAdapter(
-        ctx.connection_adapter_kind,
-        adapter,
-    ) == null) return adapter.model_descriptors.fallback(model).capabilities;
+    const adapter = ctx.provider_adapter;
+    if (adapter.model_catalog == null) return adapter.model_descriptors.fallback(model).capabilities;
     return ctx.state.capability_resolver.available(model);
 }
 
 fn resolveModelDescriptor(raw_ctx: *anyopaque, alloc: Allocator, model: []const u8) model_capabilities.ResolveError!model_capabilities.ModelDescriptor {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    var descriptor = ctx.state.cfg.gateway_provider.provider_adapter.model_descriptors.fallback(model);
+    var descriptor = ctx.provider_adapter.model_descriptors.fallback(model);
     descriptor.capabilities = try resolveModelCapabilities(raw_ctx, alloc, model);
     descriptor.source = .catalog;
     return descriptor;
@@ -1195,7 +1195,7 @@ fn resolveModelDescriptor(raw_ctx: *anyopaque, alloc: Allocator, model: []const 
 
 fn availableModelDescriptor(raw_ctx: *anyopaque, model: []const u8) model_capabilities.ModelDescriptor {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
-    var descriptor = ctx.state.cfg.gateway_provider.provider_adapter.model_descriptors.fallback(model);
+    var descriptor = ctx.provider_adapter.model_descriptors.fallback(model);
     descriptor.capabilities = availableModelCapabilities(raw_ctx, model);
     return descriptor;
 }
@@ -3506,6 +3506,10 @@ test "fake non-Vercel adapter completes an ACP root turn on its admitted route" 
         .context = &fake,
         .stream_fn = Fake.stream,
     };
+    const adapters = [_]agent_stream_provider.ProviderAdapter{
+        state.cfg.gateway_provider.provider_adapter,
+    };
+    state.cfg.gateway_provider.adapter_registry = .{ .adapters = &adapters };
     state.connections.?.deinit();
     state.connections = try connection_registry.Runtime.init(
         alloc,
@@ -3573,7 +3577,6 @@ test "ACP root and child credentials require the exact admitted route" {
         .alloc = alloc,
         .state = &state,
         .session_id = state.active_session.?.session_id,
-        .connection_adapter_kind = profile.adapter_id,
     };
 
     var root = try resolveRouteCredential(&ctx, alloc, &route);
@@ -3696,7 +3699,7 @@ test "mismatched ACP adapter forces static capabilities without provider traffic
     };
 
     try std.testing.expectError(
-        error.RouteAdapterMismatch,
+        error.MissingAdapter,
         handlePrompt(&state, alloc, &msg, "normal", .auto, .none),
     );
     try std.testing.expectEqual(@as(usize, 0), traffic.catalog_calls);

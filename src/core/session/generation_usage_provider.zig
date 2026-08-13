@@ -139,34 +139,45 @@ pub const CredentialResolver = struct {
     resolve_fn: *const fn (
         context: ?*anyopaque,
         alloc: Allocator,
-        credential_ref: []const u8,
+        reference: CredentialReference,
     ) ResolveCredentialError!ResolvedCredential,
 
     pub fn resolve(
         self: CredentialResolver,
         alloc: Allocator,
-        credential_ref: []const u8,
+        reference: CredentialReference,
     ) ResolveCredentialError!ResolvedCredential {
-        return self.resolve_fn(self.context, alloc, credential_ref);
+        return self.resolve_fn(self.context, alloc, reference);
     }
+};
+
+pub const CredentialReference = struct {
+    connection_id: []const u8,
+    adapter_kind: []const u8,
+    credential_ref: []const u8,
 };
 
 pub const ConnectionInput = struct {
     id: []const u8,
+    adapter_kind: []const u8,
     credential_ref: []const u8,
     provider: ?Provider,
 };
 
 const Connection = struct {
     id: []u8,
+    adapter_kind: []u8,
     credential_ref: []u8,
     provider: ?Provider,
 
     fn init(alloc: Allocator, input: ConnectionInput) Allocator.Error!Connection {
         const id = try alloc.dupe(u8, input.id);
         errdefer alloc.free(id);
+        const adapter_kind = try alloc.dupe(u8, input.adapter_kind);
+        errdefer alloc.free(adapter_kind);
         return .{
             .id = id,
+            .adapter_kind = adapter_kind,
             .credential_ref = try alloc.dupe(u8, input.credential_ref),
             .provider = input.provider,
         };
@@ -174,6 +185,7 @@ const Connection = struct {
 
     fn deinit(self: *Connection, alloc: Allocator) void {
         alloc.free(self.id);
+        alloc.free(self.adapter_kind);
         alloc.free(self.credential_ref);
         self.* = undefined;
     }
@@ -226,7 +238,11 @@ pub const Dispatch = struct {
         const provider = connection.provider orelse return .preserve_pending;
         var credential = self.credential_resolver.resolve(
             alloc,
-            connection.credential_ref,
+            .{
+                .connection_id = connection.id,
+                .adapter_kind = connection.adapter_kind,
+                .credential_ref = connection.credential_ref,
+            },
         ) catch |err| switch (err) {
             error.Cancelled => return error.Cancelled,
             error.OutOfMemory => return error.OutOfMemory,
@@ -326,11 +342,16 @@ test "generation usage dispatch is connection scoped and missing connections are
         fn resolve(
             raw: ?*anyopaque,
             alloc: Allocator,
-            credential_ref: []const u8,
+            reference: CredentialReference,
         ) ResolveCredentialError!ResolvedCredential {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
+            if (!std.mem.eql(u8, reference.connection_id, "connection-a") or
+                !std.mem.eql(u8, reference.adapter_kind, "adapter-a"))
+            {
+                return error.Unavailable;
+            }
             self.resolved += 1;
-            return .{ .token = try alloc.dupe(u8, credential_ref) };
+            return .{ .token = try alloc.dupe(u8, reference.credential_ref) };
         }
 
         fn lookup(
@@ -351,6 +372,7 @@ test "generation usage dispatch is connection scoped and missing connections are
         std.testing.allocator,
         &.{.{
             .id = "connection-a",
+            .adapter_kind = "adapter-a",
             .credential_ref = "credential-a",
             .provider = provider,
         }},
@@ -379,6 +401,45 @@ test "generation usage dispatch is connection scoped and missing connections are
             "missing",
             "generation-missing",
             "scope-missing",
+            &cancel,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), fake.resolved);
+    try std.testing.expectEqual(@as(usize, 1), fake.calls);
+
+    cancel.store(true, .seq_cst);
+    try std.testing.expectError(
+        error.Cancelled,
+        dispatch.lookup(
+            std.testing.allocator,
+            "connection-a",
+            "generation-cancelled",
+            null,
+            &cancel,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), fake.resolved);
+    try std.testing.expectEqual(@as(usize, 1), fake.calls);
+
+    cancel.store(false, .seq_cst);
+    var mismatched = try Dispatch.init(
+        std.testing.allocator,
+        &.{.{
+            .id = "connection-a",
+            .adapter_kind = "adapter-b",
+            .credential_ref = "credential-b",
+            .provider = provider,
+        }},
+        .{ .context = &fake, .resolve_fn = Fake.resolve },
+    );
+    defer mismatched.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        LookupOutcome.preserve_pending,
+        try mismatched.lookup(
+            std.testing.allocator,
+            "connection-a",
+            "generation-mismatched",
+            null,
             &cancel,
         ),
     );

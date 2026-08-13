@@ -960,10 +960,24 @@ pub fn Runtime(comptime App: type) type {
                     return error.McpRequiredServerUnavailable;
                 }
             }
-            var tool_projection = try app.snapshotGatewayToolProjection(
-                std.heap.c_allocator,
-                job.permission_mode,
-            );
+            const provider_adapter = if (comptime @hasDecl(App, "providerAdapterForRoute"))
+                try app.providerAdapterForRoute(&job.route)
+            else adapter: {
+                const value = app.providerAdapter();
+                if (!value.acceptsRoute(&job.route)) return error.RouteAdapterMismatch;
+                break :adapter value;
+            };
+            var tool_projection = if (comptime @hasDecl(App, "snapshotGatewayToolProjectionForAdapter"))
+                try app.snapshotGatewayToolProjectionForAdapter(
+                    std.heap.c_allocator,
+                    job.permission_mode,
+                    provider_adapter,
+                )
+            else
+                try app.snapshotGatewayToolProjection(
+                    std.heap.c_allocator,
+                    job.permission_mode,
+                );
             defer tool_projection.deinit(std.heap.c_allocator);
             const session_child_capability =
                 if (comptime @hasField(App, "session_persistence"))
@@ -971,7 +985,10 @@ pub fn Runtime(comptime App: type) type {
                 else
                     null;
 
-            const deps = app_callbacks.Bindings(App).agentRuntimeDeps(app);
+            const deps = app_callbacks.Bindings(App).agentRuntimeDepsForAdapter(
+                app,
+                provider_adapter,
+            );
             const semantic_presentation = app_callbacks.Bindings(App).semanticPresentationSink(app);
             const config = buildQueuedPromptConfig(
                 app,
@@ -1019,11 +1036,27 @@ pub fn Runtime(comptime App: type) type {
         ) subagent_execution.ServiceError!subagent_execution.RunOutcome {
             const app: *App = @ptrCast(@alignCast(raw.?));
             const alloc = std.heap.c_allocator;
-            var child_projection = app.snapshotSubagentGatewayToolProjection(
-                alloc,
-                admission.permission_mode,
-                admission.rules,
-            ) catch
+            const route = admission.route orelse return error.AdmissionFailed;
+            const provider_adapter = if (comptime @hasDecl(App, "providerAdapterForRoute"))
+                app.providerAdapterForRoute(&route) catch return error.ProviderFailed
+            else adapter: {
+                const value = app.providerAdapter();
+                if (!value.acceptsRoute(&route)) return error.AdmissionFailed;
+                break :adapter value;
+            };
+            var child_projection = (if (comptime @hasDecl(App, "snapshotSubagentGatewayToolProjectionForAdapter"))
+                app.snapshotSubagentGatewayToolProjectionForAdapter(
+                    alloc,
+                    admission.permission_mode,
+                    admission.rules,
+                    provider_adapter,
+                )
+            else
+                app.snapshotSubagentGatewayToolProjection(
+                    alloc,
+                    admission.permission_mode,
+                    admission.rules,
+                )) catch
                 return error.OutOfMemory;
             defer child_projection.deinit(alloc);
             var bounded_skills = app.skills.buildBoundedSystemPromptSection(
@@ -1043,7 +1076,10 @@ pub fn Runtime(comptime App: type) type {
             return subagent_agent_adapter.run(.{
                 .host = app_session_runtime.Runtime(App).subagentHost(app) orelse
                     return error.ProviderFailed,
-                .tool_context = childToolContext(app.subagentToolContextForAdmission(admission)),
+                .tool_context = childToolContext(if (comptime @hasDecl(App, "subagentToolContextForAdmissionAndAdapter"))
+                    app.subagentToolContextForAdmissionAndAdapter(admission, provider_adapter)
+                else
+                    app.subagentToolContextForAdmission(admission)),
                 .system_prompt = prompt_policy.system_prompt,
                 .model_prompt_overlay = prompt_policy.modelPromptOverlay(admission.model),
                 .skills_prompt_section = bounded_skills.text,
@@ -2672,10 +2708,13 @@ test "subagent tool projection uses immutable admission permission rules" {
         .pattern = @constCast("admitted-rule"),
         .action = .allow,
     }};
+    var route = try route_snapshot_test_support.owned(alloc, "test-model");
+    defer route.deinit(alloc);
     var admission = try subagent_domain.captureAdmission(alloc, .{
         .parent_id = "parent",
         .source_id = "parent",
         .model = "test-model",
+        .route = &route,
         .effort = .auto,
         .permission_mode = .auto,
         .sandbox_backend = .none,

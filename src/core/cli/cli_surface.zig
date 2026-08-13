@@ -1,8 +1,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const io_mod = @import("../shared/io.zig");
+const agent_stream_provider = @import("../agent/stream_provider.zig");
 const adapter_auth = @import("../gateway/adapter_auth.zig");
 const auth_runtime = @import("../auth/auth_runtime.zig");
+const credentials = @import("../auth/credentials.zig");
 const app_lifecycle = @import("../app/app_lifecycle.zig");
 const background_record_liveness = @import("../background/background_record_liveness.zig");
 const background_store = @import("../background/background_store.zig");
@@ -15,6 +17,7 @@ const config_runtime = @import("../config/config_runtime.zig");
 const devbox_executor = @import("../execution/devbox_executor.zig");
 const doctor_runtime = @import("doctor_runtime.zig");
 const gateway_provider = @import("../gateway/gateway_provider.zig");
+const adapter_registry = @import("../gateway/adapter_registry.zig");
 const connection_registry = @import("../gateway/connection_registry.zig");
 const model_catalog = @import("../gateway/model_catalog.zig");
 const background_process_provider = @import(
@@ -296,6 +299,14 @@ const LoadStartupStateFn = *const fn (Allocator, oauth_transport.Provider, host.
 const LoadCatalogStartupStateFn = *const fn (Allocator, host.SecretStore, []const u8, bool, usize, connection_registry.Seed) anyerror!app_lifecycle.StartupState;
 const LoadStartupStateWithoutCredentialsFn = *const fn (Allocator, []const u8, bool, usize, connection_registry.Seed) anyerror!app_lifecycle.StartupState;
 const LoadStartupStatusWithoutCredentialsFn = *const fn (Allocator, []const u8, usize) anyerror!app_lifecycle.StartupStatus;
+const ResolveConnectionCredentialFn = *const fn (
+    Allocator,
+    adapter_registry.AdapterRegistry,
+    host.SecretStore,
+    connection_registry.Profile,
+    credentials.LoadMode,
+    ?*const std.atomic.Value(bool),
+) anyerror!credentials.Resolution;
 const GetenvFn = *const fn (?*anyopaque, []const u8) ?[]const u8;
 const EnvironMapFn = *const fn (?*anyopaque) ?*const std.process.Environ.Map;
 const SelfExePathFn = *const fn (?*anyopaque, Allocator) anyerror![]u8;
@@ -313,6 +324,7 @@ const RunDeps = struct {
     load_catalog_startup_state: LoadCatalogStartupStateFn = app_lifecycle.loadCatalogStartupState,
     load_startup_state_without_credentials: LoadStartupStateWithoutCredentialsFn = app_lifecycle.loadStartupStateWithoutCredentials,
     load_startup_status_without_credentials: LoadStartupStatusWithoutCredentialsFn = app_lifecycle.loadStartupStatusWithoutCredentials,
+    resolve_connection_credential: ResolveConnectionCredentialFn = app_lifecycle.resolveConnectionCredential,
     getenv: GetenvFn = getenvDefault,
     environ_map: EnvironMapFn = environMapDefault,
     self_exe_path: SelfExePathFn = selfExePathDefault,
@@ -323,6 +335,7 @@ const RunDeps = struct {
 const TopLevelAuthBinding = struct {
     startup: app_lifecycle.StartupState,
     profile: connection_registry.Profile,
+    adapter: agent_stream_provider.ProviderAdapter,
     auth: adapter_auth.Provider,
     host: adapter_auth.AuthHost,
 
@@ -343,12 +356,28 @@ fn resolveTopLevelAuth(alloc: Allocator, cfg: Config, deps: RunDeps) !TopLevelAu
     errdefer startup.deinit(alloc);
     const connections = if (startup.connections) |*value| value else return error.ConnectionRegistryUnavailable;
     const profile = connections.selectedProfile();
+    const adapter = try cfg.gateway_provider.adapter_registry.resolveProfile(profile);
     return .{
         .startup = startup,
         .profile = profile,
-        .auth = try cfg.gateway_provider.adapter_registry.resolveAuthForProfile(profile),
+        .adapter = adapter,
+        .auth = adapter.auth orelse return error.MissingAuthCapability,
         .host = .{ .secret_store = cfg.secret_store, .url_opener = cfg.url_opener },
     };
+}
+
+fn selectedStartupProfile(startup: *app_lifecycle.StartupState) !connection_registry.Profile {
+    const connections = if (startup.connections) |*value| value else return error.ConnectionRegistryUnavailable;
+    return connections.selectedProfile();
+}
+
+fn resolveStartupAdapter(
+    cfg: Config,
+    startup: *app_lifecycle.StartupState,
+) !agent_stream_provider.ProviderAdapter {
+    return cfg.gateway_provider.adapter_registry.resolveProfile(
+        try selectedStartupProfile(startup),
+    );
 }
 
 const GlobalLaunchArgs = struct {
@@ -882,7 +911,7 @@ fn runNonInteractiveWithDeps(
                     return .handled_failure;
                 },
             };
-            try startup.normalizeModel(alloc, cfg.gateway_provider.provider_adapter.model_descriptors);
+            try startup.normalizeModel(alloc, binding.adapter.model_descriptors);
             try writeConfigDiagnostics(alloc, deps, startup.config_diagnostics);
             const mcp_config_diagnostic = try cfg.inspect_mcp_profile_config(alloc);
 
@@ -914,7 +943,8 @@ fn runNonInteractiveWithDeps(
                 cfg.gateway_provider.connection_seed,
             );
             defer startup.deinit(alloc);
-            try startup.normalizeModels(alloc, cfg.gateway_provider.provider_adapter.model_descriptors);
+            const adapter = try resolveStartupAdapter(cfg, &startup);
+            try startup.normalizeModels(alloc, adapter.model_descriptors);
             try writeConfigDiagnostics(alloc, deps, startup.config_diagnostics);
             const rules = try permissionRulesForSnapshot(alloc, startup.permission_rules);
             defer if (rules.rules.len > 0) alloc.free(rules.rules);
@@ -936,36 +966,43 @@ fn runNonInteractiveWithDeps(
                 return .handled_failure;
             };
 
-            var startup = try deps.load_catalog_startup_state(
+            var startup = try deps.load_startup_state_without_credentials(
                 alloc,
-                cfg.secret_store,
                 cfg.default_model,
                 cfg.default_fast_mode,
                 cfg.default_agent_step_limit,
                 cfg.gateway_provider.connection_seed,
             );
             defer startup.deinit(alloc);
-            try startup.normalizeModels(alloc, cfg.gateway_provider.provider_adapter.model_descriptors);
+            const profile = try selectedStartupProfile(&startup);
+            const adapter = cfg.gateway_provider.adapter_registry.resolveProfile(profile) catch {
+                try writeStderr(deps, "fx models: unsupported connection adapter\n");
+                return .handled_failure;
+            };
+            const catalog_provider = adapter.model_catalog orelse {
+                try writeStderr(deps, "fx models: model catalog unavailable for selected connection\n");
+                return .handled_failure;
+            };
+            var credential_resolution = try deps.resolve_connection_credential(
+                alloc,
+                cfg.gateway_provider.adapter_registry,
+                cfg.secret_store,
+                profile,
+                .stored,
+                null,
+            );
+            if (credential_resolution.credential) |credential| {
+                startup.credential = credential;
+                credential_resolution.credential = null;
+            }
+            try startup.normalizeModels(alloc, adapter.model_descriptors);
             try writeConfigDiagnostics(alloc, deps, startup.config_diagnostics);
 
             const catalog_access = startup.modelCatalogAccess();
-            const adapter = cfg.gateway_provider.provider_adapter;
-            const selected_adapter_id = if (startup.connections) |*connections|
-                connections.selectedProfile().adapter_id
-            else
-                cfg.gateway_provider.connection_seed.adapter_id;
-            const result = if (std.mem.eql(u8, selected_adapter_id, adapter.kind) and
-                adapter.model_catalog != null)
-                model_catalog.fetchWithPublicFallback(adapter.model_catalog.?, alloc, .{
-                    .access = catalog_access,
-                    .endpoint = cfg.models_path,
-                })
-            else
-                model_catalog.FetchResult{ .failed = .{
-                    .access = .init(catalog_access),
-                    .anonymous_fallback_used = false,
-                    .failure = .{ .category = .runtime },
-                } };
+            const result = model_catalog.fetchWithPublicFallback(catalog_provider, alloc, .{
+                .access = catalog_access,
+                .endpoint = cfg.models_path,
+            });
             const loaded = switch (result) {
                 .loaded => |loaded| loaded,
                 .failed => |failure| {
@@ -1313,7 +1350,8 @@ fn runNonInteractiveWithDeps(
                 return .handled_failure;
             };
             defer startup.deinit(alloc);
-            try startup.normalizeModels(alloc, cfg.gateway_provider.provider_adapter.model_descriptors);
+            const adapter = try resolveStartupAdapter(cfg, &startup);
+            try startup.normalizeModels(alloc, adapter.model_descriptors);
             try writeConfigDiagnostics(alloc, deps, startup.config_diagnostics);
 
             if (opts.action == null) {
@@ -1360,37 +1398,48 @@ fn runNonInteractiveWithDeps(
                 try writeUsageOrJsonError(alloc, cfg.command_catalog, deps, .credits, "credits", err, rest);
                 return .handled_failure;
             };
-            var startup = try deps.load_startup_state(
+            var startup = try deps.load_startup_state_without_credentials(
                 alloc,
-                cfg.gateway_provider.oauth_transport,
-                cfg.secret_store,
                 cfg.default_model,
                 cfg.default_fast_mode,
                 cfg.default_agent_step_limit,
                 cfg.gateway_provider.connection_seed,
             );
             defer startup.deinit(alloc);
-            try startup.normalizeModels(alloc, cfg.gateway_provider.provider_adapter.model_descriptors);
+            const profile = try selectedStartupProfile(&startup);
+            const adapter = cfg.gateway_provider.adapter_registry.resolveProfile(profile) catch {
+                return writeUnavailableCredits(
+                    alloc,
+                    deps,
+                    opts.format,
+                );
+            };
+            const account_usage = adapter.account_usage orelse {
+                return writeUnavailableCredits(
+                    alloc,
+                    deps,
+                    opts.format,
+                );
+            };
+            var credential_resolution = try deps.resolve_connection_credential(
+                alloc,
+                cfg.gateway_provider.adapter_registry,
+                cfg.secret_store,
+                profile,
+                .stored,
+                null,
+            );
+            if (credential_resolution.credential) |credential| {
+                startup.credential = credential;
+                credential_resolution.credential = null;
+            }
+            try startup.normalizeModels(alloc, adapter.model_descriptors);
             try writeConfigDiagnostics(alloc, deps, startup.config_diagnostics);
 
-            const adapter = cfg.gateway_provider.provider_adapter;
-            const selected_adapter_id = if (startup.connections) |*connections|
-                connections.selectedProfile().adapter_id
-            else
-                cfg.gateway_provider.connection_seed.adapter_id;
-            var snapshot = if (std.mem.eql(u8, selected_adapter_id, adapter.kind) and
-                adapter.account_usage != null)
-                adapter.account_usage.?.fetch(alloc, .{
-                    .credential = startup.apiKey(),
-                    .tenant = startup.gatewayTeam(),
-                })
-            else
-                output_contracts.CreditsSnapshot{
-                    .err_message = try alloc.dupe(
-                        u8,
-                        "account usage unavailable for selected connection",
-                    ),
-                };
+            var snapshot = account_usage.fetch(alloc, .{
+                .credential = startup.apiKey(),
+                .tenant = startup.gatewayTeam(),
+            });
             defer snapshot.deinit(alloc);
             const text = try snapshot.render(alloc, opts.format);
             defer alloc.free(text);
@@ -1458,7 +1507,8 @@ fn runNonInteractiveWithDeps(
                 return .handled_failure;
             };
             defer startup.deinit(alloc);
-            try startup.normalizeModels(alloc, cfg.gateway_provider.provider_adapter.model_descriptors);
+            const adapter = try resolveStartupAdapter(cfg, &startup);
+            try startup.normalizeModels(alloc, adapter.model_descriptors);
             try writeConfigDiagnostics(alloc, deps, startup.config_diagnostics);
 
             const channel = opts.channel orelse startup.update_channel;
@@ -1770,6 +1820,28 @@ fn writeFormattedOutput(deps: RunDeps, text: []const u8, format: output_contract
         .text => try writeStdout(deps, text),
         .json => try writeJsonLine(deps, text),
     }
+}
+
+fn writeUnavailableCredits(
+    alloc: Allocator,
+    deps: RunDeps,
+    format: output_contracts.OutputFormat,
+) !RunResult {
+    var snapshot = output_contracts.CreditsSnapshot{
+        .err_message = try alloc.dupe(
+            u8,
+            "account usage unavailable for selected connection",
+        ),
+    };
+    defer snapshot.deinit(alloc);
+    const text = try snapshot.render(alloc, format);
+    defer alloc.free(text);
+    if (format == .json) {
+        try writeFormattedOutput(deps, text, format);
+    } else {
+        try writeStderr(deps, text);
+    }
+    return .handled_failure;
 }
 
 fn writeJsonLine(deps: RunDeps, text: []const u8) !void {
@@ -4695,10 +4767,11 @@ test "runIfRequested model fetch failure is handled" {
     var probe = ModelFetchProbe{ .outcome = .failure };
     var cfg = testConfig();
     cfg.gateway_provider.provider_adapter.model_catalog = probe.provider();
+    selectConfiguredTestAdapter(&cfg);
 
     var deps = capture.deps();
-    deps.load_startup_state = failingStartupState;
-    deps.load_catalog_startup_state = stubLoadCatalogStartupState;
+    deps.load_startup_state_without_credentials = stubLoadSelectedStartupState;
+    deps.resolve_connection_credential = stubResolveConnectionCredential;
 
     const result = try runIfRequestedWithDeps(std.testing.allocator, &.{@constCast("models")}, cfg, deps);
     try std.testing.expectEqual(RunResult.handled_failure, result);
@@ -4714,9 +4787,11 @@ test "runIfRequested model fetch failure preserves json output" {
     var probe = ModelFetchProbe{ .outcome = .failure };
     var cfg = testConfig();
     cfg.gateway_provider.provider_adapter.model_catalog = probe.provider();
+    selectConfiguredTestAdapter(&cfg);
 
     var deps = capture.deps();
-    deps.load_catalog_startup_state = stubLoadCatalogStartupState;
+    deps.load_startup_state_without_credentials = stubLoadSelectedStartupState;
+    deps.resolve_connection_credential = stubResolveConnectionCredential;
 
     const result = try runIfRequestedWithDeps(
         std.testing.allocator,
@@ -4738,9 +4813,11 @@ test "runIfRequested model provider cancellation is handled" {
     var probe = ModelFetchProbe{ .outcome = .cancelled };
     var cfg = testConfig();
     cfg.gateway_provider.provider_adapter.model_catalog = probe.provider();
+    selectConfiguredTestAdapter(&cfg);
 
     var deps = capture.deps();
-    deps.load_catalog_startup_state = stubLoadCatalogStartupState;
+    deps.load_startup_state_without_credentials = stubLoadSelectedStartupState;
+    deps.resolve_connection_credential = stubResolveConnectionCredential;
 
     const result = try runIfRequestedWithDeps(std.testing.allocator, &.{@constCast("models")}, cfg, deps);
     try std.testing.expectEqual(RunResult.handled_failure, result);
@@ -4756,9 +4833,11 @@ test "runIfRequested models passes startup team to fetch seam" {
     var probe = ModelFetchProbe{};
     var cfg = testConfig();
     cfg.gateway_provider.provider_adapter.model_catalog = probe.provider();
+    selectConfiguredTestAdapter(&cfg);
 
     var deps = capture.deps();
-    deps.load_catalog_startup_state = stubLoadCatalogStartupState;
+    deps.load_startup_state_without_credentials = stubLoadSelectedStartupState;
+    deps.resolve_connection_credential = stubResolveConnectionCredential;
 
     const result = try runIfRequestedWithDeps(std.testing.allocator, &.{ @constCast("models"), @constCast("--json") }, cfg, deps);
     try std.testing.expectEqual(RunResult.handled_success, result);
@@ -4776,9 +4855,11 @@ test "model catalog does not fall back across adapter kinds" {
     var cfg = testConfig();
     cfg.gateway_provider.provider_adapter.kind = "other-adapter";
     cfg.gateway_provider.provider_adapter.model_catalog = probe.provider();
+    selectConfiguredTestAdapter(&cfg);
 
     var deps = capture.deps();
-    deps.load_catalog_startup_state = stubLoadCatalogStartupState;
+    deps.load_startup_state_without_credentials = stubLoadSelectedStartupState;
+    deps.resolve_connection_credential = stubResolveConnectionCredential;
 
     const result = try runIfRequestedWithDeps(
         std.testing.allocator,
@@ -4796,9 +4877,11 @@ test "runIfRequested credits renders through the configured provider" {
     var probe = CreditsProviderProbe{ .outcome = .success };
     var cfg = testConfig();
     cfg.gateway_provider.provider_adapter.account_usage = probe.provider();
+    selectConfiguredTestAdapter(&cfg);
 
     var deps = capture.deps();
-    deps.load_startup_state = stubLoadStartupState;
+    deps.load_startup_state_without_credentials = stubLoadSelectedStartupState;
+    deps.resolve_connection_credential = stubResolveConnectionCredential;
 
     const result = try runIfRequestedWithDeps(std.testing.allocator, &.{ @constCast("credits"), @constCast("--json") }, cfg, deps);
     try std.testing.expectEqual(RunResult.handled_success, result);
@@ -4817,8 +4900,10 @@ test "account usage does not fall back across adapter kinds" {
     var cfg = testConfig();
     cfg.gateway_provider.provider_adapter.kind = "other";
     cfg.gateway_provider.provider_adapter.account_usage = probe.provider();
+    selectConfiguredTestAdapter(&cfg);
     var deps = capture.deps();
-    deps.load_startup_state = stubLoadStartupState;
+    deps.load_startup_state_without_credentials = stubLoadSelectedStartupState;
+    deps.resolve_connection_credential = stubResolveConnectionCredential;
 
     const result = try runIfRequestedWithDeps(
         std.testing.allocator,
@@ -4840,8 +4925,10 @@ test "runIfRequested credits failures use nonzero text and json contracts" {
     var text_probe = CreditsProviderProbe{ .outcome = .failure };
     var text_cfg = testConfig();
     text_cfg.gateway_provider.provider_adapter.account_usage = text_probe.provider();
+    selectConfiguredTestAdapter(&text_cfg);
     var text_deps = text_capture.deps();
-    text_deps.load_startup_state = stubLoadStartupState;
+    text_deps.load_startup_state_without_credentials = stubLoadSelectedStartupState;
+    text_deps.resolve_connection_credential = stubResolveConnectionCredential;
 
     const text_result = try runIfRequestedWithDeps(
         std.testing.allocator,
@@ -4861,8 +4948,10 @@ test "runIfRequested credits failures use nonzero text and json contracts" {
     var json_probe = CreditsProviderProbe{ .outcome = .failure };
     var json_cfg = testConfig();
     json_cfg.gateway_provider.provider_adapter.account_usage = json_probe.provider();
+    selectConfiguredTestAdapter(&json_cfg);
     var json_deps = json_capture.deps();
-    json_deps.load_startup_state = stubLoadStartupState;
+    json_deps.load_startup_state_without_credentials = stubLoadSelectedStartupState;
+    json_deps.resolve_connection_credential = stubResolveConnectionCredential;
 
     const json_result = try runIfRequestedWithDeps(
         std.testing.allocator,
@@ -5239,6 +5328,12 @@ fn testConfig() Config {
     };
 }
 
+fn selectConfiguredTestAdapter(cfg: *Config) void {
+    const adapters: *const [1]agent_stream_provider.ProviderAdapter =
+        @ptrCast(&cfg.gateway_provider.provider_adapter);
+    cfg.gateway_provider.adapter_registry = .{ .adapters = adapters };
+}
+
 fn stubLoadStartupState(
     alloc: Allocator,
     _: oauth_transport.Provider,
@@ -5270,6 +5365,43 @@ fn stubLoadCatalogStartupState(
     connection_seed: connection_registry.Seed,
 ) !app_lifecycle.StartupState {
     return stubLoadStartupState(alloc, oauth_transport.unavailable_provider, secret_store, default_model, default_fast_mode, default_agent_step_limit, connection_seed);
+}
+
+fn stubLoadSelectedStartupState(
+    alloc: Allocator,
+    default_model: []const u8,
+    default_agent_step_limit: usize,
+    seed: connection_registry.Seed,
+) !app_lifecycle.StartupState {
+    var state = try stubLoadStatusBindingState(
+        alloc,
+        default_model,
+        default_agent_step_limit,
+        seed,
+    );
+    errdefer state.deinit(alloc);
+    state.workspace_root = try alloc.dupe(u8, "/tmp/fx");
+    state.selected_model = try alloc.dupe(u8, default_model);
+    state.configured_model = try alloc.dupe(u8, default_model);
+    return state;
+}
+
+fn stubResolveConnectionCredential(
+    alloc: Allocator,
+    _: adapter_registry.AdapterRegistry,
+    _: host.SecretStore,
+    _: connection_registry.Profile,
+    _: credentials.LoadMode,
+    _: ?*const std.atomic.Value(bool),
+) !credentials.Resolution {
+    const token = try alloc.dupe(u8, "test-key");
+    errdefer alloc.free(token);
+    const team = try alloc.dupe(u8, "team_123");
+    return .{ .credential = .{
+        .token = token,
+        .source = .ai_gateway_api_key,
+        .team_id = team,
+    } };
 }
 
 fn stubLoadStartupStatusWithoutCredentials(

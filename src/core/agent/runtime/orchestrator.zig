@@ -1783,6 +1783,7 @@ fn unsafeNoRetryReason(
 fn refreshGatewayCredentialForJob(
     deps: *const AgentRuntimeDeps,
     alloc: Allocator,
+    route: *const route_snapshot.RouteSnapshot,
     route_credential: *runtime_deps.RouteCredential,
     mode: CredentialRefreshMode,
     trace_ctx: TraceContext,
@@ -1791,7 +1792,7 @@ fn refreshGatewayCredentialForJob(
     if (source != .fx_login) return false;
     const refresh = deps.refresh_gateway_credential orelse return false;
 
-    const refreshed = refresh(deps.ctx, alloc, source, mode) catch |err| {
+    const refreshed = refresh(deps.ctx, alloc, route, source, mode) catch |err| {
         if (err == error.OutOfMemory) return err;
         debug_trace.eventf(
             "gateway",
@@ -2931,6 +2932,7 @@ fn processQueuedPromptLoop(
                 _ = try refreshGatewayCredentialForJob(
                     deps,
                     std.heap.c_allocator,
+                    &job.route,
                     &route_credential,
                     .if_needed,
                     step_ctx,
@@ -3533,6 +3535,7 @@ fn processQueuedPromptLoop(
                     if (try refreshGatewayCredentialForJob(
                         deps,
                         std.heap.c_allocator,
+                        &job.route,
                         &route_credential,
                         switch (refresh_mode) {
                             .force => .force,

@@ -18,6 +18,7 @@ const secret = @import("../core/auth/secret.zig");
 const debug_trace = @import("../core/shared/debug_trace.zig");
 const gateway_provider = @import("../core/gateway/gateway_provider.zig");
 const connection_registry = @import("../core/gateway/connection_registry.zig");
+const model_catalog = @import("../core/gateway/model_catalog.zig");
 const hooks = @import("../core/hooks/hooks.zig");
 const mcp_runtime = @import("../core/mcp/mcp_runtime.zig");
 const mode_registry = @import("../core/modes/mode_registry.zig");
@@ -316,7 +317,8 @@ pub fn prepareConnectionCredential(
     profile: connection_registry.Profile,
     model: []const u8,
 ) !credentials.Credential {
-    _ = try state.cfg.gateway_provider.adapter_registry.resolveAuthForProfile(profile);
+    const adapter = try state.cfg.gateway_provider.adapter_registry.resolveProfile(profile);
+    _ = adapter.auth orelse return error.MissingAuthCapability;
     if (state.credential_connection_id) |connection_id| {
         if (state.api_key.len > 0 and
             std.mem.eql(u8, connection_id, profile.id) and
@@ -350,8 +352,7 @@ pub fn prepareConnectionCredential(
     var credential = resolution.credential orelse return error.MissingCredential;
     errdefer credential.deinit(alloc);
     var catalog_cancel_flag = std.atomic.Value(bool).init(false);
-    const adapter = state.cfg.gateway_provider.provider_adapter;
-    if (gateway_provider.modelCatalogForAdapter(profile.adapter_id, adapter)) |catalog| {
+    if (adapter.model_catalog) |catalog| {
         _ = try state.capability_resolver.resolve(
             state.alloc,
             catalog,
@@ -388,10 +389,25 @@ fn copyRetainedCredential(
 fn resolveGenerationUsageCredential(
     raw: ?*anyopaque,
     alloc: Allocator,
-    _: []const u8,
+    reference: generation_usage_provider.CredentialReference,
 ) generation_usage_provider.ResolveCredentialError!generation_usage_provider.ResolvedCredential {
     const state: *ServerState = @ptrCast(@alignCast(raw.?));
-    if (state.api_key.len == 0) return error.Unavailable;
+    const connection_id = state.credential_connection_id orelse return error.Unavailable;
+    const adapter_kind = state.credential_adapter_kind orelse return error.Unavailable;
+    if (state.api_key.len == 0 or
+        !std.mem.eql(u8, reference.connection_id, connection_id) or
+        !std.mem.eql(u8, reference.adapter_kind, adapter_kind))
+    {
+        return error.Unavailable;
+    }
+    const connections = state.connections orelse return error.Unavailable;
+    const profile = connections.profile(connection_id) catch return error.Unavailable;
+    const source = state.credential_source orelse return error.Unavailable;
+    if (!std.mem.eql(u8, profile.adapter_id, reference.adapter_kind) or
+        !std.mem.eql(u8, reference.credential_ref, @tagName(source)))
+    {
+        return error.Unavailable;
+    }
     return generation_usage_provider.ResolvedCredential.initCopy(
         alloc,
         state.api_key,
@@ -405,16 +421,17 @@ fn prepareGenerationUsageDispatch(
 ) generation_usage_provider.PrepareError!generation_usage_provider.Dispatch {
     const state: *ServerState = @ptrCast(@alignCast(raw.?));
     const connection_id = state.credential_connection_id orelse return error.Unavailable;
+    const adapter_kind = state.credential_adapter_kind orelse return error.Unavailable;
+    const source = state.credential_source orelse return error.Unavailable;
     const connections = state.connections orelse return error.Unavailable;
     const profile = connections.profile(connection_id) catch return error.Unavailable;
-    const adapter = state.cfg.gateway_provider.provider_adapter;
+    if (!std.mem.eql(u8, profile.adapter_id, adapter_kind)) return error.Unavailable;
+    const provider = state.cfg.gateway_provider.adapter_registry.resolveGenerationUsageForProfile(profile) catch null;
     return generation_usage_provider.Dispatch.init(alloc, &.{.{
         .id = profile.id,
-        .credential_ref = profile.credential_ref,
-        .provider = if (std.mem.eql(u8, profile.adapter_id, adapter.kind))
-            adapter.generation_usage
-        else
-            null,
+        .adapter_kind = adapter_kind,
+        .credential_ref = @tagName(source),
+        .provider = provider,
     }}, .{
         .context = state,
         .resolve_fn = resolveGenerationUsageCredential,
@@ -1315,10 +1332,12 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
         });
     };
     defer startup.deinit(alloc);
-    try startup.normalizeModels(
-        alloc,
-        state.cfg.gateway_provider.provider_adapter.model_descriptors,
-    );
+    const startup_profile = startup.connections.?.selectedProfile();
+    const descriptors = if (state.cfg.gateway_provider.adapter_registry.resolveProfile(startup_profile)) |adapter|
+        adapter.model_descriptors
+    else |_|
+        model_catalog.configured_model_descriptor_provider;
+    try startup.normalizeModels(alloc, descriptors);
     try app_lifecycle.applyWorkspaceLaunch(
         &startup,
         alloc,

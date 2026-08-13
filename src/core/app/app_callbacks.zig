@@ -264,12 +264,20 @@ test "full diff formatter renders unchanged review elisions" {
 pub fn Bindings(comptime App: type) type {
     return struct {
         pub fn agentRuntimeDeps(app: *App) agent_runtime.AgentRuntimeDeps {
+            const adapter = if (comptime @hasDecl(App, "providerAdapter"))
+                app.providerAdapter()
+            else
+                agent_stream_provider.unavailable_adapter;
+            return agentRuntimeDepsForAdapter(app, adapter);
+        }
+
+        pub fn agentRuntimeDepsForAdapter(
+            app: *App,
+            adapter: agent_stream_provider.ProviderAdapter,
+        ) agent_runtime.AgentRuntimeDeps {
             var deps: agent_runtime.AgentRuntimeDeps = .{
                 .ctx = @ptrCast(app),
-                .provider_adapter = if (comptime @hasDecl(App, "providerAdapter"))
-                    app.providerAdapter()
-                else
-                    agent_stream_provider.unavailable_adapter,
+                .provider_adapter = adapter,
                 .agent_stream_provider = if (comptime @hasDecl(App, "agentStreamProvider"))
                     app.agentStreamProvider()
                 else
@@ -377,15 +385,28 @@ pub fn Bindings(comptime App: type) type {
         fn refreshGatewayCredential(
             raw_ctx: *anyopaque,
             alloc: std.mem.Allocator,
+            route: *const route_snapshot.RouteSnapshot,
             source: credentials.Source,
             mode: auth_runtime.CredentialRefreshMode,
         ) !?[]u8 {
             const app: *App = @ptrCast(@alignCast(raw_ctx));
             if (source != .fx_login) return null;
-            return app.auth.refreshSelectedCredential(alloc, switch (mode) {
+            _ = try app.auth.adapter_registry.resolveRoute(route);
+            var profile = try app.auth.connectionProfile(route.connection_id);
+            if (!std.mem.eql(u8, profile.adapter_id, route.adapter_kind) or
+                !std.mem.eql(u8, route.credential_ref, @tagName(source)))
+            {
+                return error.RouteCredentialMismatch;
+            }
+            profile.credential_ref = @constCast(route.credential_ref);
+            var credential = try app.auth.resolveExactProfileCredential(alloc, profile, switch (mode) {
                 .if_needed => .if_needed,
                 .force => .force,
-            });
+            }, @tagName(source));
+            defer credential.deinit(alloc);
+            const token = credential.token;
+            credential.token = &.{};
+            return token;
         }
 
         pub fn modelCapabilityResolver(app: *App) model_capabilities.Resolver {
