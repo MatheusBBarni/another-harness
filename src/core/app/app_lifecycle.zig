@@ -432,9 +432,8 @@ pub fn loadCatalogStartupStateWithRegistry(
     return state;
 }
 
-pub fn loadStartupStatus(
+pub fn loadStartupStatusWithoutCredentials(
     alloc: Allocator,
-    secret_store: host.SecretStore,
     default_model: []const u8,
     default_agent_step_limit: usize,
 ) !StartupStatus {
@@ -449,21 +448,16 @@ pub fn loadStartupStatus(
     const selected_model = try loadStartupStatusModel(alloc, default_model, settings.model);
     errdefer if (selected_model.owned) |model| alloc.free(model);
 
-    var auth_status = try auth_runtime.loadStatusSnapshot(alloc, secret_store, settings.credential_source);
-    errdefer auth_status.deinit(alloc);
-
     const result = StartupStatus{
         .workspace_root = workspace_root,
         .selected_model = selected_model.value,
         .owned_selected_model = selected_model.owned,
-        .auth = auth_status,
         .permission_mode = loadPermissionMode(settings.permission_mode),
         .sandbox_backend = sandbox.backendFromConfig(settings.sandbox),
         .agent_step_limit = loadAgentStepLimit(default_agent_step_limit, settings.max_agent_steps),
         .update_channel = settings.update_channel orelse .stable,
         .config_diagnostics = detailed.diagnostics,
     };
-    auth_status.owned_team = null;
     detailed.diagnostics = &.{};
     return result;
 }

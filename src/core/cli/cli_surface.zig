@@ -295,7 +295,7 @@ const WriteFn = *const fn (?*anyopaque, []const u8) anyerror!void;
 const LoadStartupStateFn = *const fn (Allocator, oauth_transport.Provider, host.SecretStore, []const u8, bool, usize, connection_registry.Seed) anyerror!app_lifecycle.StartupState;
 const LoadCatalogStartupStateFn = *const fn (Allocator, host.SecretStore, []const u8, bool, usize, connection_registry.Seed) anyerror!app_lifecycle.StartupState;
 const LoadStartupStateWithoutCredentialsFn = *const fn (Allocator, []const u8, bool, usize, connection_registry.Seed) anyerror!app_lifecycle.StartupState;
-const LoadStartupStatusFn = *const fn (Allocator, host.SecretStore, []const u8, usize) anyerror!app_lifecycle.StartupStatus;
+const LoadStartupStatusWithoutCredentialsFn = *const fn (Allocator, []const u8, usize) anyerror!app_lifecycle.StartupStatus;
 const GetenvFn = *const fn (?*anyopaque, []const u8) ?[]const u8;
 const EnvironMapFn = *const fn (?*anyopaque) ?*const std.process.Environ.Map;
 const SelfExePathFn = *const fn (?*anyopaque, Allocator) anyerror![]u8;
@@ -312,7 +312,7 @@ const RunDeps = struct {
     load_startup_state: LoadStartupStateFn = app_lifecycle.loadStartupState,
     load_catalog_startup_state: LoadCatalogStartupStateFn = app_lifecycle.loadCatalogStartupState,
     load_startup_state_without_credentials: LoadStartupStateWithoutCredentialsFn = app_lifecycle.loadStartupStateWithoutCredentials,
-    load_startup_status: LoadStartupStatusFn = app_lifecycle.loadStartupStatus,
+    load_startup_status_without_credentials: LoadStartupStatusWithoutCredentialsFn = app_lifecycle.loadStartupStatusWithoutCredentials,
     getenv: GetenvFn = getenvDefault,
     environ_map: EnvironMapFn = environMapDefault,
     self_exe_path: SelfExePathFn = selfExePathDefault,
@@ -856,13 +856,6 @@ fn runNonInteractiveWithDeps(
                 try writeUsageOrJsonError(alloc, cfg.command_catalog, deps, .status, "status", err, rest);
                 return .handled_failure;
             };
-            var startup = try deps.load_startup_status(
-                alloc,
-                host.unavailable_secret_store,
-                cfg.default_model,
-                cfg.default_agent_step_limit,
-            );
-            defer startup.deinit(alloc);
             var binding = resolveTopLevelAuth(alloc, cfg, deps) catch |err| switch (err) {
                 error.MissingAdapter, error.MissingAuthCapability => {
                     try writeStderr(deps, "fx status: unsupported connection adapter\n");
@@ -871,7 +864,13 @@ fn runNonInteractiveWithDeps(
                 else => return err,
             };
             defer binding.deinit(alloc);
-            const replacement_auth: auth_runtime.StatusSnapshot = switch (try binding.auth.status(alloc, binding.profile, binding.host)) {
+            var startup = try deps.load_startup_status_without_credentials(
+                alloc,
+                cfg.default_model,
+                cfg.default_agent_step_limit,
+            );
+            defer startup.deinit(alloc);
+            startup.auth = switch (try binding.auth.status(alloc, binding.profile, binding.host)) {
                 .loaded => |value| status: {
                     var adapter_status = value;
                     defer adapter_status.deinit(alloc);
@@ -883,8 +882,6 @@ fn runNonInteractiveWithDeps(
                     return .handled_failure;
                 },
             };
-            startup.auth.deinit(alloc);
-            startup.auth = replacement_auth;
             try startup.normalizeModel(alloc, cfg.gateway_provider.provider_adapter.model_descriptors);
             try writeConfigDiagnostics(alloc, deps, startup.config_diagnostics);
             const mcp_config_diagnostic = try cfg.inspect_mcp_profile_config(alloc);
@@ -4416,6 +4413,85 @@ test "top-level auth does not relabel startup failures as unsupported adapters" 
     try std.testing.expectEqualStrings("", capture.stderr.written());
 }
 
+test "top-level status resolves one selected adapter before credential effects" {
+    try std.testing.expect(!@hasField(RunDeps, "load_startup_status"));
+
+    var vercel = StatusCapabilityProbe{ .expected_kind = test_builtin_gateway.connection_seed.adapter_id };
+    var peer = StatusCapabilityProbe{ .expected_kind = "test_peer" };
+    const adapters = [_]@TypeOf(test_builtin_gateway.provider_adapter){
+        .{
+            .kind = test_builtin_gateway.connection_seed.adapter_id,
+            .auth = vercel.provider(),
+            .stream_fn = test_builtin_gateway.provider_adapter.stream_fn,
+        },
+        .{
+            .kind = "test_peer",
+            .auth = peer.provider(),
+            .stream_fn = test_builtin_gateway.provider_adapter.stream_fn,
+        },
+    };
+    var store = StatusStoreProbe{};
+    var cfg = testConfig();
+    cfg.gateway_provider.adapter_registry = .{ .adapters = &adapters };
+    cfg.secret_store = store.provider();
+
+    var missing_capture = CaptureOutput.init(std.testing.allocator);
+    defer missing_capture.deinit();
+    var missing_deps = missing_capture.deps();
+    missing_deps.load_startup_state_without_credentials = stubLoadStatusBindingState;
+    missing_deps.load_startup_status_without_credentials = failingStartupStatusWithoutCredentials;
+    cfg.gateway_provider.connection_seed.adapter_id = "missing";
+    const missing = try runIfRequestedWithDeps(
+        std.testing.allocator,
+        &.{@constCast("status")},
+        cfg,
+        missing_deps,
+    );
+    try std.testing.expectEqual(RunResult.handled_failure, missing);
+    try std.testing.expectEqualStrings("fx status: unsupported connection adapter\n", missing_capture.stderr.written());
+    try std.testing.expectEqual(@as(usize, 0), vercel.calls);
+    try std.testing.expectEqual(@as(usize, 0), peer.calls);
+    try std.testing.expectEqual(@as(usize, 0), store.loads);
+
+    var vercel_capture = CaptureOutput.init(std.testing.allocator);
+    defer vercel_capture.deinit();
+    var vercel_deps = vercel_capture.deps();
+    vercel_deps.load_startup_state_without_credentials = stubLoadStatusBindingState;
+    vercel_deps.load_startup_status_without_credentials = stubLoadStartupStatusWithoutCredentials;
+    cfg.gateway_provider.connection_seed.adapter_id = test_builtin_gateway.connection_seed.adapter_id;
+    const vercel_result = try runIfRequestedWithDeps(
+        std.testing.allocator,
+        &.{ @constCast("status"), @constCast("--json") },
+        cfg,
+        vercel_deps,
+    );
+    try std.testing.expectEqual(RunResult.handled_success, vercel_result);
+    try std.testing.expect(vercel.matched_profile);
+    try std.testing.expectEqual(@as(usize, 1), vercel.calls);
+    try std.testing.expectEqual(@as(usize, 0), peer.calls);
+    try std.testing.expectEqual(@as(usize, 1), store.loads);
+    try std.testing.expect(std.mem.find(u8, vercel_capture.stdout.written(), StatusStoreProbe.secret_value) == null);
+
+    var peer_capture = CaptureOutput.init(std.testing.allocator);
+    defer peer_capture.deinit();
+    var peer_deps = peer_capture.deps();
+    peer_deps.load_startup_state_without_credentials = stubLoadStatusBindingState;
+    peer_deps.load_startup_status_without_credentials = stubLoadStartupStatusWithoutCredentials;
+    cfg.gateway_provider.connection_seed.adapter_id = "test_peer";
+    const peer_result = try runIfRequestedWithDeps(
+        std.testing.allocator,
+        &.{ @constCast("status"), @constCast("--json") },
+        cfg,
+        peer_deps,
+    );
+    try std.testing.expectEqual(RunResult.handled_success, peer_result);
+    try std.testing.expect(peer.matched_profile);
+    try std.testing.expectEqual(@as(usize, 1), vercel.calls);
+    try std.testing.expectEqual(@as(usize, 1), peer.calls);
+    try std.testing.expectEqual(@as(usize, 2), store.loads);
+    try std.testing.expect(std.mem.find(u8, peer_capture.stdout.written(), StatusStoreProbe.secret_value) == null);
+}
+
 test "runIfRequested resume no args returns last target" {
     var capture = CaptureOutput.init(std.testing.allocator);
     defer capture.deinit();
@@ -4807,7 +4883,7 @@ test "runIfRequested local json success appends exactly one newline" {
     defer capture.deinit();
 
     var deps = capture.deps();
-    deps.load_startup_status = stubLoadStartupStatus;
+    deps.load_startup_status_without_credentials = stubLoadStartupStatusWithoutCredentials;
 
     const result = try runIfRequestedWithDeps(std.testing.allocator, &.{ @constCast("status"), @constCast("--json") }, testConfig(), deps);
     try std.testing.expectEqual(RunResult.handled_success, result);
@@ -5196,9 +5272,8 @@ fn stubLoadCatalogStartupState(
     return stubLoadStartupState(alloc, oauth_transport.unavailable_provider, secret_store, default_model, default_fast_mode, default_agent_step_limit, connection_seed);
 }
 
-fn stubLoadStartupStatus(
+fn stubLoadStartupStatusWithoutCredentials(
     alloc: Allocator,
-    _: host.SecretStore,
     default_model: []const u8,
     default_agent_step_limit: usize,
 ) !app_lifecycle.StartupStatus {
@@ -5214,6 +5289,97 @@ fn stubLoadStartupStatus(
         .agent_step_limit = default_agent_step_limit,
     };
 }
+
+fn stubLoadStatusBindingState(
+    alloc: Allocator,
+    default_model: []const u8,
+    default_agent_step_limit: usize,
+    seed: connection_registry.Seed,
+) !app_lifecycle.StartupState {
+    var state = app_lifecycle.StartupState{ .agent_step_limit = default_agent_step_limit };
+    errdefer state.deinit(alloc);
+    state.connections = try connection_registry.Runtime.init(
+        alloc,
+        seed.profile(default_model, null),
+        null,
+        .unavailable,
+    );
+    return state;
+}
+
+fn failingStartupStatusWithoutCredentials(
+    _: Allocator,
+    _: []const u8,
+    _: usize,
+) !app_lifecycle.StartupStatus {
+    return error.StatusPreparationShouldNotRun;
+}
+
+const StatusStoreProbe = struct {
+    const secret_value = "status-store-secret";
+
+    loads: usize = 0,
+
+    fn provider(self: *@This()) host.SecretStore {
+        return .{
+            .context = self,
+            .backend_label = "status test store",
+            .is_disabled_fn = isDisabled,
+            .load_fn = load,
+            .store_fn = write,
+            .store_interactive_fn = writeInteractive,
+        };
+    }
+
+    fn isDisabled(_: ?*anyopaque) bool {
+        return false;
+    }
+
+    fn load(raw: ?*anyopaque, alloc: Allocator) host.SecretStoreLoadError!?[]u8 {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        self.loads += 1;
+        return try alloc.dupe(u8, secret_value);
+    }
+
+    fn write(_: ?*anyopaque, _: Allocator, _: []const u8) host.SecretStoreWriteError!void {}
+
+    fn writeInteractive(_: ?*anyopaque) host.SecretStoreWriteError!bool {
+        return false;
+    }
+};
+
+const StatusCapabilityProbe = struct {
+    expected_kind: []const u8,
+    calls: usize = 0,
+    matched_profile: bool = false,
+
+    fn provider(self: *@This()) adapter_auth.Provider {
+        return .{
+            .kind = self.expected_kind,
+            .context = self,
+            .status_fn = status,
+        };
+    }
+
+    fn status(
+        raw: *const anyopaque,
+        alloc: Allocator,
+        profile: connection_registry.Profile,
+        auth_host: adapter_auth.AuthHost,
+    ) Allocator.Error!adapter_auth.StatusOutcome {
+        const self: *@This() = @ptrCast(@alignCast(@constCast(raw)));
+        self.calls += 1;
+        self.matched_profile = std.mem.eql(u8, profile.adapter_id, self.expected_kind);
+        const stored = auth_host.secret_store.load(alloc) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return .{ .failed = .{ .category = .unavailable } },
+        };
+        if (stored) |value| secret.zeroAndFree(alloc, value);
+        return .{ .loaded = .{
+            .source = .{ .id = "stored_key", .label = "stored key", .refreshable = false },
+        } };
+    }
+};
 
 fn failingStartupState(
     _: Allocator,
