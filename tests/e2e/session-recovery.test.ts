@@ -167,7 +167,7 @@ function unavailableResponse(): Response {
       status: 503,
       headers: {
         "content-type": "application/json",
-        "retry-after": "31",
+        "retry-after": "0",
       },
     },
   );
@@ -222,7 +222,7 @@ describe("session recovery", () => {
     async () => {
       const root = mkdtempSync(join(tmpdir(), "fx-session-route-restart-"));
       const gatewayA = startFakeGateway([
-        unavailableResponse(),
+        ...Array.from({ length: 10 }, () => unavailableResponse()),
         fakeGatewayFinalText("resumed on A"),
       ], {
         models: [{ id: "model-a", type: "language", tags: ["tool-use"] }],
@@ -265,13 +265,13 @@ describe("session recovery", () => {
         expect(firstResult.recovery).toEqual(expect.objectContaining({
           state: "paused",
           cause: "provider_unavailable",
-          attempt: 1,
+          attempt: 10,
           attempt_limit: 10,
           durable: true,
         }));
         const sessionId = firstResult.session_id as string;
         expect(sessionId.length).toBeGreaterThan(0);
-        expect(gatewayA.requests).toHaveLength(1);
+        expect(gatewayA.requests).toHaveLength(10);
         expect(gatewayTrafficCount(gatewayB)).toBe(0);
 
         const sessionDir = join(home, ".fx", "sessions", sessionId);
@@ -284,7 +284,7 @@ describe("session recovery", () => {
         expect(pausedDurableText).toContain('"permission_review_model_id":"reviewer-a"');
         expect(pausedDurableText).toContain('"route_model":"model-a"');
         expect(pausedDurableText).toMatch(
-          /"delivery":"possibly_sent"[^\n]*"consumed_provider_attempts":1,"outstanding_reservation":false/,
+          /"delivery":"possibly_sent"[^\n]*"consumed_provider_attempts":10,"outstanding_reservation":false/,
         );
         expect(pausedDurableText).not.toContain("route-only-secret");
 
@@ -316,13 +316,13 @@ describe("session recovery", () => {
         );
         expect(resumed.code).toBe(0);
         expect(JSON.parse(resumed.stdout.trim()).output).toContain("resumed on A");
-        expect(gatewayA.requests).toHaveLength(2);
+        expect(gatewayA.requests).toHaveLength(11);
         expect(gatewayTrafficCount(gatewayB)).toBe(0);
         expect(oauthB.requests).toEqual([]);
         expect(gatewayA.requests[0]!.headers.get("ai-language-model-id")).toBe(
           "model-a",
         );
-        expect(gatewayA.requests[1]!.headers.get("ai-language-model-id")).toBe(
+        expect(gatewayA.requests[10]!.headers.get("ai-language-model-id")).toBe(
           "model-a",
         );
 
