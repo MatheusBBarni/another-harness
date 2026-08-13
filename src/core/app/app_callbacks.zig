@@ -399,7 +399,7 @@ pub fn Bindings(comptime App: type) type {
                 return error.RouteCredentialMismatch;
             }
             profile.credential_ref = @constCast(route.credential_ref);
-            var credential = try app.auth.resolveExactProfileCredential(alloc, profile, switch (mode) {
+            var credential = try app.auth.resolveAdmittedProfileCredential(alloc, profile, switch (mode) {
                 .if_needed => .if_needed,
                 .force => .force,
             }, @tagName(source));

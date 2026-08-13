@@ -534,7 +534,7 @@ const App = struct {
         var profile = try self.auth.connectionProfile(route.connection_id);
         if (!std.mem.eql(u8, profile.adapter_id, route.adapter_kind)) return error.RouteAdapterMismatch;
         profile.credential_ref = @constCast(route.credential_ref);
-        var credential = try self.auth.resolveExactProfileCredential(alloc, profile, .if_needed, null);
+        var credential = try self.auth.resolveAdmittedProfileCredential(alloc, profile, .if_needed, null);
         defer credential.deinit(alloc);
         const tenant = if (credential.gatewayTeam()) |value| try alloc.dupe(u8, value) else null;
         errdefer if (tenant) |value| alloc.free(value);
