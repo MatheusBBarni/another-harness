@@ -831,11 +831,17 @@ pub fn streamVercelAdapter(
         } });
     } else {
         const failure_facts = classifyVercelHttpFailure(result.status);
-        const detail = result.err_body orelse "";
+        const raw_detail = result.err_body orelse "";
+        const detail = try gateway_error_format.formatHttpErrorMessage(
+            alloc,
+            result.status,
+            raw_detail,
+        );
+        defer alloc.free(detail);
         const recovery_diagnostic = try gateway_error_format.formatHttpRecoveryDiagnostic(
             alloc,
             result.status,
-            detail,
+            raw_detail,
         );
         defer alloc.free(recovery_diagnostic);
         try events.emit(.{ .failure = .{
@@ -846,7 +852,7 @@ pub fn streamVercelAdapter(
             .detail = detail,
             .retry_after_seconds = result.retry_after_seconds,
             .diagnostic = .{
-                .summary = recovery_diagnostic,
+                .summary = result.failure_schema orelse recovery_diagnostic,
                 .request_shape = result.failure_request_shape,
             },
         } });
