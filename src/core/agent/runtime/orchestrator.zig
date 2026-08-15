@@ -2652,7 +2652,6 @@ fn processQueuedPromptLoop(
             runtime_assistant_stream.pushTokenProgressUpdate(&stream_ctx, .changed) catch |progress_err| {
                 debug_trace.logf("agent", "token progress publication failed source=gateway_prepare err={s}", .{@errorName(progress_err)});
             };
-            stream_ctx.vision_route = vision_route;
             try persistRecoveryCheckpoint(
                 deps,
                 arena,
