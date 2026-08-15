@@ -7,10 +7,7 @@ pub const version = "0.0.3";
 
 const app_lifecycle = @import("core/app/app_lifecycle.zig");
 const auth_runtime = @import("core/auth/auth_runtime.zig");
-const api_key_validator = @import("gateway/auth/api_key_validator.zig");
-const oauth_transport = @import("gateway/auth/oauth_transport.zig");
 const js_host_auth = @import("gateway/auth/js_host_auth.zig");
-const credentials = @import("gateway/auth/credentials.zig");
 const model_cache_runtime = @import("core/app/model_cache_runtime.zig");
 const app_auth_runtime = @import("core/app/app_auth_runtime.zig");
 const app_host_config_runtime = @import("core/app/app_host_config_runtime.zig");
@@ -48,8 +45,9 @@ const builtin_context = @import("builtins/context.zig");
 const builtin_devbox = @import("builtins/devbox.zig");
 const builtin_gateway = @import("builtins/gateway.zig");
 const adapter_registry = @import("core/gateway/adapter_registry.zig");
+const adapter_auth = @import("core/gateway/adapter_auth.zig");
 const connection_registry = @import("core/gateway/connection_registry.zig");
-const gateway_provider = @import("core/gateway/gateway_provider.zig");
+const gateway_system = @import("core/gateway/gateway_system.zig");
 const output_contracts = @import("core/output/output_contracts.zig");
 const generation_usage_provider = @import("core/session/generation_usage_provider.zig");
 const route_snapshot = @import("core/gateway/route_snapshot.zig");
@@ -123,7 +121,6 @@ const web_fetch_runtime = @import("core/tooling/web_fetch_runtime.zig");
 const web_search_runtime = @import("core/tooling/web_search_runtime.zig");
 const worker_runtime = @import("core/agent/worker_runtime.zig");
 const question_prompt = @import("core/agent/question_prompt.zig");
-const gateway_client = @import("gateway/client.zig");
 const model_catalog = @import("core/gateway/model_catalog.zig");
 const js_host_stream_provider = @import("gateway/js_host_stream_provider.zig");
 const js_host_model_catalog = @import("gateway/js_host_model_catalog.zig");
@@ -360,16 +357,18 @@ fn currentBuild() update_target.CurrentBuild {
     };
 }
 
-const wasm_provider_adapter = agent_stream_provider.ProviderAdapter{
+const wasm_route_adapter = agent_stream_provider.ProviderAdapter{
     .kind = builtin_gateway.connection_seed.adapter_id,
+    .supported_protocol = builtin_gateway.connection_seed.protocol.?,
     .auth = builtin_gateway.auth_provider_for_transport(&js_host_auth.oauth_provider),
     .model_catalog = js_host_model_catalog.provider,
     .model_descriptors = builtin_gateway.model_descriptor_provider,
     .provider_tools = &.{.web_search},
+    .context = @constCast(&js_host_stream_provider.transport),
     .stream_fn = builtin_gateway.streamVercelAdapter,
 };
 
-const wasm_production_adapters = [_]agent_stream_provider.ProviderAdapter{wasm_provider_adapter};
+const wasm_production_adapters = [_]agent_stream_provider.ProviderAdapter{wasm_route_adapter};
 
 const production_adapter_registry = if (host_target.is_wasm)
     adapter_registry.AdapterRegistry{ .adapters = &wasm_production_adapters }
@@ -421,8 +420,8 @@ const App = struct {
         return builtin_context.prompt_policy;
     }
 
-    pub fn slashRegistry(_: *const Self) command_specs.SlashRegistry {
-        return builtin_commands.slash_registry;
+    pub fn slashRegistry(self: *const Self) command_specs.SlashRegistry {
+        return self.slash_commands;
     }
 
     pub fn mcpCommandProvider(_: *const Self) mcp_command_provider.Provider {
@@ -458,16 +457,9 @@ const App = struct {
         );
         defer credential.deinit(self.alloc);
         return account_usage.fetch(self.alloc, .{
-            .credential = credential.token,
-            .tenant = credential.gatewayTeam(),
+            .credential = credential.secret_bytes,
+            .tenant = credential.tenantContext(),
         });
-    }
-
-    pub fn agentStreamProvider(_: *const Self) agent_stream_provider.Provider {
-        return if (comptime host_target.is_wasm)
-            js_host_stream_provider.provider()
-        else
-            builtin_gateway.agent_stream_provider;
     }
 
     pub fn cooperativeTransportPulse(self: *Self) !void {
@@ -488,36 +480,27 @@ const App = struct {
         try self.flushRequestedFrame();
     }
 
-    pub fn providerAdapter(self: *const Self) agent_stream_provider.ProviderAdapter {
-        var adapter = if (comptime host_target.is_wasm)
-            wasm_provider_adapter
-        else
-            builtin_gateway.provider_adapter;
-        adapter.legacy_provider = self.agentStreamProvider();
-        return adapter;
+    pub fn adapterForRoute(self: *const Self, route: *const route_snapshot.RouteSnapshot) !agent_stream_provider.ProviderAdapter {
+        return self.auth.adapter_registry.resolveRoute(route);
     }
 
-    pub fn providerAdapterForRoute(self: *const Self, route: *const route_snapshot.RouteSnapshot) !agent_stream_provider.ProviderAdapter {
-        var adapter = try self.auth.adapter_registry.resolveRoute(route);
-        if (std.mem.eql(u8, adapter.kind, builtin_gateway.connection_seed.adapter_id)) {
-            adapter.legacy_provider = self.agentStreamProvider();
-        }
-        return adapter;
+    fn selectedAdapter(self: *const Self) !agent_stream_provider.ProviderAdapter {
+        return self.adapterForProfile(try self.auth.selectedConnectionProfile());
     }
 
-    fn selectedProviderAdapter(self: *const Self) !agent_stream_provider.ProviderAdapter {
-        return self.providerAdapterForProfile(try self.auth.selectedConnectionProfile());
-    }
-
-    fn providerAdapterForProfile(
+    fn adapterForProfile(
         self: *const Self,
         profile: connection_registry.Profile,
     ) !agent_stream_provider.ProviderAdapter {
         return self.auth.adapter_registry.resolveProfile(profile);
     }
 
+    pub fn adapterRegistry(self: *const Self) adapter_registry.AdapterRegistry {
+        return self.auth.adapter_registry;
+    }
+
     fn selectedModelCatalogProvider(self: *const Self) ?model_catalog.Provider {
-        return (self.selectedProviderAdapter() catch return null).model_catalog;
+        return (self.selectedAdapter() catch return null).model_catalog;
     }
 
     pub fn activeConnectionId(self: *const Self) []const u8 {
@@ -529,21 +512,25 @@ const App = struct {
         self: *App,
         alloc: Allocator,
         route: *const route_snapshot.RouteSnapshot,
+        mode: adapter_auth.RefreshMode,
     ) !agent_runtime.RouteCredential {
         _ = try self.auth.adapter_registry.resolveRoute(route);
         var profile = try self.auth.connectionProfile(route.connection_id);
         if (!std.mem.eql(u8, profile.adapter_id, route.adapter_kind)) return error.RouteAdapterMismatch;
         profile.credential_ref = @constCast(route.credential_ref);
-        var credential = try self.auth.resolveAdmittedProfileCredential(alloc, profile, .if_needed, null);
+        var credential = try self.auth.resolveAdmittedProfileCredential(alloc, profile, switch (mode) {
+            .stored, .if_needed => .if_needed,
+            .force => .force,
+        }, route.credential_ref);
         defer credential.deinit(alloc);
-        const tenant = if (credential.gatewayTeam()) |value| try alloc.dupe(u8, value) else null;
+        const tenant = if (credential.tenantContext()) |value| try alloc.dupe(u8, value) else null;
         errdefer if (tenant) |value| alloc.free(value);
-        const token = credential.token;
-        credential.token = &.{};
+        const token = credential.secret_bytes;
+        credential.secret_bytes = &.{};
         return .{
             .credential = token,
             .tenant = tenant,
-            .legacy_source = credential.source,
+            .source = credential.source,
         };
     }
 
@@ -555,7 +542,7 @@ const App = struct {
         const self: *App = @ptrCast(@alignCast(raw.?));
         var profile = self.auth.connectionProfile(reference.connection_id) catch return error.Unavailable;
         if (!std.mem.eql(u8, profile.adapter_id, reference.adapter_kind)) return error.Unavailable;
-        _ = self.auth.adapter_registry.resolve(reference.adapter_kind) catch return error.Unavailable;
+        _ = self.auth.adapter_registry.resolveProfile(profile) catch return error.Unavailable;
         profile.credential_ref = @constCast(reference.credential_ref);
         var credential = self.auth.resolveExactProfileCredential(
             alloc,
@@ -568,10 +555,10 @@ const App = struct {
             else => return error.Unavailable,
         };
         defer credential.deinit(alloc);
-        const tenant = if (credential.gatewayTeam()) |value| try alloc.dupe(u8, value) else null;
+        const tenant = if (credential.tenantContext()) |value| try alloc.dupe(u8, value) else null;
         errdefer if (tenant) |value| alloc.free(value);
-        const token = credential.token;
-        credential.token = &.{};
+        const token = credential.secret_bytes;
+        credential.secret_bytes = &.{};
         return .{ .token = token, .tenant = tenant };
     }
 
@@ -620,7 +607,6 @@ const App = struct {
             profile,
             builtin_gateway.connection_seed,
             try self.resolvedModelDescriptorForProfile(profile, self.selected_model.items),
-            builtin_gateway.defaultChatUrl(),
         );
     }
 
@@ -638,20 +624,20 @@ const App = struct {
 
     alloc: Allocator,
     terminal: TerminalState = .{},
+    slash_commands: command_specs.SlashRegistry = if (builtin.is_test)
+        builtin_commands.testSlashRegistry()
+    else
+        .{ .commands = &.{} },
 
     auth: auth_runtime.Runtime = auth_runtime.Runtime.init(
-        if (host_target.is_wasm) api_key_validator.unavailable_provider else builtin_gateway.api_key_validator,
-        if (host_profile.js_host_auth)
-            js_host_auth.oauth_provider
-        else if (host_profile.native_auth)
-            builtin_gateway.oauth_transport_provider
-        else
-            oauth_transport.unavailable_provider,
         if (host_target.is_wasm) host.unavailable_secret_store else native_host.secret_store,
         production_adapter_registry,
     ),
     selected_model: std.ArrayList(u8) = .empty,
-    model_cache: model_cache_runtime.Runtime = model_cache_runtime.Runtime.init(std.heap.c_allocator, builtin_gateway.models_path),
+    model_cache: model_cache_runtime.Runtime = model_cache_runtime.Runtime.initWithDescriptorProvider(
+        std.heap.c_allocator,
+        builtin_gateway.model_descriptor_provider,
+    ),
     workspace_root: []u8 = &.{},
     workspace_host: WorkspaceHostRuntime = .{},
     workspace: app_workspace_runtime.State = .{},
@@ -660,7 +646,6 @@ const App = struct {
     agent_step_limit: usize = default_max_agent_steps,
     web_fetch_runtime: web_fetch_runtime.Runtime = web_fetch_runtime.Runtime.init(.{}),
     web_search_runtime: web_search_runtime.Runtime = web_search_runtime.Runtime.init(.{}),
-    web_search_models_path: []const u8 = builtin_gateway.models_path,
     lifecycle_runtime: hooks.Runtime = hooks.Runtime.init(std.heap.c_allocator),
     lifecycle_view: hooks.RuntimeView = hooks.RuntimeView.empty(),
     notifications: builtin_hooks.notifications.State = .{},
@@ -726,6 +711,7 @@ const App = struct {
     pub fn init(alloc: Allocator, launch: *cli_surface.InteractiveLaunch) !Self {
         var app = Self{
             .alloc = alloc,
+            .slash_commands = launch.slash_registry,
             .lifecycle_runtime = hooks.Runtime.init(alloc),
             .background = BackgroundRuntime.init(if (comptime host_target.is_wasm)
                 background_process_provider.unavailable_provider
@@ -769,10 +755,10 @@ const App = struct {
             .{
                 .load_mcp_runtime = if (comptime host_target.is_wasm) loadNoMcpRuntime else builtin_mcp.loadRuntime,
                 .skill_root_policy = if (comptime host_target.is_wasm) wasm_skill_root_policy else builtin_skills.root_policy,
-                .terminal_title = ui_render.terminal_title,
                 .connection_seed = builtin_gateway.connection_seed,
                 .adapter_registry = production_adapter_registry,
                 .model_descriptors = builtin_gateway.model_descriptor_provider,
+                .terminal_title = ui_render.terminal_title,
             },
         );
         errdefer app.deinit();
@@ -1092,8 +1078,8 @@ const App = struct {
         try AuthAppRuntime.applyPickerChoice(self, choice);
     }
 
-    pub fn selectCredentialSource(self: *App, source: credentials.Source) !bool {
-        return AuthAppRuntime.selectCredentialSource(self, source);
+    pub fn selectCredentialSource(self: *App, source_id: []const u8) !bool {
+        return AuthAppRuntime.selectCredentialSource(self, source_id);
     }
 
     pub fn run(self: *App) !void {
@@ -1445,14 +1431,15 @@ const App = struct {
         if (recovery_checkpoint) |checkpoint| {
             try route_snapshot.validateRecoveryProfile(
                 profile,
-                checkpoint.route_identity.?.adapter_kind,
+                builtin_gateway.connection_seed,
+                checkpoint.route_identity.?,
             );
         }
         const selected_profile = try self.auth.selectedConnectionProfile();
         if (std.mem.eql(u8, profile.id, selected_profile.id) and
-            self.auth.gatewayCredential() == null)
+            self.auth.usableCredential() == null)
         {
-            return error.MissingApiKey;
+            return error.MissingEnteredSecret;
         }
 
         const authorized_image_catalog = try self.session.snapshotImageCatalog(
@@ -1494,12 +1481,8 @@ const App = struct {
                 std.heap.c_allocator,
                 profile,
                 builtin_gateway.connection_seed,
-                checkpoint.route_identity.?.adapter_kind,
-                checkpoint.route_identity.?.permission_review_model_id,
-                checkpoint.route_identity.?.vision_model_id,
-                checkpoint.route_identity.?.subagent_model_id,
+                checkpoint.route_identity.?,
                 descriptor,
-                builtin_gateway.defaultChatUrl(),
             )
         else
             try route_snapshot.RouteSnapshot.admitSelected(
@@ -1507,7 +1490,6 @@ const App = struct {
                 profile,
                 builtin_gateway.connection_seed,
                 descriptor,
-                builtin_gateway.defaultChatUrl(),
             );
         errdefer route.deinit(std.heap.c_allocator);
 
@@ -1720,20 +1702,7 @@ const App = struct {
         );
     }
 
-    pub fn snapshotGatewayToolProjection(
-        self: *App,
-        alloc: Allocator,
-        permission_mode: types.PermissionMode,
-    ) !tool_advertisement.EffectiveToolProjection {
-        const adapter = try self.selectedProviderAdapter();
-        return self.snapshotGatewayToolProjectionForAdapter(
-            alloc,
-            permission_mode,
-            adapter,
-        );
-    }
-
-    pub fn snapshotGatewayToolProjectionForAdapter(
+    pub fn snapshotModelToolProjectionForAdapter(
         self: *App,
         alloc: Allocator,
         permission_mode: types.PermissionMode,
@@ -1741,7 +1710,7 @@ const App = struct {
     ) !tool_advertisement.EffectiveToolProjection {
         self.permission_state.authority_mutex.lockUncancelable(io_mod.getIo());
         defer self.permission_state.authority_mutex.unlock(io_mod.getIo());
-        return self.snapshotGatewayToolProjectionForRules(
+        return self.snapshotModelToolProjectionForRules(
             alloc,
             permission_mode,
             self.permission_engine.rules,
@@ -1749,14 +1718,14 @@ const App = struct {
         );
     }
 
-    pub fn snapshotSubagentGatewayToolProjection(
+    pub fn snapshotSubagentModelToolProjectionForAdapter(
         self: *App,
         alloc: Allocator,
         permission_mode: types.PermissionMode,
         permission_rules: types.PermissionRuleSet,
+        adapter: agent_stream_provider.ProviderAdapter,
     ) !tool_advertisement.EffectiveToolProjection {
-        const adapter = try self.selectedProviderAdapter();
-        return self.snapshotSubagentGatewayToolProjectionForAdapter(
+        return self.snapshotModelToolProjectionForRules(
             alloc,
             permission_mode,
             permission_rules,
@@ -1764,37 +1733,22 @@ const App = struct {
         );
     }
 
-    pub fn snapshotSubagentGatewayToolProjectionForAdapter(
+    fn snapshotModelToolProjectionForRules(
         self: *App,
         alloc: Allocator,
         permission_mode: types.PermissionMode,
         permission_rules: types.PermissionRuleSet,
         adapter: agent_stream_provider.ProviderAdapter,
     ) !tool_advertisement.EffectiveToolProjection {
-        return self.snapshotGatewayToolProjectionForRules(
-            alloc,
-            permission_mode,
-            permission_rules,
-            adapter,
-        );
-    }
-
-    fn snapshotGatewayToolProjectionForRules(
-        self: *App,
-        alloc: Allocator,
-        permission_mode: types.PermissionMode,
-        permission_rules: types.PermissionRuleSet,
-        adapter: agent_stream_provider.ProviderAdapter,
-    ) !tool_advertisement.EffectiveToolProjection {
-        return app_mcp_runtime.buildGatewayToolProjection(&self.mcp, alloc, self.toolAdvertisementSet(), .{
+        return app_mcp_runtime.buildModelToolProjection(&self.mcp, alloc, self.toolAdvertisementSet(), .{
             .permission_mode = permission_mode,
             .permission_rules = permission_rules,
             .subagent_available = self.session_persistence.subagent_host != null,
-            .terminal_available = self.session_persistence.subagent_host != null and
-                tool_dispatch.ToolCapabilities.for_host(host.current()).terminalAvailable(),
             .provider_tools = adapter.provider_tools,
             .fx_web_search_installed = host_profile.web_search and
                 adapter.web_search != null,
+            .terminal_available = self.session_persistence.subagent_host != null and
+                tool_dispatch.ToolCapabilities.for_host(host.current()).terminalAvailable(),
         });
     }
 
@@ -1802,7 +1756,7 @@ const App = struct {
         self: *App,
         admission: subagent_domain.AdmissionSnapshot,
     ) tool_runtime.Context {
-        return AgentAppRuntime.toolContextForSubagent(self, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl(), admission);
+        return AgentAppRuntime.toolContextForSubagent(self, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, admission);
     }
 
     pub fn subagentToolContextForAdmissionAndAdapter(
@@ -1811,7 +1765,7 @@ const App = struct {
         adapter: agent_stream_provider.ProviderAdapter,
     ) tool_runtime.Context {
         var ctx = self.subagentToolContextForAdmission(admission);
-        ctx.provider_adapter = adapter;
+        ctx.route_adapter = adapter;
         return ctx;
     }
 
@@ -1838,7 +1792,7 @@ const App = struct {
     }
 
     pub fn describeToolAction(self: *App, arena: Allocator, call: ToolCall, file_display_path: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
-        return AgentAppRuntime.describeToolAction(self, arena, call, file_display_path, advertised_dynamic_tool_names, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
+        return AgentAppRuntime.describeToolAction(self, arena, call, file_display_path, advertised_dynamic_tool_names, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count);
     }
 
     pub fn describeToolActionWithAdvertised(self: *App, arena: Allocator, call: ToolCall, file_display_path: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
@@ -1846,7 +1800,7 @@ const App = struct {
     }
 
     pub fn describeToolActionCompleted(self: *App, arena: Allocator, call: ToolCall, file_display_path: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
-        return AgentAppRuntime.describeToolActionCompleted(self, arena, call, file_display_path, advertised_dynamic_tool_names, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
+        return AgentAppRuntime.describeToolActionCompleted(self, arena, call, file_display_path, advertised_dynamic_tool_names, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count);
     }
 
     pub fn describeToolActionCompletedWithAdvertised(self: *App, arena: Allocator, call: ToolCall, file_display_path: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
@@ -1854,7 +1808,7 @@ const App = struct {
     }
 
     pub fn describeToolActionDenied(self: *App, arena: Allocator, call: ToolCall, file_display_path: ?[]const u8, label: []const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
-        return AgentAppRuntime.describeToolActionDenied(self, arena, call, file_display_path, label, advertised_dynamic_tool_names, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
+        return AgentAppRuntime.describeToolActionDenied(self, arena, call, file_display_path, label, advertised_dynamic_tool_names, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count);
     }
 
     pub fn describeToolActionDeniedWithAdvertised(self: *App, arena: Allocator, call: ToolCall, file_display_path: ?[]const u8, label: []const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
@@ -1862,7 +1816,7 @@ const App = struct {
     }
 
     pub fn requestToolPermissionSync(self: *App, arena: Allocator, call: ToolCall, review_turn: permission_auto_classifier.ReviewTurnContext, permission_mode: PermissionMode, local_grants: []const PermissionGrant, live_authority: ?agent_runtime.LiveToolAuthority, revalidation: ?agent_runtime.LivePermissionRevalidation, advertised_dynamic_tool_names: []const []const u8) !command_admission.PermissionOutcome {
-        return AgentAppRuntime.requestToolPermissionSync(self, arena, call, review_turn, permission_mode, local_grants, live_authority, revalidation, advertised_dynamic_tool_names, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
+        return AgentAppRuntime.requestToolPermissionSync(self, arena, call, review_turn, permission_mode, local_grants, live_authority, revalidation, advertised_dynamic_tool_names, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count);
     }
 
     pub fn requestToolPermissionSyncWithAdvertised(self: *App, arena: Allocator, call: ToolCall, review_turn: permission_auto_classifier.ReviewTurnContext, permission_mode: PermissionMode, local_grants: []const PermissionGrant, live_authority: ?agent_runtime.LiveToolAuthority, revalidation: ?agent_runtime.LivePermissionRevalidation, advertised_dynamic_tool_names: []const []const u8) !command_admission.PermissionOutcome {
@@ -1870,7 +1824,7 @@ const App = struct {
     }
 
     pub fn requestPreparedFileMutationPermissionSyncWithAdvertised(self: *App, arena: Allocator, call: ToolCall, prepared: *tool_admission.PreparedFileMutationCall, review_turn: permission_auto_classifier.ReviewTurnContext, permission_mode: PermissionMode, local_grants: []const PermissionGrant, live_authority: ?agent_runtime.LiveToolAuthority, advertised_dynamic_tool_names: []const []const u8) !command_admission.PermissionOutcome {
-        return AgentAppRuntime.requestPreparedFileMutationPermissionSync(self, arena, call, prepared, review_turn, permission_mode, local_grants, live_authority, advertised_dynamic_tool_names, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
+        return AgentAppRuntime.requestPreparedFileMutationPermissionSync(self, arena, call, prepared, review_turn, permission_mode, local_grants, live_authority, advertised_dynamic_tool_names, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count);
     }
 
     pub fn requestSandboxWideningSyncWithAdvertised(
@@ -1901,20 +1855,19 @@ const App = struct {
             max_read_file_line_len,
             max_command_output_bytes,
             builtin_gateway.retry_count,
-            builtin_gateway.defaultChatUrl(),
         );
     }
 
     pub fn validateToolCall(self: *App, arena: Allocator, call: ToolCall) !agent_runtime.ToolCallValidationResult {
-        return AgentAppRuntime.validateToolCall(self, arena, call, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
+        return AgentAppRuntime.validateToolCall(self, arena, call, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count);
     }
 
     pub fn checkToolAvailability(self: *App, arena: Allocator, call: ToolCall) !?[]const u8 {
-        return AgentAppRuntime.checkToolAvailability(self, arena, call, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
+        return AgentAppRuntime.checkToolAvailability(self, arena, call, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count);
     }
 
     pub fn permissionTargetForCall(self: *App, arena: Allocator, call: ToolCall, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
-        return AgentAppRuntime.permissionTargetForCall(self, arena, call, advertised_dynamic_tool_names, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
+        return AgentAppRuntime.permissionTargetForCall(self, arena, call, advertised_dynamic_tool_names, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count);
     }
 
     pub fn permissionTargetForCallWithAdvertised(self: *App, arena: Allocator, call: ToolCall, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
@@ -1971,12 +1924,11 @@ const App = struct {
         return AgentAppRuntime.fetchModelIds(
             self,
             provider,
-            builtin_gateway.models_path,
         );
     }
 
     pub fn startModelCacheWarmup(self: *App) void {
-        const adapter = self.selectedProviderAdapter() catch {
+        const adapter = self.selectedAdapter() catch {
             debug_trace.logf("gateway", "model_cache_warmup_skipped reason=unsupported_adapter", .{});
             return;
         };
@@ -2018,10 +1970,6 @@ const App = struct {
         return self.model_cache.snapshotCachedModelIds(alloc);
     }
 
-    pub fn resolvedModelCapabilities(self: *App, model: []const u8) model_capabilities.Capabilities {
-        return model_capabilities.resolveCapabilities(model, self.model_cache.metadataForModel(model));
-    }
-
     pub fn resolvedModelDescriptor(self: *App, model: []const u8) model_capabilities.ModelDescriptor {
         const profile = self.auth.selectedConnectionProfile() catch return model_catalog.configured_model_descriptor_provider.fallback(model);
         return self.resolvedModelDescriptorForProfile(profile, model) catch
@@ -2045,7 +1993,7 @@ const App = struct {
         profile: connection_registry.Profile,
         model: []const u8,
     ) !model_capabilities.ModelDescriptor {
-        const adapter = try self.providerAdapterForProfile(profile);
+        const adapter = try self.adapterForProfile(profile);
         const selected = try self.auth.selectedConnectionProfile();
         if (!std.mem.eql(u8, profile.id, selected.id)) {
             return adapter.model_descriptors.fallback(model);
@@ -2062,7 +2010,7 @@ const App = struct {
         profile: connection_registry.Profile,
         model: []const u8,
     ) !model_capabilities.ModelDescriptor {
-        const adapter = try self.providerAdapterForProfile(profile);
+        const adapter = try self.adapterForProfile(profile);
         const selected = try self.auth.selectedConnectionProfile();
         if (!std.mem.eql(u8, profile.id, selected.id)) {
             return adapter.model_descriptors.fallback(model);
@@ -2163,7 +2111,6 @@ const App = struct {
             self,
             job,
             builtin_gateway.retry_count,
-            builtin_gateway.defaultChatUrl(),
         ) catch |err| {
             if (err == error.TurnFinalizationDeliveryFailed) return;
             return err;
@@ -2179,7 +2126,7 @@ const App = struct {
                 return agent_runtime.unavailableHostToolResult(request.result_allocator);
             }
         }
-        return AgentAppRuntime.executeToolCall(self, request, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
+        return AgentAppRuntime.executeToolCall(self, request, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count);
     }
 
     pub fn executeToolCallWithAdvertised(self: *App, request: agent_runtime.ToolExecutionRequest) !ToolExecutionResult {
@@ -2192,11 +2139,11 @@ const App = struct {
     }
 
     pub fn appendRuntimeContextMessage(self: *App, arena: Allocator, messages: *std.ArrayList(ChatMessage)) !void {
-        try AgentAppRuntime.appendTransientRuntimeContextMessage(self, arena, messages, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
+        try AgentAppRuntime.appendTransientRuntimeContextMessage(self, arena, messages, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count);
     }
 
     pub fn appendStaticContextMessage(self: *App, arena: Allocator, messages: *std.ArrayList(ChatMessage)) !void {
-        try AgentAppRuntime.appendStaticContextMessage(self, arena, messages, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count, builtin_gateway.defaultChatUrl());
+        try AgentAppRuntime.appendStaticContextMessage(self, arena, messages, &ignored_list_entries, max_list_entries, max_read_file_bytes, max_read_file_lines, max_read_file_line_len, max_command_output_bytes, builtin_gateway.retry_count);
     }
 
     fn runtimeContextSnapshot(self: *App, alloc: Allocator) !RuntimeContextSnapshot {
@@ -2553,7 +2500,7 @@ const App = struct {
             self.terminal_input_runtime.hasPendingTerminalAction() or
             self.question_prompt.isActive() or
             self.approval_prompt.isActive() or
-            self.auth.apiKeyEntryActive() or
+            self.auth.enteredSecretEntryActive() or
             self.subagents.isViewActive() or
             !self.shell.has_committed_frame or
             !self.shell.footer_viewport.has_frame or
@@ -2568,7 +2515,7 @@ const App = struct {
         return true;
     }
 
-    pub fn prepareApiKeyInputBoundary(self: *App) void {
+    pub fn prepareEnteredSecretInputBoundary(self: *App) void {
         if (self.terminal_input_runtime.native_clear_probe.active()) {
             const discarded = self.terminal_input_runtime.native_clear_probe.settle().len;
             self.terminal_input_runtime.native_clear_probe.clearSettledInput();
@@ -2811,7 +2758,7 @@ const App = struct {
             try AuthAppRuntime.collectSignInFacts(self);
         }
         if (comptime host_profile.native_auth) {
-            try AuthAppRuntime.collectApiKeySaveFacts(self);
+            try AuthAppRuntime.collectEnteredSecretSaveFacts(self);
             try app_terminal_runtime.Runtime(App).collectFacts(self);
         }
         try self.processNextCooperativePrompt();
@@ -2833,7 +2780,7 @@ const App = struct {
                 &resize_interlock,
                 footer_rows,
                 resize_debounce_ms,
-                !InputAppRuntime.terminalPasteActive(self) and !self.auth.apiKeyEntryActive(),
+                !InputAppRuntime.terminalPasteActive(self) and !self.auth.enteredSecretEntryActive(),
             ) catch |err| {
                 if (err != error.TerminalTooSmall and err != error.UnableToReadTerminalSize) {
                     return err;
@@ -2866,7 +2813,7 @@ const App = struct {
         }
         try WorkerAppRuntime.tick(self, app_callbacks.Bindings(App).onTaskCompletion, app_callbacks.Bindings(App).workerEventHandlers(self));
         const now_ns = io_mod.nanoTimestamp();
-        if (!self.approval_prompt.isActive() and !self.question_prompt.isActive() and !self.auth.apiKeyEntryActive()) {
+        if (!self.approval_prompt.isActive() and !self.question_prompt.isActive() and !self.auth.enteredSecretEntryActive()) {
             try self.pacer.tick(self.alloc, now_ns, self.pacerCallbacks());
         } else {
             self.pacer.pause(now_ns);
@@ -3061,10 +3008,17 @@ pub fn runWasmTerminal(init: std.process.Init) !void {
     defer cli_args.deinit(alloc);
     while (args.next()) |arg| try cli_args.append(alloc, arg);
 
+    var command_catalog = try builtin_commands.Catalog.init(
+        alloc,
+        production_adapter_registry,
+        builtin_gateway.connection_seed.adapter_id,
+    );
+    defer command_catalog.deinit(alloc);
+
     const parsed = try cli_surface.parseInteractiveLaunch(
         alloc,
         cli_args.items,
-        builtin_commands.top_level_registry,
+        command_catalog.top_level,
     );
     var launch = switch (parsed) {
         .interactive => |value| value,
@@ -3075,6 +3029,7 @@ pub fn runWasmTerminal(init: std.process.Init) !void {
         },
     };
     defer launch.deinit(alloc);
+    launch.slash_registry = command_catalog.slash;
     const outcome = try app_entry_runtime.runInteractiveCooperative(App, alloc, &launch);
     switch (outcome) {
         .returned => {},
@@ -3166,7 +3121,14 @@ fn mainC(c_argc: c_int, c_argv: [*][*:0]c_char, c_envp: [*:null]?[*:0]c_char) !v
     }
 
     if (shouldRunBenchmarkNoArgRaw(raw_args, raw_env)) {
-        switch (cli_surface.parse(builtin_commands.top_level_registry, &.{})) {
+        var buffer: [builtin_commands.top_level_help_fast_buffer_bytes]u8 = undefined;
+        var fixed: std.heap.FixedBufferAllocator = .init(&buffer);
+        const command_catalog = try builtin_commands.Catalog.init(
+            fixed.allocator(),
+            production_adapter_registry,
+            builtin_gateway.connection_seed.adapter_id,
+        );
+        switch (cli_surface.parse(command_catalog.top_level, &.{})) {
             .interactive => exitFast(0),
             else => exitFast(1),
         }
@@ -3202,9 +3164,15 @@ fn writeTopLevelHelpFast(raw_env: RawEnviron) !void {
     const style = topLevelHelpStyle(raw_env);
     var buffer: [builtin_commands.top_level_help_fast_buffer_bytes]u8 = undefined;
     var fixed: std.heap.FixedBufferAllocator = .init(&buffer);
+    var command_catalog = try builtin_commands.Catalog.init(
+        fixed.allocator(),
+        production_adapter_registry,
+        builtin_gateway.connection_seed.adapter_id,
+    );
+    defer command_catalog.deinit(fixed.allocator());
     const text = try command_specs.renderTopLevelHelpWithStyle(
         fixed.allocator(),
-        builtin_commands.top_level_registry,
+        command_catalog.top_level,
         columns,
         version,
         style,
@@ -3216,12 +3184,18 @@ fn runNonBenchmark(raw_args: []const [*:0]const u8, raw_env: RawEnviron, cli_arg
     io_mod.setRawEnviron(raw_env);
 
     const alloc = processAllocator();
+    var command_catalog = try builtin_commands.Catalog.init(
+        alloc,
+        production_adapter_registry,
+        builtin_gateway.connection_seed.adapter_id,
+    );
+    defer command_catalog.deinit(alloc);
     const cfg = if (cli_args.len == 0)
-        emptyEntryConfig()
+        emptyEntryConfig(command_catalog.top_level)
     else if (needsFullEntryConfig(cli_args))
-        fullEntryConfig()
+        fullEntryConfig(command_catalog.top_level)
     else
-        localEntryConfig();
+        localEntryConfig(command_catalog.top_level);
 
     var early_threaded: ?std.Io.Threaded = null;
     defer if (early_threaded) |*threaded| threaded.deinit();
@@ -3249,6 +3223,7 @@ fn runNonBenchmark(raw_args: []const [*:0]const u8, raw_env: RawEnviron, cli_arg
 
             var owned_launch = launch;
             defer owned_launch.deinit(alloc);
+            owned_launch.slash_registry = command_catalog.slash;
             defer debug_trace.shutdown();
 
             const outcome = try app_entry_runtime.runInteractive(App, alloc, &owned_launch);
@@ -3368,7 +3343,9 @@ fn cliArgsFromRaw(raw_args: []const [*:0]const u8, stack_buf: [][:0]const u8) ![
 
 fn isTopLevelHelp(args: []const [:0]const u8) bool {
     if (args.len == 0) return false;
-    return command_specs.matchesTopLevel(builtin_commands.top_level_registry, args[0], .help);
+    return std.mem.eql(u8, args[0], "help") or
+        std.mem.eql(u8, args[0], "--help") or
+        std.mem.eql(u8, args[0], "-h");
 }
 
 fn processAllocator() Allocator {
@@ -3532,7 +3509,6 @@ test "native app preserves the built-in tool set without workspace metadata" {
 }
 
 test "interactive route credential resolution keeps the admitted source exact" {
-    const adapter_auth = @import("core/gateway/adapter_auth.zig");
     const Probe = struct {
         calls: usize = 0,
         fallback_reads: usize = 0,
@@ -3563,6 +3539,7 @@ test "interactive route credential resolution keeps the admitted source exact" {
     var probe: Probe = .{};
     const adapters = [_]agent_stream_provider.ProviderAdapter{.{
         .kind = "test_adapter",
+        .supported_protocol = "test",
         .auth = .{
             .kind = "test_adapter",
             .context = &probe,
@@ -3600,7 +3577,7 @@ test "interactive route credential resolution keeps the admitted source exact" {
         .fast_model_suffix = null,
     };
     var failed = false;
-    if (app.resolveRouteCredential(alloc, &route)) |value| {
+    if (app.resolveRouteCredential(alloc, &route, .if_needed)) |value| {
         var credential = value;
         credential.deinit(alloc);
     } else |err| {
@@ -3612,18 +3589,16 @@ test "interactive route credential resolution keeps the admitted source exact" {
     try std.testing.expectEqual(@as(usize, 0), probe.fallback_reads);
 }
 
-fn fullEntryConfig() app_entry_runtime.Config {
+fn fullEntryConfig(command_catalog: command_specs.TopLevelRegistry) app_entry_runtime.Config {
     return .{
         .version = version,
         .revision = build_options.git_commit,
         .build_channel = compiled_update_channel,
-        .command_catalog = builtin_commands.top_level_registry,
+        .command_catalog = command_catalog,
         .default_model = builtin_gateway.default_model,
         .default_agent_step_limit = default_max_agent_steps,
-        .models_path = builtin_gateway.models_path,
         .gateway_retry_count = builtin_gateway.retry_count,
-        .gateway_chat_url = builtin_gateway.default_chat_url,
-        .gateway_provider = builtin_gateway.provider,
+        .gateway_system = builtin_gateway.system,
         .background_process_provider = background_process.provider,
         .url_opener = url_opener.native_opener,
         .secret_store = native_host.secret_store,
@@ -3647,18 +3622,16 @@ fn fullEntryConfig() app_entry_runtime.Config {
     };
 }
 
-fn localEntryConfig() app_entry_runtime.Config {
+fn localEntryConfig(command_catalog: command_specs.TopLevelRegistry) app_entry_runtime.Config {
     return .{
         .version = version,
         .revision = build_options.git_commit,
         .build_channel = compiled_update_channel,
-        .command_catalog = builtin_commands.top_level_registry,
+        .command_catalog = command_catalog,
         .default_model = builtin_gateway.default_model,
         .default_agent_step_limit = default_max_agent_steps,
-        .models_path = builtin_gateway.models_path,
         .gateway_retry_count = builtin_gateway.retry_count,
-        .gateway_chat_url = builtin_gateway.default_chat_url,
-        .gateway_provider = builtin_gateway.provider,
+        .gateway_system = builtin_gateway.system,
         .background_process_provider = background_process.provider,
         .url_opener = url_opener.native_opener,
         .secret_store = native_host.secret_store,
@@ -3682,18 +3655,16 @@ fn localEntryConfig() app_entry_runtime.Config {
     };
 }
 
-fn emptyEntryConfig() app_entry_runtime.Config {
+fn emptyEntryConfig(command_catalog: command_specs.TopLevelRegistry) app_entry_runtime.Config {
     return .{
         .version = version,
         .revision = build_options.git_commit,
         .build_channel = compiled_update_channel,
-        .command_catalog = builtin_commands.top_level_registry,
+        .command_catalog = command_catalog,
         .default_model = "",
         .default_agent_step_limit = 0,
-        .models_path = "",
         .gateway_retry_count = 0,
-        .gateway_chat_url = "",
-        .gateway_provider = builtin_gateway.provider,
+        .gateway_system = builtin_gateway.system,
         .background_process_provider = background_process.provider,
         .url_opener = url_opener.native_opener,
         .secret_store = native_host.secret_store,

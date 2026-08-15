@@ -1200,7 +1200,7 @@ fn pushQuestionPanelRows(
 fn testContext(input: *const InputRuntime) render_input.RenderContext {
     return .{
         .stream = .{},
-        .has_api_key = true,
+        .has_credential = true,
         .model = "gpt-5.1",
         .queued_count = 0,
         .subagent_count = 0,
@@ -2370,7 +2370,7 @@ test "footer paint plan keeps cursor visible during transient activity when inpu
 
     const ctx: render_input.RenderContext = .{
         .stream = .{ .active = true },
-        .has_api_key = true,
+        .has_credential = true,
         .model = "gpt-5.1",
         .queued_count = 0,
         .subagent_count = 0,
@@ -2430,7 +2430,7 @@ test "approval footer composition hides cursor while rendering command prompt" {
 
     const ctx: render_input.RenderContext = .{
         .stream = .{},
-        .has_api_key = true,
+        .has_credential = true,
         .model = "gpt-5.1",
         .queued_count = 0,
         .subagent_count = 0,
@@ -2531,7 +2531,7 @@ test "footer paint plan keeps compact transient activity adjacent to footer" {
 
     const ctx: render_input.RenderContext = .{
         .stream = .{ .active = true },
-        .has_api_key = true,
+        .has_credential = true,
         .model = "gpt-5.1",
         .queued_count = 0,
         .subagent_count = 0,
@@ -2611,7 +2611,7 @@ test "footer paint plan owns reserved idle gap row without invalidation" {
 
     const ctx: render_input.RenderContext = .{
         .stream = .{},
-        .has_api_key = true,
+        .has_credential = true,
         .model = "gpt-5.1",
         .queued_count = 0,
         .subagent_count = 0,
@@ -2667,7 +2667,7 @@ test "footer paint plan uses transcript preview for idle reservation" {
 
     const ctx: render_input.RenderContext = .{
         .stream = .{},
-        .has_api_key = true,
+        .has_credential = true,
         .model = "gpt-5.1",
         .queued_count = 0,
         .subagent_count = 0,
@@ -2749,7 +2749,7 @@ test "footer paint plan keeps active tool in the transient band" {
 
     const ctx: render_input.RenderContext = .{
         .stream = .{},
-        .has_api_key = true,
+        .has_credential = true,
         .model = "gpt-5.1",
         .queued_count = 0,
         .subagent_count = 0,
@@ -2818,7 +2818,7 @@ test "footer paint plan suppresses transient activity when footer clamps into it
 
     const ctx: render_input.RenderContext = .{
         .stream = .{ .active = true },
-        .has_api_key = true,
+        .has_credential = true,
         .model = "gpt-5.1",
         .queued_count = 0,
         .subagent_count = 0,

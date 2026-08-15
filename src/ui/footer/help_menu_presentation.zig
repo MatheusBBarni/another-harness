@@ -340,7 +340,7 @@ test "help menu search keeps headings non-selectable and reports empty results" 
     const projection: render_input.HelpMenuProjection = .{
         .active = true,
         .registry = help_menu_test_registry,
-        .query = "clipboard",
+        .query = "paste",
     };
     const rows = menuRowCount(projection, 80, 12);
     try std.testing.expectEqual(@as(u16, 4), rows);

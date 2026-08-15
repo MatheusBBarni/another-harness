@@ -1735,7 +1735,7 @@ test "registered terminal validation enforces action-specific input before execu
     const terminal_tool = tool_dispatch.Tool{
         .name = "terminal",
         .description = "Terminal test adapter.",
-        .gateway_schema = .{
+        .descriptor = .{
             .name = "terminal",
             .description = "Terminal test adapter.",
         },

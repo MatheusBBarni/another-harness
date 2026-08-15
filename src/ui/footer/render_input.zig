@@ -47,6 +47,7 @@ pub const ModelMenuProjection = struct {
     active: bool = false,
     load_state: model_cache_runtime.ModelMenuLoadState = .loading,
     catalog_state: model_cache_runtime.ModelMenuCatalogState = .{},
+    auth_service_label: []const u8 = "",
     items: []const model_cache_runtime.ModelMenuItem = &.{},
     provider_index: usize = 0,
     selected_index: usize = 0,
@@ -290,6 +291,15 @@ pub fn modelMenuProjection(cache: *const model_cache_runtime.Runtime) ModelMenuP
     };
 }
 
+pub fn modelMenuProjectionWithAuth(
+    cache: *const model_cache_runtime.Runtime,
+    auth_service_label: []const u8,
+) ModelMenuProjection {
+    var projection = modelMenuProjection(cache);
+    projection.auth_service_label = auth_service_label;
+    return projection;
+}
+
 const max_static_status_activity_rows: u16 = 3;
 
 pub const InputAppearance = core_input_runtime.InputAppearance;
@@ -307,7 +317,7 @@ pub const RenderContext = struct {
     completed_assistant_presentation_tail: bool = false,
     // Pacer emitting visible text, including the post-finish tail drain.
     writing_response: bool = false,
-    has_api_key: bool,
+    has_credential: bool,
     model: []const u8,
     pending_images: []const types.ImageAttachment = &.{},
     composer_visible: bool = true,
@@ -352,7 +362,7 @@ pub const RenderContext = struct {
     inline_completion_suffix: []const u8 = "",
     auth_picker: auth_runtime.PickerView = .{
         .active = false,
-        .available_sources = .empty,
+        .sources = &.{},
         .selected_choice = null,
         .active_source = null,
         .include_skip = false,
@@ -638,12 +648,12 @@ test "skillsMenuProjection mirrors runtime menu state" {
 }
 
 test "modelMenuProjection mirrors cache-owned catalog state" {
-    var cache = model_cache_runtime.Runtime.init(std.testing.allocator, "/v1/models");
+    var cache = model_cache_runtime.Runtime.init(std.testing.allocator);
     defer cache.deinit();
     cache.menu.load_state = .failed;
     cache.menu.catalog_state = .{
         .access_level = .public_only,
-        .public_only_reason = .credential_refresh_failed,
+        .public_only_reason = .refresh_failed,
         .private_models_hidden = true,
         .failure = .{ .category = .transport, .retryable = true },
     };
@@ -708,7 +718,7 @@ test "frame-owned thinking activity projects the thinking label" {
     defer shell.deinit(std.testing.allocator);
     const ctx: RenderContext = .{
         .stream = .{ .active = true },
-        .has_api_key = true,
+        .has_credential = true,
         .model = "gpt-5.1",
         .queued_count = 0,
         .subagent_count = 0,
@@ -736,7 +746,7 @@ test "frame-owned activity renders the thinking elapsed counter from the frame c
     const ctx: RenderContext = .{
         .stream = .{ .active = true, .turn_started_ms = 1_000 },
         .now_ms = 4_200,
-        .has_api_key = true,
+        .has_credential = true,
         .model = "gpt-5.1",
         .queued_count = 0,
         .subagent_count = 0,
@@ -764,7 +774,7 @@ test "frame-owned activity keeps active tools out of the turn status row" {
     defer shell.deinit(std.testing.allocator);
     const ctx: RenderContext = .{
         .stream = .{ .active = true, .last_activity_kind = .read, .read_count = 1 },
-        .has_api_key = true,
+        .has_credential = true,
         .model = "gpt-5.1",
         .queued_count = 0,
         .subagent_count = 0,
@@ -809,7 +819,7 @@ test "minimal frame-owned activity leaves the focused tool in the transcript" {
                 .output_exact = false,
             },
         },
-        .has_api_key = true,
+        .has_credential = true,
         .model = "test-model",
         .queued_count = 0,
         .subagent_count = 0,
@@ -876,7 +886,7 @@ test "frame-owned activity preserves route recovery status tone" {
     defer shell.deinit(std.testing.allocator);
     const ctx: RenderContext = .{
         .stream = .{},
-        .has_api_key = true,
+        .has_credential = true,
         .model = "gpt-5.1",
         .queued_count = 0,
         .subagent_count = 0,
@@ -925,7 +935,7 @@ test "frame-owned activity shows live streaming token progress" {
             },
         },
         .writing_response = true,
-        .has_api_key = true,
+        .has_credential = true,
         .model = "test-model",
         .queued_count = 0,
         .subagent_count = 0,
@@ -1030,7 +1040,7 @@ test "frame-owned activity uses clipped command activity label" {
             .last_activity_kind = .command,
             .token_progress = .{ .input_tokens = 10, .output_tokens = 20 },
         },
-        .has_api_key = true,
+        .has_credential = true,
         .model = "gpt-5.1",
         .queued_count = 0,
         .subagent_count = 0,

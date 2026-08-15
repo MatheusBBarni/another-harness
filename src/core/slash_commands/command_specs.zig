@@ -415,9 +415,8 @@ fn helpCatalogSpecMatches(spec: SlashSpec, query: []const u8) bool {
     var tokens = std.mem.tokenizeAny(u8, query, " \t\r\n");
     while (tokens.next()) |token| {
         if (containsIgnoreCase(spec.command, token) or
-            containsIgnoreCase(spec.help_entry.?, token) or
-            containsIgnoreCase(spec.completion_description.?, token) or
-            containsIgnoreCase(spec.presentation_category.?.label(), token))
+            containsIgnoreCase(@tagName(spec.kind), token) or
+            containsIgnoreCase(@tagName(spec.presentation_category.?), token))
         {
             continue;
         }
@@ -1615,17 +1614,17 @@ fn expectAllLinesFit(text: []const u8, columns: usize) !void {
 
 fn testSlashRegistry() SlashRegistry {
     const builtin_commands = @import("../../builtins/commands.zig");
-    return builtin_commands.slash_registry;
+    return builtin_commands.testSlashRegistry();
 }
 
 fn testTopLevelRegistry() TopLevelRegistry {
     const builtin_commands = @import("../../builtins/commands.zig");
-    return builtin_commands.top_level_registry;
+    return builtin_commands.testTopLevelRegistry();
 }
 
 fn testTopLevelHelpText(alloc: Allocator) ![]u8 {
     const builtin_commands = @import("../../builtins/commands.zig");
-    return builtin_commands.renderTopLevelHelp(alloc, top_level_help_default_width, "9.8.7");
+    return renderTopLevelHelp(alloc, builtin_commands.testTopLevelRegistry(), top_level_help_default_width, "9.8.7");
 }
 
 fn stripAnsiForTest(alloc: Allocator, text: []const u8) ![]u8 {
@@ -1843,14 +1842,24 @@ test "slash completion categories follow canonical entries" {
     try std.testing.expect(nthSlashCompletionCategory(registry, "/permissions ", 0) == null);
 }
 
-test "help catalog groups visible commands and searches all command metadata" {
+test "help catalog groups visible commands and searches normalized identifiers" {
     const registry = testSlashRegistry();
 
     try std.testing.expectEqual(@as(usize, 39), helpCatalogCount(registry, ""));
     try std.testing.expectEqualStrings("/help", helpCatalogSpecAt(registry, "", 0).?.command);
     try std.testing.expectEqual(@as(usize, 5), helpCatalogCategoryCount(registry, "", .general));
     try std.testing.expectEqual(@as(usize, 4), helpCatalogCount(registry, "appearance"));
-    try std.testing.expectEqualStrings("/paste", helpCatalogSpecAt(registry, "clipboard", 0).?.command);
+    try std.testing.expectEqualStrings("/paste", helpCatalogSpecAt(registry, "paste", 0).?.command);
+}
+
+test "help catalog ignores render-only command wording" {
+    var spec = slashSpec(testSlashRegistry(), .login);
+    spec.help_entry = "/login differently worded peer";
+    spec.completion_description = "authenticate with Example Cloud";
+
+    try std.testing.expect(helpCatalogSpecMatches(spec, "login"));
+    try std.testing.expect(!helpCatalogSpecMatches(spec, "Example Cloud"));
+    try std.testing.expect(!helpCatalogSpecMatches(spec, "differently worded"));
 }
 
 test "help menu selection follows the filtered catalog without executing commands" {
