@@ -2369,7 +2369,7 @@ test "processQueuedPrompt routes a user-supplied image path through Vision" {
     hooks.execute_delegate = vision_runtime.delegate();
     var fixture = PromptFixture{ .workspace_root = workspace };
     var job = fixture.job();
-    job.model = @constCast("zai/glm-5.2");
+    job.route = test_support.testRouteForModel(@constCast("zai/glm-5.2"));
     job.prompt = @constCast("Inspect photo.png.");
 
     try runFakePrompt(&gateway, &hooks, fixture.config(), job);
@@ -2688,7 +2688,7 @@ test "processQueuedPrompt keeps exact model identity and emits Gateway Fast" {
 
     try std.testing.expectEqual(@as(usize, 1), gateway.request_models.items.len);
     try std.testing.expectEqualStrings("zai/glm-5.2", gateway.request_models.items[0]);
-    try std.testing.expectEqual(@as(usize, 1), hooks.capability_queries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), hooks.capability_queries.items.len);
     try expectRootFieldAbsent(&gateway, 0, "fast");
     try expectBodyContains(&gateway, 0, "\"providerOptions\":{\"gateway\":{\"speed\":\"fast\"}}");
 }

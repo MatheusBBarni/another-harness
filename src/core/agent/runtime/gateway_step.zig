@@ -30,6 +30,7 @@ const CollectedTerminal = union(enum) {
     finish,
     failure: struct {
         category: agent_stream_provider.StreamFailure.Category,
+        http_status: ?std.http.Status = null,
         retry_after_seconds: ?u64,
     },
     cancelled,
@@ -145,9 +146,10 @@ const AdapterEventCollector = struct {
                 }
             },
             .failure => |failure| {
-                if (failure.category == .ambiguous_delivery) self.completion.delivery_ambiguous = true;
+                if (failure.category == .ambiguous_delivery or failure.delivery_ambiguous) self.completion.delivery_ambiguous = true;
                 self.terminal = .{ .failure = .{
                     .category = failure.category,
+                    .http_status = failure.http_status,
                     .retry_after_seconds = failure.retry_after_seconds,
                 } };
                 if (failure.detail) |detail| self.failure_detail = try self.alloc.dupe(u8, detail);
@@ -198,7 +200,7 @@ const LegacyGatewayCompatibilityBridge = struct {
                 .reconcile_generation_usage = collector.completion.generation_id != null,
             },
             .failure => |failure| .{
-                .status = statusForFailure(failure.category),
+                .status = failure.http_status orelse statusForFailure(failure.category),
                 .err_body = collector.failure_detail,
                 .retry_after_seconds = failure.retry_after_seconds,
                 .failure_diagnostic_summary = collector.failure_diagnostic_summary,
@@ -228,7 +230,10 @@ const LegacyGatewayCompatibilityBridge = struct {
         collector: *const AdapterEventCollector,
         delivery: *const DeliveryCertainty,
     ) session_usage.DeliveryOutcome {
-        if (collector.terminal == .failure and collector.terminal.failure.category == .ambiguous_delivery) {
+        if (collector.terminal == .failure and
+            (collector.terminal.failure.category == .ambiguous_delivery or
+                collector.completion.delivery_ambiguous))
+        {
             return .ambiguous_delivery;
         }
         return if (delivery.load() == .possibly_sent) .ambiguous_delivery else .unbilled;

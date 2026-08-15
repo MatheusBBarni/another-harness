@@ -1107,6 +1107,18 @@ fn availableModelCapabilities(
     return ctx.state.capability_resolver.available(model);
 }
 
+fn resolveModelDescriptor(raw_ctx: *anyopaque, alloc: Allocator, model: []const u8) model_capabilities.ResolveError!model_capabilities.ModelDescriptor {
+    var descriptor = model_capabilities.configuredDescriptor(model, .{});
+    descriptor.capabilities = try resolveModelCapabilities(raw_ctx, alloc, model);
+    descriptor.source = .catalog;
+    return descriptor;
+}
+
+fn availableModelDescriptor(raw_ctx: *anyopaque, model: []const u8) model_capabilities.ModelDescriptor {
+    const descriptor = model_capabilities.configuredDescriptor(model, availableModelCapabilities(raw_ctx, model));
+    return descriptor;
+}
+
 fn finalizeTurn(raw_ctx: *anyopaque, turn_id: u64, outcome: types.TurnPresentationOutcome, disposition: ?types.ProviderCompletionDisposition) !void {
     std.debug.assert(turn_id != 0);
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));

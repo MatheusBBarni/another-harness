@@ -112,6 +112,14 @@ fn localModelDescriptor(_: *anyopaque, _: Allocator, model: []const u8) !model_c
     return model_capabilities.configuredDescriptor(model, .{});
 }
 
+fn localAvailableModelCapabilities(_: *anyopaque, _: []const u8) model_capabilities.Capabilities {
+    return .{};
+}
+
+fn localModelCapabilities(_: *anyopaque, _: Allocator, _: []const u8) !model_capabilities.Capabilities {
+    return .{};
+}
+
 pub const RouteCredential = struct {
     credential: []u8,
     tenant: ?[]u8 = null,
@@ -259,6 +267,8 @@ pub const AgentRuntimeDeps = struct {
     /// descriptor before the loop; G11 removes these unused loop-era fields.
     available_model_descriptor: *const fn (ctx: *anyopaque, model: []const u8) model_capabilities.ModelDescriptor = localAvailableModelDescriptor,
     resolve_model_descriptor: *const fn (ctx: *anyopaque, arena: Allocator, model: []const u8) anyerror!model_capabilities.ModelDescriptor = localModelDescriptor,
+    available_model_capabilities: *const fn (ctx: *anyopaque, model: []const u8) model_capabilities.Capabilities = localAvailableModelCapabilities,
+    resolve_model_capabilities: *const fn (ctx: *anyopaque, arena: Allocator, model: []const u8) anyerror!model_capabilities.Capabilities = localModelCapabilities,
     format_tool_execution_error: *const fn (ctx: *anyopaque, arena: Allocator, tool_name: []const u8, err: anyerror) anyerror![]const u8,
     record_tool_call_rejected: ?*const fn (ctx: *anyopaque, arena: Allocator, call: ToolCall, model_output: []const u8, command_result_json: ?[]const u8) anyerror!void = null,
     report_usage: ?*const fn (ctx: *anyopaque, usage: types.Usage) void = null,

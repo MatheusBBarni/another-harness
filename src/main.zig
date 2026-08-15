@@ -1752,8 +1752,21 @@ const App = struct {
         return model_capabilities.resolveCapabilities(model, self.model_cache.metadataForModel(model));
     }
 
+    pub fn resolvedModelDescriptor(self: *App, model: []const u8) model_capabilities.ModelDescriptor {
+        var descriptor = builtin_gateway.model_descriptor_provider.fallback(model);
+        descriptor.capabilities = self.resolvedModelCapabilities(model);
+        return descriptor;
+    }
+
     pub fn resolveModelCapabilitiesForRequest(self: *App, model: []const u8) model_capabilities.ResolveError!model_capabilities.Capabilities {
         return self.model_cache.resolveForRequest(model, &self.worker.worker_cancel_requested);
+    }
+
+    pub fn resolveModelDescriptorForRequest(self: *App, model: []const u8) model_capabilities.ResolveError!model_capabilities.ModelDescriptor {
+        var descriptor = builtin_gateway.model_descriptor_provider.fallback(model);
+        descriptor.capabilities = try self.resolveModelCapabilitiesForRequest(model);
+        descriptor.source = .catalog;
+        return descriptor;
     }
 
     /// Must be called after init() returns so the loader thread captures

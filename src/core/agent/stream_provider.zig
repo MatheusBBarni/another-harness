@@ -249,6 +249,8 @@ pub const ProviderToolResult = struct {
 
 pub const StreamFailure = struct {
     category: Category,
+    http_status: ?std.http.Status = null,
+    delivery_ambiguous: bool = false,
     detail: ?[]const u8 = null,
     retry_after_seconds: ?u64 = null,
     diagnostic: ?Diagnostic = null,

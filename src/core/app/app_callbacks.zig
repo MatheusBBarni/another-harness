@@ -326,6 +326,8 @@ pub fn Bindings(comptime App: type) type {
                     agentRequestRouteRecovery
                 else
                     null,
+                .available_model_descriptor = agentAvailableModelDescriptor,
+                .resolve_model_descriptor = agentResolveModelDescriptor,
                 .available_model_capabilities = agentAvailableModelCapabilities,
                 .resolve_model_capabilities = agentResolveModelCapabilities,
                 .format_tool_execution_error = agentFormatToolExecutionError,
@@ -605,23 +607,38 @@ pub fn Bindings(comptime App: type) type {
             }
         }
 
-        fn agentResolveModelCapabilities(ctx: *anyopaque, _: Allocator, model: []const u8) model_capabilities.ResolveError!model_capabilities.Capabilities {
+        fn agentResolveModelDescriptor(ctx: *anyopaque, _: Allocator, model: []const u8) model_capabilities.ResolveError!model_capabilities.ModelDescriptor {
             const app: *App = @ptrCast(@alignCast(ctx));
+            if (comptime @hasDecl(App, "resolveModelDescriptorForRequest")) {
+                return app.resolveModelDescriptorForRequest(model);
+            }
+            if (comptime @hasDecl(App, "resolvedModelDescriptor")) {
+                return app.resolvedModelDescriptor(model);
+            }
             if (comptime @hasDecl(App, "resolveModelCapabilitiesForRequest")) {
-                return app.resolveModelCapabilitiesForRequest(model);
+                return model_capabilities.configuredDescriptor(
+                    model,
+                    try app.resolveModelCapabilitiesForRequest(model),
+                );
             }
-            if (comptime @hasDecl(App, "resolvedModelCapabilities")) {
-                return app.resolvedModelCapabilities(model);
+            return model_capabilities.configuredDescriptor(model, .{});
+        }
+
+        fn agentResolveModelCapabilities(ctx: *anyopaque, _: Allocator, model: []const u8) model_capabilities.ResolveError!model_capabilities.Capabilities {
+            const descriptor = try agentResolveModelDescriptor(ctx, std.heap.c_allocator, model);
+            return descriptor.capabilities;
+        }
+
+        fn agentAvailableModelDescriptor(ctx: *anyopaque, model: []const u8) model_capabilities.ModelDescriptor {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            if (comptime @hasDecl(App, "resolvedModelDescriptor")) {
+                return app.resolvedModelDescriptor(model);
             }
-            return model_capabilities.capabilitiesForModel(model);
+            return model_capabilities.configuredDescriptor(model, .{});
         }
 
         fn agentAvailableModelCapabilities(ctx: *anyopaque, model: []const u8) model_capabilities.Capabilities {
-            const app: *App = @ptrCast(@alignCast(ctx));
-            if (comptime @hasDecl(App, "resolvedModelCapabilities")) {
-                return app.resolvedModelCapabilities(model);
-            }
-            return model_capabilities.capabilitiesForModel(model);
+            return agentAvailableModelDescriptor(ctx, model).capabilities;
         }
 
         fn agentRequestToolPermission(ctx: *anyopaque, arena: Allocator, call: ToolCall, review_turn: permission_auto_classifier.ReviewTurnContext, permission_mode: PermissionMode, local_grants: []const PermissionGrant, live_authority: ?agent_runtime.LiveToolAuthority, revalidation: ?agent_runtime.LivePermissionRevalidation, advertised_dynamic_tool_names: []const []const u8) !command_admission.PermissionOutcome {
