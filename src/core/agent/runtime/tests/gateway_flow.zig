@@ -4435,7 +4435,7 @@ test "processQueuedPrompt restores legacy connectivity checkpoints through evide
     hooks.enable_recovery_checkpoint = true;
     defer hooks.deinit();
     var job = fixture.job();
-    job.model = @constCast("zai/glm-5.2");
+    job.route = test_support.testRouteForModel(@constCast("zai/glm-5.2"));
     job.recovery_checkpoint = checkpoint;
 
     try runFakePrompt(&gateway, &hooks, fixture.config(), job);

@@ -1799,7 +1799,6 @@ fn processQueuedPromptInner(
         try append_static_context(deps.ctx, arena, &stable_prefix);
     }
     const request_descriptor = job.route.descriptor();
-    const request_capabilities = request_descriptor.capabilities;
     if (config.cancel_flag.load(.seq_cst)) {
         runtime_telemetry.traceCancelObserved(finish_trace.ctx, false);
         var terminal_materializing = false;
