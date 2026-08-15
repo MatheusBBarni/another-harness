@@ -2677,11 +2677,6 @@ fn processQueuedPromptLoop(
             const gateway_wait_started_ms = io_mod.milliTimestamp();
             var gateway_delivery = runtime_gateway_step.DeliveryCertainty.init();
             var gateway_attempt_evidence: runtime_gateway_step.AttemptEvidence = .{};
-            var connection_status_bridge = ModelGatewayConnectionStatusBridge{
-                .deps = deps,
-                .provider_attempt = semantic_attempt + 1,
-                .attempt_limit = semantic_limit,
-            };
             stream_result = runtime_gateway_step.streamModelRequest(
                 deps.provider_adapter,
                 arena,
@@ -2692,10 +2687,6 @@ fn processQueuedPromptLoop(
                 config.gateway_retry_count,
                 config.gateway_chat_url,
                 model_request,
-                .{
-                    .ctx = &connection_status_bridge,
-                    .push = ModelGatewayConnectionStatusBridge.push,
-                },
                 deps.cooperative_transport_pulse,
                 &gateway_delivery,
                 &gateway_attempt_evidence,

@@ -217,8 +217,6 @@ pub const unavailable_provider = Provider{
     .stream_fn = unavailableStream,
 };
 
-pub const ConnectionStatus = types.GatewayConnectionStatus;
-
 pub const GenerationReference = struct {
     pub const max_bytes: usize = 512;
 
@@ -312,7 +310,6 @@ pub const StreamEvent = union(enum) {
     fx_tool_call: types.ToolCall,
     provider_tool_started: types.ToolCall,
     provider_tool_result: ProviderToolResult,
-    connection_status: ConnectionStatus,
     usage: StreamUsage,
     finish: StreamFinish,
     failure: StreamFailure,
@@ -500,7 +497,6 @@ test "stream event state enforces tool usage and terminal ordering" {
         .provenance = .provider_executed,
     };
 
-    try state.accept(.{ .connection_status = .connecting });
     try state.accept(.{ .tool_input_started = .{ .id = "local_1", .name = "read_file" } });
     try state.accept(.{ .fx_tool_call = local_call });
     try state.accept(.{ .provider_tool_started = provider_call });
@@ -608,6 +604,7 @@ test "provider adapter handles cancellation and missing terminal without exposin
     var sink_error: ?anyerror = null;
     var cancelled = std.atomic.Value(bool).init(true);
     var delivery = DeliveryCertainty.init();
+    var attempt_evidence: AttemptEvidence = .{};
     const adapter = ProviderAdapter{ .context = &fake, .stream_fn = Fake.stream };
     const request = AdapterRequest{
         .model_request = .{
@@ -624,6 +621,7 @@ test "provider adapter handles cancellation and missing terminal without exposin
         .trace_ctx = .{},
         .content_capture_limit = null,
         .delivery = &delivery,
+        .attempt_evidence = &attempt_evidence,
         .cancel_flag = &cancelled,
     };
     try std.testing.expectError(error.Cancelled, adapter.stream(std.testing.allocator, request, .{

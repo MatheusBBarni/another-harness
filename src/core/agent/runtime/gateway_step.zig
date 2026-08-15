@@ -42,7 +42,6 @@ const AdapterEventCollector = struct {
     on_tool_start: ?agent_stream_provider.ToolStartCallback,
     on_reasoning_chunk: ?agent_stream_provider.StreamCallback,
     on_tool_input_chunk: ?agent_stream_provider.StreamCallback,
-    connection_status: ?agent_stream_provider.ConnectionStatusSink,
     content: std.ArrayList(u8) = .empty,
     tool_calls: std.ArrayList(types.ToolCall) = .empty,
     completion: types.GatewayCompletion = .{},
@@ -102,9 +101,6 @@ const AdapterEventCollector = struct {
                     call.provider_result = try self.alloc.dupe(u8, result.result);
                     break;
                 } else return error.ProviderToolStateDesynchronized;
-            },
-            .connection_status => |status| if (self.connection_status) |sink| {
-                try sink.publish(status);
             },
             .usage => |usage| {
                 self.completion.usage = usage.tokens;
@@ -235,7 +231,6 @@ pub fn streamModelRequest(
     retry_count: usize,
     endpoint: []const u8,
     model_request: agent_stream_provider.ModelRequest,
-    connection_status: ?agent_stream_provider.ConnectionStatusSink,
     cooperative_pulse: ?agent_stream_provider.CooperativePulse,
     delivery: *DeliveryCertainty,
     attempt_evidence: *AttemptEvidence,
@@ -262,7 +257,6 @@ pub fn streamModelRequest(
         .on_tool_start = on_tool_start,
         .on_reasoning_chunk = on_reasoning_chunk,
         .on_tool_input_chunk = on_tool_input_chunk,
-        .connection_status = connection_status,
     };
     defer collector.deinit();
     var event_state = agent_stream_provider.EventState.init(alloc);
@@ -625,11 +619,13 @@ test "neutral adapter events materialize owned completion state" {
 
     var cancel_flag = std.atomic.Value(bool).init(false);
     var delivery = DeliveryCertainty.init();
+    var attempt_evidence: AttemptEvidence = .{};
     var callback_ctx: u8 = 0;
     const result = try streamModelRequest(
         .{ .stream_fn = Fake.stream },
         std.testing.allocator,
         "credential",
+        null,
         null,
         "test/model",
         1,
@@ -641,8 +637,8 @@ test "neutral adapter events materialize owned completion state" {
             .capabilities = .{},
         },
         null,
-        null,
         &delivery,
+        &attempt_evidence,
         &callback_ctx,
         Callbacks.content,
         null,
@@ -689,11 +685,13 @@ test "non-http adapter failure drives legacy gateway compatibility bridge" {
 
     var cancel_flag = std.atomic.Value(bool).init(false);
     var delivery = DeliveryCertainty.init();
+    var attempt_evidence: AttemptEvidence = .{};
     var callback_ctx: u8 = 0;
     const result = try streamModelRequest(
         .{ .stream_fn = Fake.stream },
         std.testing.allocator,
         "credential",
+        null,
         null,
         "test/model",
         1,
@@ -705,8 +703,8 @@ test "non-http adapter failure drives legacy gateway compatibility bridge" {
             .capabilities = .{},
         },
         null,
-        null,
         &delivery,
+        &attempt_evidence,
         &callback_ctx,
         Callbacks.content,
         null,
