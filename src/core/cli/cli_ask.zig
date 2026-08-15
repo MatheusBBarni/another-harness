@@ -2051,7 +2051,7 @@ fn resolveModelCapabilities(raw_ctx: *anyopaque, _: Allocator, model: []const u8
     const catalog = gateway_provider.modelCatalogForAdapter(
         ctx.connection_adapter_kind,
         adapter,
-    ) orelse return adapter.model_descriptors.fallback(model);
+    ) orelse return adapter.model_descriptors.fallback(model).capabilities;
     return ctx.capability_resolver.resolve(
         ctx.alloc,
         catalog,
