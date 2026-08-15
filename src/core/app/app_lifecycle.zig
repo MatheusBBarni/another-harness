@@ -2136,6 +2136,7 @@ test "loadStartupState defaults fast mode off and preserves explicit preferences
         oauth_transport.unavailable_provider,
         host.unavailable_secret_store,
         "zai/glm-5.2-fast",
+        true,
         12,
         .{
             .id = "vercel",
@@ -2175,6 +2176,7 @@ test "built-in Vercel connection reuses credential resolution and CatalogAccess 
         oauth_transport.unavailable_provider,
         host.unavailable_secret_store,
         "default-model",
+        false,
         12,
         .{
             .id = "vercel",
