@@ -372,7 +372,7 @@ test "Vercel adapter sink failure does not mutate user cancellation" {
     try std.testing.expect(!cancelled.load(.seq_cst));
 }
 
-fn buildAgentRequest(
+pub fn buildAgentRequest(
     _: ?*anyopaque,
     alloc: Allocator,
     request: agent_stream_provider_contract.BuildRequest,
