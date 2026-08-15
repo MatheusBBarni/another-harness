@@ -3403,7 +3403,7 @@ test "processQueuedPrompt leaves parent delivery pending after pre-send failure"
     );
     try std.testing.expect(!hooks.recovery_checkpoints.items[1].outstanding_reservation);
     try std.testing.expectEqual(
-        @as(usize, 0),
+        @as(usize, 1),
         hooks.recovery_checkpoints.items[1].consumed_provider_attempts,
     );
     try expectBodyContains(
@@ -4437,10 +4437,16 @@ test "processQueuedPrompt preserves fallback route and budget until selection ch
     }
 }
 
-test "processQueuedPrompt restores legacy connectivity checkpoints through evidence" {
+test "processQueuedPrompt restores connectivity checkpoints through evidence" {
     const alloc = std.testing.allocator;
     var fixture = PromptFixture{};
     const checkpoint = session_codec.RecoveryCheckpoint{
+        .version = 2,
+        .route_identity = .{
+            .connection_id = @constCast("vercel"),
+            .adapter_kind = @constCast("vercel_ai_gateway"),
+            .permission_review_model_id = null,
+        },
         .turn_id = 45,
         .user = .{ .text = @constCast("user prompt") },
         .assistant_source = @constCast("partial response"),

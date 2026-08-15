@@ -1109,8 +1109,7 @@ fn restoredRecoveryStrategy(
             .regenerating_tool => .regenerate_tool,
             .continuing_after_tool => .continue_after_confirmed_tool,
             .reconciling_tool => .reconcile_tool,
-            .waiting_for_connectivity => .wait_for_connectivity,
-            .paused => if (checkpoint.delivery == .definitely_unsent)
+            .waiting_for_connectivity, .paused => if (checkpoint.delivery == .definitely_unsent)
                 .retry_request
             else if (checkpoint.assistant_source.len > 0)
                 .continue_response

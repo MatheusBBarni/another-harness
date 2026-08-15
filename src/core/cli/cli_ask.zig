@@ -3621,12 +3621,14 @@ fn loadStartupStateWithoutCredentialsDefault(
     _: oauth_transport.Provider,
     _: host.SecretStore,
     default_model: []const u8,
+    default_fast_mode: bool,
     default_agent_step_limit: usize,
     connection_seed: connection_registry.Seed,
 ) !app_lifecycle.StartupState {
     return app_lifecycle.loadStartupStateWithoutCredentials(
         alloc,
         default_model,
+        default_fast_mode,
         default_agent_step_limit,
         connection_seed,
     );
