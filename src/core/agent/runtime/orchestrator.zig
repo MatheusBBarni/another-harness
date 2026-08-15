@@ -2326,7 +2326,7 @@ fn processQueuedPromptLoop(
     const selected_fast_mode = if (job.recovery_checkpoint) |checkpoint|
         checkpoint.requested_fast_mode
     else
-        config.fast_mode or request_descriptor.selected_fast_mode;
+        config.fast_mode or job.route.selected_fast_mode;
     const selection_changed = if (job.recovery_checkpoint) |checkpoint|
         recoverySelectionChanged(
             checkpoint,
@@ -2666,8 +2666,6 @@ fn processQueuedPromptLoop(
             runtime_assistant_stream.pushTokenProgressUpdate(&stream_ctx, .changed) catch |progress_err| {
                 debug_trace.logf("agent", "token progress publication failed source=gateway_prepare err={s}", .{@errorName(progress_err)});
             };
-            stream_ctx.vision_route = vision_route;
-
             // The reservation is durable before the send. A crash after this
             // point cannot prove that the provider received nothing.
             recovery_delivery = .possibly_sent;

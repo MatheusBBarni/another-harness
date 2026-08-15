@@ -339,7 +339,6 @@ pub fn prepareConnectionCredential(
     _ = try state.capability_resolver.resolve(
         state.alloc,
         state.cfg.gateway_provider.model_catalog,
-        state.cfg.gateway_provider.model_descriptors,
         .{
             .access = credentials.catalogAccessForCredential(
                 credential.source,
