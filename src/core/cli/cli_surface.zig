@@ -5007,7 +5007,7 @@ test "status and doctor inspect the supplied MCP profile diagnostic once" {
     var status_capture = CaptureOutput.init(alloc);
     defer status_capture.deinit();
     var status_deps = status_capture.deps();
-    status_deps.load_startup_status = stubLoadStartupStatus;
+    status_deps.load_startup_status_without_credentials = stubLoadStartupStatusWithoutCredentials;
     const status_result = try runIfRequestedWithDeps(
         alloc,
         &.{ @constCast("status"), @constCast("--json") },
@@ -5370,12 +5370,14 @@ fn stubLoadCatalogStartupState(
 fn stubLoadSelectedStartupState(
     alloc: Allocator,
     default_model: []const u8,
+    default_fast_mode: bool,
     default_agent_step_limit: usize,
     seed: connection_registry.Seed,
 ) !app_lifecycle.StartupState {
     var state = try stubLoadStatusBindingState(
         alloc,
         default_model,
+        default_fast_mode,
         default_agent_step_limit,
         seed,
     );
@@ -5425,6 +5427,7 @@ fn stubLoadStartupStatusWithoutCredentials(
 fn stubLoadStatusBindingState(
     alloc: Allocator,
     default_model: []const u8,
+    default_fast_mode: bool,
     default_agent_step_limit: usize,
     seed: connection_registry.Seed,
 ) !app_lifecycle.StartupState {
@@ -5436,6 +5439,7 @@ fn stubLoadStatusBindingState(
         null,
         .unavailable,
     );
+    state.fast_mode = default_fast_mode;
     return state;
 }
 

@@ -306,6 +306,7 @@ test "Vercel and test peer traffic follows profile route and prepared dispatch a
             var sink_error: ?anyerror = null;
             var cancel = std.atomic.Value(bool).init(false);
             var delivery = stream_provider.DeliveryCertainty.init();
+            var attempt_evidence: stream_provider.AttemptEvidence = .{};
             try adapter.stream(alloc, .{
                 .model_request = .{
                     .tools = &.{},
@@ -321,6 +322,7 @@ test "Vercel and test peer traffic follows profile route and prepared dispatch a
                 .trace_ctx = .{},
                 .content_capture_limit = null,
                 .delivery = &delivery,
+                .attempt_evidence = &attempt_evidence,
                 .cancel_flag = &cancel,
             }, .{
                 .context = @ptrCast(&state),

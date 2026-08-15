@@ -1952,6 +1952,23 @@ fn prepareExternalFailureDiagnostic(
         null;
     defer if (owned_source) |source| alloc.free(source);
     const source = owned_source orelse if (trimmed.len > 0) trimmed else fallback;
+    return sanitizeFailureDiagnostic(alloc, source, fallback);
+}
+
+fn prepareNormalizedFailureDiagnostic(
+    alloc: Allocator,
+    raw: []const u8,
+    fallback: []const u8,
+) !types.ModelFailureDiagnostic {
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    return sanitizeFailureDiagnostic(alloc, if (trimmed.len > 0) trimmed else fallback, fallback);
+}
+
+fn sanitizeFailureDiagnostic(
+    alloc: Allocator,
+    source: []const u8,
+    fallback: []const u8,
+) !types.ModelFailureDiagnostic {
     const masked = try text_utils.maskSecrets(alloc, source);
     defer if (masked.ptr != source.ptr) alloc.free(masked);
 
@@ -3566,11 +3583,18 @@ fn processQueuedPromptLoop(
                     .rate_limited
                 else
                     .provider_unavailable;
-                const diagnostic = try httpFailureDiagnostic(
-                    arena,
-                    stream_result.status,
-                    stream_result.err_body orelse "",
-                );
+                const diagnostic = if (failure.diagnostic_summary) |value|
+                    try prepareNormalizedFailureDiagnostic(
+                        arena,
+                        value,
+                        defaultRecoveryDiagnosticText(cause),
+                    )
+                else
+                    try prepareExternalFailureDiagnostic(
+                        arena,
+                        failure.detail orelse "",
+                        defaultRecoveryDiagnosticText(cause),
+                    );
                 latest_recovery_diagnostic = diagnostic;
                 const route_changed = disableFastRouteAfterFailure(
                     &route_fast_mode,

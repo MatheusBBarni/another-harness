@@ -1373,7 +1373,26 @@ test "terminal tool schema exposes one nullable object backed by the terminal ac
     );
 }
 
-test "terminal gateway advertisement projects a provider-compatible object schema" {
+test "terminal action contracts and admission agree on every action field" {
+    const branches = &terminal_action_schemas;
+    try std.testing.expectEqual(std.meta.tags(terminal_contracts.Action).len, branches.len);
+
+    for (branches) |branch| {
+        const action_property = schemaProperty(branch, "action").?;
+        try std.testing.expectEqual(@as(usize, 1), action_property.enum_values.len);
+        const action = std.meta.stringToEnum(
+            terminal_contracts.Action,
+            action_property.enum_values[0],
+        ) orelse return error.TestUnexpectedResult;
+        const admitted_fields = terminal_impl.actionFieldNames(action);
+        try std.testing.expectEqual(branch.properties.len, admitted_fields.len);
+        for (branch.properties, admitted_fields) |property, admitted_field| {
+            try std.testing.expectEqualStrings(property.name, admitted_field);
+        }
+    }
+}
+
+test "terminal advertisement projects a provider-neutral object schema" {
     const alloc = std.testing.allocator;
     var projection = try tool_advertisement.buildGatewayToolProjectionForSet(
         alloc,
@@ -1381,51 +1400,26 @@ test "terminal gateway advertisement projects a provider-compatible object schem
         .{},
     );
     defer projection.deinit(alloc);
-    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, projection.tools_json, .{});
-    defer parsed.deinit();
 
-    var terminal_schema: ?std.json.ObjectMap = null;
-    for (parsed.value.array.items) |tool_value| {
-        if (tool_value != .object) continue;
-        const name = tool_value.object.get("name") orelse continue;
-        if (name != .string or !std.mem.eql(u8, name.string, "terminal")) continue;
-        terminal_schema = tool_value.object.get("inputSchema").?.object;
-        break;
+    var terminal_schema: ?gateway_schema.ObjectSchema = null;
+    for (projection.tools) |tool| {
+        if (std.mem.eql(u8, tool.name, "terminal")) {
+            terminal_schema = tool.input_schema;
+            break;
+        }
     }
 
     const input_schema = terminal_schema orelse return error.TestExpectedEqual;
-    try std.testing.expectEqualStrings("object", input_schema.get("type").?.string);
-    try std.testing.expect(input_schema.get("oneOf") == null);
-    try std.testing.expectEqual(false, input_schema.get("additionalProperties").?.bool);
-    const properties = input_schema.get("properties").?.object;
-    try std.testing.expectEqual(terminal_gateway_properties.len, properties.count());
-    const write_alternatives = properties.get("write").?.object.get("anyOf").?.array.items;
-    const write_properties = write_alternatives[0].object.get("properties").?.object;
-    try std.testing.expectEqualStrings(
-        "ASCII code of the printable key designator used with Ctrl; for example, 108 (`l`) for Ctrl+L. Send the printable key code, not the resulting control byte.",
-        write_properties.get("controls").?.object.get("description").?.string,
-    );
+    try std.testing.expectEqual(@as(usize, 0), input_schema.one_of.len);
+    try std.testing.expectEqual(false, input_schema.additional_properties.?);
+    try std.testing.expectEqual(terminal_gateway_properties.len, input_schema.properties.len);
+    const action_property = schemaProperty(input_schema, "action") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(
-        terminal_actions.len,
-        properties.get("action").?.object.get("enum").?.array.items.len,
+        std.meta.tags(terminal_contracts.Action).len,
+        action_property.enum_values.len,
     );
-    const required = input_schema.get("required").?.array.items;
-    try std.testing.expectEqual(terminal_gateway_properties.len, required.len);
-    for (terminal_gateway_properties, required) |property, required_name| {
-        try std.testing.expectEqualStrings(property.name, required_name.string);
-        if (std.mem.eql(u8, property.name, "action")) continue;
-        const nullable = properties.get(property.name).?.object;
-        const alternatives = nullable.get("anyOf").?.array.items;
-        try std.testing.expectEqual(@as(usize, 2), alternatives.len);
-        try std.testing.expectEqualStrings("null", alternatives[1].object.get("type").?.string);
-        try std.testing.expect(
-            std.mem.find(
-                u8,
-                nullable.get("description").?.string,
-                "Set null when the selected action does not use this field.",
-            ) != null,
-        );
-    }
+    try std.testing.expectEqual(@as(usize, 1), input_schema.required.len);
+    try std.testing.expectEqualStrings("action", input_schema.required[0]);
 }
 
 fn allowTerminalTool(
