@@ -1365,9 +1365,7 @@ pub const Usage = struct {
     pub fn startReconciliation(self: *Usage, alloc: Allocator) void {
         self.reconciliation_mutex.lockUncancelable(io_mod.getIo());
         defer self.reconciliation_mutex.unlock(io_mod.getIo());
-        if (comptime builtin.os.tag != .wasi) {
-            _ = self.reconciliation_work_epoch.fetchAdd(1, .seq_cst);
-        }
+        _ = self.reconciliation_work_epoch.fetchAdd(1, .seq_cst);
         if (self.reconciliation_thread) |thread| {
             if (!self.reconciliation_done.load(.seq_cst)) return;
             self.reconciliation_cancel.store(true, .seq_cst);
@@ -1377,7 +1375,6 @@ pub const Usage = struct {
             self.reconciliation_cancel.store(false, .seq_cst);
         }
         if (builtin.is_test) return;
-        if (comptime builtin.os.tag == .wasi) return;
 
         self.mutex.lockUncancelable(io_mod.getIo());
         const still_has_pending = self.pending.items.len > 0;
