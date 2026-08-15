@@ -20,6 +20,7 @@ const gateway_generation_usage = @import("../gateway/generation_usage.zig");
 const gateway_provider = @import("../core/gateway/gateway_provider.zig");
 const model_capabilities = @import("../core/config/model_capabilities.zig");
 const model_catalog = @import("../core/gateway/model_catalog.zig");
+const model_descriptors = @import("gateway/model_descriptors.zig");
 const output_contracts = @import("../core/output/output_contracts.zig");
 const shared_types = @import("../core/shared/types.zig");
 const session_usage = @import("../core/session/session_usage.zig");
@@ -123,6 +124,7 @@ pub const oauth_transport_provider = oauth_transport.Provider{
 };
 
 pub const generation_usage_provider = gateway_generation_usage.provider;
+pub const model_descriptor_provider = model_descriptors.provider;
 
 pub const agent_stream_provider = agent_stream_provider_contract.Provider{
     .build_fn = buildAgentRequest,
