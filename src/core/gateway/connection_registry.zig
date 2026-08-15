@@ -185,17 +185,25 @@ pub const Stored = struct {
     }
 };
 
+pub const PersistenceOutcome = union(enum) {
+    committed,
+    /// The replacement became authoritative, but its final durability could
+    /// not be confirmed. The registry must install the replacement before
+    /// returning the persistence error to its caller.
+    replaced_indeterminate: anyerror,
+};
+
 pub const Persistence = struct {
     context: ?*anyopaque = null,
-    write_fn: *const fn (?*anyopaque, Allocator, Snapshot) anyerror!void,
+    write_fn: *const fn (?*anyopaque, Allocator, Snapshot) anyerror!PersistenceOutcome,
 
     pub const unavailable = Persistence{ .write_fn = unavailableWrite };
 
-    fn write(self: Persistence, alloc: Allocator, snapshot: Snapshot) !void {
-        try self.write_fn(self.context, alloc, snapshot);
+    fn write(self: Persistence, alloc: Allocator, snapshot: Snapshot) !PersistenceOutcome {
+        return self.write_fn(self.context, alloc, snapshot);
     }
 
-    fn unavailableWrite(_: ?*anyopaque, _: Allocator, _: Snapshot) anyerror!void {
+    fn unavailableWrite(_: ?*anyopaque, _: Allocator, _: Snapshot) anyerror!PersistenceOutcome {
         return error.ConnectionPersistenceUnavailable;
     }
 };
@@ -394,12 +402,16 @@ pub const Runtime = struct {
     }
 
     fn commit(self: *Self, next: *Self) !void {
-        try self.persistence.write(self.alloc, next.snapshot());
+        const outcome = try self.persistence.write(self.alloc, next.snapshot());
         for (self.profiles.items) |*profile_value| profile_value.deinit(self.alloc);
         self.profiles.deinit(self.alloc);
         self.profiles = next.profiles;
         self.selected_index = next.selected_index;
         next.profiles = .empty;
+        switch (outcome) {
+            .committed => {},
+            .replaced_indeterminate => |err| return err,
+        }
     }
 
     fn indexOf(self: *const Self, id: []const u8) ?usize {
@@ -434,10 +446,12 @@ pub fn parseStored(alloc: Allocator, value: std.json.Value) !Stored {
     const owned_selected = try alloc.dupe(u8, parsed.value.selected);
     errdefer alloc.free(owned_selected);
     const owned_profiles = try profiles.toOwnedSlice(alloc);
-    var result = Stored{ .selected_id = owned_selected, .profiles = owned_profiles };
-    errdefer result.deinit(alloc);
-    try validateSnapshot(result.snapshot());
-    return result;
+    errdefer {
+        for (owned_profiles) |*profile_value| profile_value.deinit(alloc);
+        alloc.free(owned_profiles);
+    }
+    try validateSnapshot(.{ .selected_id = owned_selected, .profiles = owned_profiles });
+    return .{ .selected_id = owned_selected, .profiles = owned_profiles };
 }
 
 pub fn validate(snapshot_value: Snapshot) !void {
@@ -537,13 +551,14 @@ const PersistenceCapture = struct {
         return .{ .context = self, .write_fn = write };
     }
 
-    fn write(raw: ?*anyopaque, alloc: std.mem.Allocator, snapshot: Snapshot) !void {
+    fn write(raw: ?*anyopaque, alloc: std.mem.Allocator, snapshot: Snapshot) !PersistenceOutcome {
         const self: *PersistenceCapture = @ptrCast(@alignCast(raw.?));
         var stored = try Stored.fromSnapshot(alloc, snapshot);
         errdefer stored.deinit(alloc);
         if (self.stored) |*previous| previous.deinit(alloc);
         self.stored = stored;
         self.writes += 1;
+        return .committed;
     }
 };
 
@@ -554,10 +569,33 @@ const RejectingPersistence = struct {
         return .{ .context = self, .write_fn = write };
     }
 
-    fn write(raw: ?*anyopaque, _: Allocator, _: Snapshot) !void {
+    fn write(raw: ?*anyopaque, _: Allocator, _: Snapshot) !PersistenceOutcome {
         const self: *RejectingPersistence = @ptrCast(@alignCast(raw.?));
         self.writes += 1;
         return error.ConnectionWriteFailed;
+    }
+};
+
+const IndeterminatePersistence = struct {
+    writes: usize = 0,
+    stored: ?Stored = null,
+
+    fn deinit(self: *IndeterminatePersistence, alloc: Allocator) void {
+        if (self.stored) |*stored| stored.deinit(alloc);
+    }
+
+    fn persistence(self: *IndeterminatePersistence) Persistence {
+        return .{ .context = self, .write_fn = write };
+    }
+
+    fn write(raw: ?*anyopaque, alloc: Allocator, snapshot: Snapshot) !PersistenceOutcome {
+        const self: *IndeterminatePersistence = @ptrCast(@alignCast(raw.?));
+        var stored = try Stored.fromSnapshot(alloc, snapshot);
+        errdefer stored.deinit(alloc);
+        if (self.stored) |*previous| previous.deinit(alloc);
+        self.stored = stored;
+        self.writes += 1;
+        return .{ .replaced_indeterminate = error.SettingsCommitIndeterminate };
     }
 };
 
@@ -711,4 +749,25 @@ test "profile parser rejects secret-bearing and unsupported endpoint shapes" {
     );
     defer unsupported_value.deinit();
     try std.testing.expectError(error.ProtocolRequired, parseStored(alloc, unsupported_value.value));
+}
+
+test "profile parser safely rejects duplicate ids and unknown selection" {
+    const alloc = std.testing.allocator;
+    var duplicate_value = try std.json.parseFromSlice(
+        std.json.Value,
+        alloc,
+        "{\"selected\":\"vercel\",\"profiles\":[{\"id\":\"vercel\",\"display_name\":\"Vercel\",\"adapter_id\":\"gateway\",\"credential_ref\":\"automatic\",\"remembered_model\":\"model\"},{\"id\":\"vercel\",\"display_name\":\"Duplicate\",\"adapter_id\":\"gateway\",\"credential_ref\":\"automatic\",\"remembered_model\":\"model\"}]}",
+        .{},
+    );
+    defer duplicate_value.deinit();
+    try std.testing.expectError(error.DuplicateConnection, parseStored(alloc, duplicate_value.value));
+
+    var unknown_value = try std.json.parseFromSlice(
+        std.json.Value,
+        alloc,
+        "{\"selected\":\"missing\",\"profiles\":[{\"id\":\"vercel\",\"display_name\":\"Vercel\",\"adapter_id\":\"gateway\",\"credential_ref\":\"automatic\",\"remembered_model\":\"model\"}]}",
+        .{},
+    );
+    defer unknown_value.deinit();
+    try std.testing.expectError(error.UnknownSelectedConnection, parseStored(alloc, unknown_value.value));
 }

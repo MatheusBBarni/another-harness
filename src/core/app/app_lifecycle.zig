@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const io_mod = @import("../shared/io.zig");
 const agent_steps = @import("../config/agent_steps.zig");
 const config_runtime = @import("../config/config_runtime.zig");
@@ -224,6 +225,24 @@ pub const StartupState = struct {
         const value = self.permission_rules;
         self.permission_rules = .{};
         return value;
+    }
+
+    pub fn normalizeModels(
+        self: *StartupState,
+        alloc: Allocator,
+        descriptors: model_catalog.ModelDescriptorProvider,
+    ) !void {
+        const selected = descriptors.fallback(self.selected_model);
+        const configured = descriptors.fallback(self.configured_model);
+        const normalized_selected = try alloc.dupe(u8, selected.id);
+        errdefer alloc.free(normalized_selected);
+        const normalized_configured = try alloc.dupe(u8, configured.id);
+
+        alloc.free(self.selected_model);
+        alloc.free(self.configured_model);
+        self.selected_model = normalized_selected;
+        self.configured_model = normalized_configured;
+        self.fast_mode = self.fast_mode or selected.selected_fast_mode;
     }
 };
 

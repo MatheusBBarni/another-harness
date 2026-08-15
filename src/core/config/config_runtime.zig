@@ -825,9 +825,15 @@ fn persistConnectionSnapshot(
     _: ?*anyopaque,
     alloc: Allocator,
     snapshot: connection_registry.Snapshot,
-) anyerror!void {
-    var outcome = try setConnectionSnapshot(alloc, snapshot);
+) anyerror!connection_registry.PersistenceOutcome {
+    var outcome = setConnectionSnapshot(alloc, snapshot) catch |err| {
+        if (err == error.SettingsCommitIndeterminate) {
+            return .{ .replaced_indeterminate = err };
+        }
+        return err;
+    };
     defer outcome.deinit(alloc);
+    return .committed;
 }
 
 pub fn setWorkspacePreferences(
