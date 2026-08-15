@@ -559,8 +559,6 @@ fn loadVercelStatus(
     } };
 }
 
-pub const model_descriptor_provider = model_descriptors.provider;
-
 const AdapterEventBridge = struct {
     events: agent_stream_provider_contract.EventSink,
     failure: ?anyerror = null,
