@@ -216,6 +216,7 @@ pub const Context = struct {
     workspace_executor: ?js_host_workspace.Executor = null,
     host_sandbox_default: tool_admission.HostSandboxDefault = .none,
     model_capability_resolver: ?model_capabilities.Resolver = null,
+    model_descriptor_resolver: ?model_capabilities.Resolver = null,
     /// False when running outside an interactive TUI (e.g. ACP). Tools
     /// that require a live user (like `ask_user_question`) short-circuit
     /// in that case.
