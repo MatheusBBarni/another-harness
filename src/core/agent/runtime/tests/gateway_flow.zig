@@ -4473,6 +4473,8 @@ test "processQueuedPrompt restores connectivity checkpoints through evidence" {
             .connection_id = @constCast("vercel"),
             .adapter_kind = @constCast("vercel_ai_gateway"),
             .permission_review_model_id = null,
+            .vision_model_id = @constCast("google/gemini-2.5-flash"),
+            .subagent_model_id = @constCast("zai/glm-5.2"),
         },
         .turn_id = 45,
         .user = .{ .text = @constCast("user prompt") },

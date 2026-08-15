@@ -1342,6 +1342,7 @@ fn streamPermissionReviewAttempt(
     request: permission_auto_classifier.AccountedRequest,
 ) error{OutOfMemory}!permission_auto_classifier.AccountedOutcome {
     var delivery = runtime_gateway_step.DeliveryCertainty.init();
+    var attempt_evidence: runtime_gateway_step.AttemptEvidence = .{};
     var failure_info: ?runtime_gateway_step.StreamFailureInfo = null;
     var callback_context: u8 = 0;
     var result = runtime_gateway_step.streamModelRequest(
@@ -1350,12 +1351,13 @@ fn streamPermissionReviewAttempt(
         request.route,
         request.credential,
         request.tenant,
+        null,
         request.model,
         1,
         request.model_request,
         null,
-        null,
         &delivery,
+        &attempt_evidence,
         &callback_context,
         discardPermissionReviewChunk,
         null,
