@@ -635,7 +635,7 @@ pub const Runtime = struct {
                         "interactive model catalog lookup outcome={s} model={s}",
                         .{ if (state == .failed) "cache_failed" else "cache_unavailable", model },
                     );
-                    return model_capabilities.capabilitiesForModel(model);
+                    return fallback;
                 },
                 .ready => unreachable,
             }
@@ -1367,7 +1367,7 @@ test "model cache warmup publishes a snapshot and filtered completion" {
 
 test "model menu owns resolved catalog state and filters without changing catalog order" {
     const alloc = std.testing.allocator;
-    var runtime = Runtime.init(alloc, "/v1/models");
+    var runtime = Runtime.initWithDescriptorProvider(alloc, "/v1/models", test_builtin_gateway.model_descriptor_provider);
     defer runtime.deinit();
 
     const entries = [_]model_catalog.ModelCatalogEntry{
@@ -1563,7 +1563,7 @@ test "model cache reset replaces ready public catalog with team catalog" {
 
 test "model cache request resolution distinguishes readiness miss failure idle and cancellation" {
     const alloc = std.testing.allocator;
-    var runtime = Runtime.init(alloc, "/v1/models");
+    var runtime = Runtime.initWithDescriptorProvider(alloc, "/v1/models", test_builtin_gateway.model_descriptor_provider);
     defer runtime.deinit();
 
     {
@@ -1585,21 +1585,25 @@ test "model cache request resolution distinguishes readiness miss failure idle a
 
     var cancel_flag = std.atomic.Value(bool).init(false);
     const ready = try runtime.resolveForRequest("provider/new-reasoning-model", &cancel_flag);
-    try std.testing.expect(model_capabilities.reasoningEffortSupported(ready, types.ReasoningEffort.literal("future-tier")));
-    try std.testing.expect(!model_capabilities.reasoningEffortSupported(ready, types.ReasoningEffort.literal("max")));
+    try std.testing.expectEqual(model_capabilities.CapabilitySource.catalog, ready.source);
+    try std.testing.expect(model_capabilities.reasoningEffortSupported(ready.capabilities, types.ReasoningEffort.literal("future-tier")));
+    try std.testing.expect(!model_capabilities.reasoningEffortSupported(ready.capabilities, types.ReasoningEffort.literal("max")));
 
     const missing = try runtime.resolveForRequest("zai/glm-5.2", &cancel_flag);
-    try std.testing.expect(!missing.supports_fast_mode);
-    try std.testing.expectEqual(@as(usize, 0), missing.reasoning_efforts.len);
+    try std.testing.expectEqual(model_capabilities.CapabilitySource.@"adapter-static", missing.source);
+    try std.testing.expect(!missing.capabilities.supports_fast_mode);
+    try std.testing.expectEqual(@as(usize, 0), missing.capabilities.reasoning_efforts.len);
 
     runtime.state = .idle;
     const idle = try runtime.resolveForRequest("zai/glm-5.2", &cancel_flag);
-    try std.testing.expect(!idle.supports_fast_mode);
-    try std.testing.expectEqual(@as(usize, 0), idle.reasoning_efforts.len);
+    try std.testing.expectEqual(model_capabilities.CapabilitySource.@"adapter-static", idle.source);
+    try std.testing.expect(!idle.capabilities.supports_fast_mode);
+    try std.testing.expectEqual(@as(usize, 0), idle.capabilities.reasoning_efforts.len);
 
     runtime.state = .failed;
     const failed = try runtime.resolveForRequest("zai/glm-5.2", &cancel_flag);
-    try std.testing.expect(!failed.supports_fast_mode);
+    try std.testing.expectEqual(model_capabilities.CapabilitySource.@"adapter-static", failed.source);
+    try std.testing.expect(!failed.capabilities.supports_fast_mode);
 
     const ReadyTransition = struct {
         fn run(cache: *Runtime) void {
@@ -1613,7 +1617,8 @@ test "model cache request resolution distinguishes readiness miss failure idle a
     const transition_thread = try std.Thread.spawn(.{}, ReadyTransition.run, .{&runtime});
     defer transition_thread.join();
     const warmed = try runtime.resolveForRequest("provider/new-reasoning-model", &cancel_flag);
-    try std.testing.expect(model_capabilities.reasoningEffortSupported(warmed, types.ReasoningEffort.literal("future-tier")));
+    try std.testing.expectEqual(model_capabilities.CapabilitySource.catalog, warmed.source);
+    try std.testing.expect(model_capabilities.reasoningEffortSupported(warmed.capabilities, types.ReasoningEffort.literal("future-tier")));
 
     runtime.state = .loading;
     cancel_flag.store(true, .seq_cst);
