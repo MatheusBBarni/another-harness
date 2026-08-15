@@ -374,6 +374,7 @@ pub fn loadCatalogStartupStateWithRegistry(
     registry: adapter_registry.AdapterRegistry,
     secret_store: host.SecretStore,
     default_model: []const u8,
+    default_fast_mode: bool,
     default_agent_step_limit: usize,
     connection_seed: connection_registry.Seed,
 ) !StartupState {
@@ -384,6 +385,7 @@ pub fn loadCatalogStartupStateWithRegistry(
         host.unavailable_secret_store,
         workspace_root,
         default_model,
+        default_fast_mode,
         default_agent_step_limit,
         connection_seed,
         null,
@@ -2337,6 +2339,7 @@ test "registry startup preserves invalid credential references as configuration 
         registry,
         host.unavailable_secret_store,
         "default-model",
+        false,
         12,
         seed,
     );

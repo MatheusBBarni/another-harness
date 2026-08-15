@@ -336,6 +336,7 @@ fn resolveTopLevelAuth(alloc: Allocator, cfg: Config, deps: RunDeps) !TopLevelAu
     var startup = try deps.load_startup_state_without_credentials(
         alloc,
         cfg.default_model,
+        cfg.default_fast_mode,
         cfg.default_agent_step_limit,
         cfg.gateway_provider.connection_seed,
     );
@@ -5229,6 +5230,7 @@ fn failingStartupState(
 fn failingStartupStateWithoutCredentials(
     _: Allocator,
     _: []const u8,
+    _: bool,
     _: usize,
     _: connection_registry.Seed,
 ) !app_lifecycle.StartupState {
