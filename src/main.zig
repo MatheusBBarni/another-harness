@@ -451,8 +451,10 @@ const App = struct {
         try self.flushRequestedFrame();
     }
 
-    pub fn providerAdapter(_: *const Self) agent_stream_provider.ProviderAdapter {
-        return builtin_gateway.provider_adapter;
+    pub fn providerAdapter(self: *const Self) agent_stream_provider.ProviderAdapter {
+        var adapter = builtin_gateway.provider_adapter;
+        adapter.legacy_provider = self.agentStreamProvider();
+        return adapter;
     }
 
     pub fn secretStore(self: *const Self) host.SecretStore {
