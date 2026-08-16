@@ -607,7 +607,7 @@ describe("gateway stream lifecycle", () => {
     const imagePath = join(root.workspace, "fixture.png");
     const commandPath = join(root.workspace, "reviewed.txt");
     copyFileSync(
-      join(REPO_ROOT, "apps/marketing/public/placeholder-logo.png"),
+      join(REPO_ROOT, "tests/e2e/fixtures/placeholder-logo.png"),
       imagePath,
     );
     const parentModel = "primary-a";
