@@ -462,6 +462,23 @@ const App = struct {
         alloc: Allocator,
         route: *const route_snapshot.RouteSnapshot,
     ) !agent_runtime.RouteCredential {
+        const selected = try self.auth.selectedConnectionProfile();
+        if (std.mem.eql(u8, route.connection_id, selected.id)) {
+            if (self.auth.gatewayCredential()) |credential| {
+                if (!std.mem.eql(u8, route.credential_ref, "automatic") and
+                    !std.mem.eql(u8, route.credential_ref, @tagName(credential.source)))
+                {
+                    return error.RouteCredentialMismatch;
+                }
+                var result = agent_runtime.RouteCredential{
+                    .credential = try alloc.dupe(u8, credential.api_key),
+                    .legacy_source = credential.source,
+                };
+                errdefer result.deinit(alloc);
+                result.tenant = if (credential.gateway_team) |value| try alloc.dupe(u8, value) else null;
+                return result;
+            }
+        }
         var credential = try self.auth.resolveCredentialReference(alloc, route.credential_ref);
         defer credential.deinit(alloc);
         const tenant = if (credential.gatewayTeam()) |value| try alloc.dupe(u8, value) else null;
