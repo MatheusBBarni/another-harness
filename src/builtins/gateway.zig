@@ -478,6 +478,7 @@ fn vercelSignInBrowserUrl(raw: ?*anyopaque, alloc: Allocator) Allocator.Error!?[
 
 fn pollVercelSignIn(raw: ?*anyopaque, alloc: Allocator) Allocator.Error!adapter_auth.SignInTransition {
     const state: *VercelSignIn = @ptrCast(@alignCast(raw.?));
+    state.runtime.pulse(alloc);
     return switch (state.runtime.pollTransition(alloc)) {
         .none => .none,
         .cancelled => .cancelled,
