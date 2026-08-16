@@ -692,7 +692,8 @@ describe("gateway stream lifecycle", () => {
       AI_GATEWAY_API_KEY: "credential-a",
       VERCEL_OIDC_TOKEN: "credential-b",
       FX_GATEWAY_BASE_URL: gatewayA.baseUrl,
-      FX_E2E_GATEWAY_MODELS_URL: `${gatewayA.baseUrl}/v1/models`,
+      FX_E2E_GATEWAY_MODELS_URL:
+        `${gatewayA.baseUrl}/coding-agent/v1/models`,
       FX_MODEL: undefined,
       FX_AUTO_UPGRADE: "0",
     };
