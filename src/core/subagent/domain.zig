@@ -593,6 +593,25 @@ pub const QueuedMessage = struct {
             .created_at_ms = self.created_at_ms,
         };
     }
+
+    pub fn jsonStringify(self: QueuedMessage, writer: anytype) !void {
+        try writer.beginObject();
+        try writer.objectField("id");
+        try writer.write(self.id);
+        try writer.objectField("source_id");
+        try writer.write(self.source_id);
+        try writer.objectField("content");
+        try writer.write(self.content);
+        try writer.objectField("root_user_intent_context");
+        try writer.write(self.root_user_intent_context);
+        try writer.objectField("status");
+        try writer.write(self.status);
+        try writer.objectField("cancellation_reason");
+        try writer.write(self.cancellation_reason);
+        try writer.objectField("created_at_ms");
+        try writer.write(self.created_at_ms);
+        try writer.endObject();
+    }
 };
 
 pub const EventKind = union(enum) {
@@ -2024,5 +2043,47 @@ test "queued message clone owns inherited root user context" {
     try std.testing.expectEqualStrings(
         "Inspect storage only.",
         cloned.root_user_messages[1],
+    );
+}
+
+test "queued message inspection JSON keeps durable route internal" {
+    const alloc = std.testing.allocator;
+    const route = route_snapshot.RouteSnapshot{
+        .connection_id = "connection-a",
+        .adapter_kind = "loopback",
+        .endpoint = "http://127.0.0.1/a",
+        .protocol = "loopback",
+        .credential_ref = "key-a",
+        .primary_model_id = "child-a",
+        .permission_review_model_id = "reviewer-a",
+        .vision_model_id = "vision-a",
+        .subagent_model_id = "child-a",
+        .capabilities = .{
+            .supports_reasoning = true,
+            .reasoning_efforts = .fromSlice(&.{types.ReasoningEffort.literal("high")}),
+        },
+        .capability_source = .configured,
+        .selected_fast_mode = false,
+        .fast_model_suffix = null,
+    };
+    const source = QueuedMessage{
+        .id = @constCast("work-1"),
+        .source_id = @constCast("root-session"),
+        .content = @constCast("inspect the requested file"),
+        .root_user_intent_context = @constCast("current request"),
+        .route = route,
+        .status = .interrupted,
+        .cancellation_reason = @constCast("resume this subagent"),
+        .created_at_ms = 7,
+    };
+    var message = try source.clone(alloc);
+    defer message.deinit(alloc);
+
+    var encoded: std.Io.Writer.Allocating = .init(alloc);
+    defer encoded.deinit();
+    try std.json.Stringify.value(message, .{}, &encoded.writer);
+    try std.testing.expectEqualStrings(
+        "{\"id\":\"work-1\",\"source_id\":\"root-session\",\"content\":\"inspect the requested file\",\"root_user_intent_context\":\"current request\",\"status\":\"interrupted\",\"cancellation_reason\":\"resume this subagent\",\"created_at_ms\":7}",
+        encoded.writer.buffered(),
     );
 }
