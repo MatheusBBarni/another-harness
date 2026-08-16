@@ -228,6 +228,10 @@ fn normalizedSource(source: credentials.Source) adapter_auth.Source {
     };
 }
 
+pub fn credentialOverrideSource(reference: []const u8) !adapter_auth.Source {
+    return normalizedSource((try credentialSourceFromReference(reference)) orelse .ai_gateway_api_key);
+}
+
 fn normalizedCatalogAccess(access: credentials.CatalogAccess) adapter_auth.CatalogAccess {
     return switch (access) {
         .authenticated => .authenticated,
