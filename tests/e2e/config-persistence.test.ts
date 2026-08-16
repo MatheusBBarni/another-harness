@@ -2524,7 +2524,8 @@ describe("connection registry persistence", () => {
           HOME: home,
           FX_GATEWAY_BASE_URL: selectedGateway.baseUrl,
           FX_GATEWAY_CHAT_URL: nonSelectedGateway.chatUrl,
-          FX_E2E_GATEWAY_MODELS_URL: `${selectedGateway.baseUrl}/v1/models`,
+          FX_E2E_GATEWAY_MODELS_URL:
+            `${selectedGateway.baseUrl}/coding-agent/v1/models`,
         };
 
         const catalog = await runFx(["models", "--json"], {
