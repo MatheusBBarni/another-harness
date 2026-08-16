@@ -380,7 +380,6 @@ pub fn loadCatalogStartupStateWithRegistry(
         default_agent_step_limit,
         connection_seed,
         null,
-        null,
     );
     errdefer state.deinit(alloc);
     if (try migrateLegacyCredentialReference(
