@@ -1376,13 +1376,6 @@ fn handleInitialize(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message
     state.workspace_root = startup.takeWorkspaceRoot();
     state.workspace_access = startup.takeWorkspaceAccess();
     state.connections = startup.takeConnections();
-    if (state.cfg.credential_override) |override| {
-        if (override.len > 0) {
-            state.api_key = try alloc.dupe(u8, override);
-            state.credential_source = .ai_gateway_api_key;
-            state.credential_connection_id = state.connections.?.selectedProfile().id;
-        }
-    }
 
     if (state.cfg.model_override) |override| {
         state.selected_model = try alloc.dupe(u8, override);

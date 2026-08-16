@@ -34,7 +34,6 @@ pub const Config = struct {
     mode_registry: mode_registry.Registry,
     devbox_provider: ?devbox_executor.Provider = null,
     model_override: ?[]const u8 = null,
-    credential_override: ?[]const u8 = null,
     home_override: ?[]const u8 = null,
     workspace_root_override: ?[]const u8 = null,
     log_file: ?[]const u8 = null,
