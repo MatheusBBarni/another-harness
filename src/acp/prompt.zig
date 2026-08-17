@@ -1061,8 +1061,6 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
         .push_command_output_complete = pushCommandOutputComplete,
         .push_provider_failure = pushProviderFailure,
         .resolve_route_credential = resolveRouteCredential,
-        .available_model_descriptor = availableModelDescriptor,
-        .resolve_model_descriptor = resolveModelDescriptor,
         .format_tool_execution_error = formatToolExecutionError,
         .record_tool_call_rejected = recordToolCallRejected,
         .usage = &session.session_rt.usage,
@@ -3260,7 +3258,7 @@ test "ACP auth failure emits a valid detail-free JSON-RPC notification" {
         deps.ctx,
         .authentication,
         "provider rejected access-token-secret",
-        if (state.active_session.?.route_source) |source| auth_runtime.normalizedSource(source) else null,
+        state.active_session.?.route_source,
     );
     try capture.sync(io_mod.getIo());
 

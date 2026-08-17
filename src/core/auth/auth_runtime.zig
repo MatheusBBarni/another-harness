@@ -14,10 +14,6 @@ const max_entered_secret_bytes: usize = 8 * 1024;
 const max_secret_mask_glyphs: usize = 32;
 const max_team_query_bytes: usize = 256;
 
-pub fn normalizedSource(source: adapter_auth.Source) adapter_auth.Source {
-    return source;
-}
-
 pub const FailureReason = enum {
     credential_refresh_failed,
     authentication_failed,
@@ -639,12 +635,6 @@ pub const Runtime = struct {
         return profile;
     }
 
-    pub fn resolveCredentialReference(self: *const Self, alloc: Allocator, reference: []const u8) !adapter_auth.Credential {
-        var profile = try self.selectedConnectionProfile();
-        profile.credential_ref = @constCast(reference);
-        return self.resolveProfileCredential(alloc, profile, .if_needed, null);
-    }
-
     pub fn resolveProfileCredential(
         self: *const Self,
         alloc: Allocator,
@@ -721,11 +711,6 @@ pub const Runtime = struct {
         return try cloneCredential(alloc, credential);
     }
 
-    pub fn addConnection(self: *Self, input: connection_registry.ProfileInput) !void {
-        const connections = if (self.connections) |*value| value else return error.ConnectionRegistryUnavailable;
-        try connections.add(input);
-    }
-
     pub fn selectConnection(self: *Self, alloc: Allocator, id: []const u8) !bool {
         const connections = if (self.connections) |*value| value else return error.ConnectionRegistryUnavailable;
         const changed = connections.select(id) catch |err| {
@@ -743,11 +728,6 @@ pub const Runtime = struct {
         self.clearSourceInventory(alloc);
         connections.markSelectedDisconnected(.not_checked);
         return true;
-    }
-
-    pub fn connectionStatus(self: *const Self, id: []const u8) !connection_registry.Status {
-        const connections = if (self.connections) |*value| value else return error.ConnectionRegistryUnavailable;
-        return connections.status(id);
     }
 
     pub fn rememberSelectedConnectionModel(self: *Self, model: []const u8) !void {
@@ -1428,19 +1408,6 @@ pub const Runtime = struct {
         };
         defer credential.deinit(alloc);
         return self.adoptCredential(alloc, &credential);
-    }
-
-    pub fn refreshSelectedCredential(self: *Self, alloc: Allocator, mode: adapter_auth.RefreshMode) !?[]u8 {
-        const source_value = self.credentialSource() orelse return null;
-        const profile = try self.selectedConnectionProfile();
-        var credential = self.resolveProfileCredentialWithSourceResolution(alloc, profile, mode, source_value.id, .exact) catch |err| switch (err) {
-            error.MissingCredential => return null,
-            else => return err,
-        };
-        defer credential.deinit(alloc);
-        const bytes = credential.secret_bytes;
-        credential.secret_bytes = &.{};
-        return bytes;
     }
 
     pub fn logoutSelected(self: *Self, alloc: Allocator) !adapter_auth.LogoutOutcome {

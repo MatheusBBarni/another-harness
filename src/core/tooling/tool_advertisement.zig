@@ -753,10 +753,6 @@ fn buildTestModelToolProjectionForRegistry(alloc: Allocator, tools: []const tool
     return buildModelToolProjectionForSet(alloc, testToolSetForRegistry(tools), options);
 }
 
-fn buildTestReadOnlyModelToolProjection(alloc: Allocator, options: Options) !EffectiveToolProjection {
-    return buildReadOnlyModelToolProjectionForSet(alloc, test_tool_set, options);
-}
-
 pub fn buildModelToolProjectionForSet(alloc: Allocator, tool_set: tool_set_contract.ToolSet, options: Options) !EffectiveToolProjection {
     return buildToolProjection(alloc, tool_set, .full, options);
 }

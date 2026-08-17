@@ -28,7 +28,6 @@ pub const ResolveError = error{
     MissingAuthCapability,
     MissingAccountUsageCapability,
     MissingGenerationUsageCapability,
-    MissingModelCatalogCapability,
 };
 
 /// A bounded, borrowed registry assembled once by composition. It owns no
@@ -89,11 +88,6 @@ pub const AdapterRegistry = struct {
     pub fn resolveGenerationUsageForProfile(self: AdapterRegistry, profile: connection_registry.Profile) ResolveError!generation_usage.Provider {
         const adapter = try self.resolveProfile(profile);
         return adapter.generation_usage orelse error.MissingGenerationUsageCapability;
-    }
-
-    pub fn resolveModelCatalogForProfile(self: AdapterRegistry, profile: connection_registry.Profile) ResolveError!model_catalog.Provider {
-        const adapter = try self.resolveProfile(profile);
-        return adapter.model_catalog orelse error.MissingModelCatalogCapability;
     }
 };
 
@@ -169,7 +163,6 @@ test "adapter registry rejects invalid manifests and missing kinds" {
     };
     try std.testing.expectError(error.MissingAccountUsageCapability, registry.resolveAccountUsageForProfile(profile));
     try std.testing.expectError(error.MissingGenerationUsageCapability, registry.resolveGenerationUsageForProfile(profile));
-    try std.testing.expectError(error.MissingModelCatalogCapability, registry.resolveModelCatalogForProfile(profile));
 }
 
 test "adapter registry rejects profile and admitted route protocol mismatches" {
@@ -629,10 +622,8 @@ test "Vercel and Example Cloud keep every non-selected effect at zero" {
             defer completion.deinit(alloc);
             try std.testing.expect(completion.outcome.terminal == .acquired);
             try std.testing.expectEqualStrings("entered_key", completion.outcome.terminal.acquired.source.id);
-            var catalog_result = try (try registry.resolveModelCatalogForProfile(profile)).fetch(
-                alloc,
-                .{},
-            );
+            const selected_adapter = try registry.resolveProfile(profile);
+            var catalog_result = try selected_adapter.model_catalog.?.fetch(alloc, .{});
             switch (catalog_result) {
                 .catalog => |*catalog| model_catalog.freeModelCatalog(alloc, catalog),
                 .failure => return error.TestUnexpectedCatalogFailure,
@@ -722,7 +713,6 @@ test "Vercel and Example Cloud keep every non-selected effect at zero" {
     try std.testing.expectError(error.UnsupportedProtocol, registry.resolveAuthForProfile(mismatch_profile));
     try std.testing.expectError(error.UnsupportedProtocol, registry.resolveAccountUsageForProfile(mismatch_profile));
     try std.testing.expectError(error.UnsupportedProtocol, registry.resolveGenerationUsageForProfile(mismatch_profile));
-    try std.testing.expectError(error.UnsupportedProtocol, registry.resolveModelCatalogForProfile(mismatch_profile));
     const mismatch_route = route_snapshot.RouteSnapshot{
         .connection_id = @constCast("vercel_ai_gateway"),
         .adapter_kind = @constCast("vercel_ai_gateway"),

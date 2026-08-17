@@ -106,12 +106,6 @@ pub const ToolActivityRecorder = struct {
 fn acknowledgePromptFinalization(_: *anyopaque, _: u64, _: types.TurnPresentationOutcome, _: ?types.ProviderCompletionDisposition) !void {}
 fn discardToolLifecycle(_: *anyopaque, _: types.ToolLifecycleEvent) !void {}
 fn discardRouteRecoveryStatus(_: *anyopaque, _: types.RouteRecoveryStatus) !void {}
-fn localAvailableModelDescriptor(_: *anyopaque, model: []const u8) model_capabilities.ModelDescriptor {
-    return model_capabilities.configuredDescriptor(model, .{});
-}
-fn localModelDescriptor(_: *anyopaque, _: Allocator, model: []const u8) !model_capabilities.ModelDescriptor {
-    return model_capabilities.configuredDescriptor(model, .{});
-}
 
 pub const RouteCredential = struct {
     credential: []u8,
@@ -269,10 +263,6 @@ pub const AgentRuntimeDeps = struct {
     push_provider_failure: *const fn (ctx: *anyopaque, category: agent_stream_provider.StreamFailure.Category, detail: []const u8, source: ?adapter_auth.Source) anyerror!void,
     resolve_route_credential: *const fn (ctx: *anyopaque, alloc: Allocator, route: *const route_snapshot.RouteSnapshot, mode: adapter_auth.RefreshMode) anyerror!RouteCredential = routeCredentialUnavailable,
     request_route_recovery: ?*const fn (ctx: *anyopaque, arena: Allocator, request: RouteRecoveryRequest) anyerror!RouteRecoveryDecision = null,
-    /// Read-only admission compatibility callbacks. Root surfaces resolve the
-    /// descriptor before the loop; G11 removes these unused loop-era fields.
-    available_model_descriptor: *const fn (ctx: *anyopaque, model: []const u8) model_capabilities.ModelDescriptor = localAvailableModelDescriptor,
-    resolve_model_descriptor: *const fn (ctx: *anyopaque, arena: Allocator, model: []const u8) anyerror!model_capabilities.ModelDescriptor = localModelDescriptor,
     format_tool_execution_error: *const fn (ctx: *anyopaque, arena: Allocator, tool_name: []const u8, err: anyerror) anyerror![]const u8,
     record_tool_call_rejected: ?*const fn (ctx: *anyopaque, arena: Allocator, call: ToolCall, model_output: []const u8, command_result_json: ?[]const u8) anyerror!void = null,
     report_usage: ?*const fn (ctx: *anyopaque, usage: types.Usage) void = null,

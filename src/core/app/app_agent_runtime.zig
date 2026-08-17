@@ -1503,7 +1503,7 @@ const FakeApp = struct {
     ) !agent_runtime.RouteCredential {
         return .{
             .credential = try alloc.dupe(u8, self.auth.credentialSecret() orelse return error.MissingCredential),
-            .source = if (self.auth.credentialSource()) |source| auth_runtime.normalizedSource(source) else .{
+            .source = self.auth.credentialSource() orelse .{
                 .id = "test",
                 .label = "test",
                 .refreshable = false,

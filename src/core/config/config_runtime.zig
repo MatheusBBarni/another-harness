@@ -818,16 +818,6 @@ pub fn connectionPersistence() connection_registry.Persistence {
     return .{ .write_fn = persistConnectionSnapshot };
 }
 
-pub fn setConnectionSnapshot(
-    alloc: Allocator,
-    snapshot: connection_registry.Snapshot,
-) !CommitOutcome {
-    const home = io_mod.getenv("HOME") orelse return error.HomeNotSet;
-    var store = try settings_store.Store.initFromHome(alloc, home, .writable);
-    defer store.deinit(alloc);
-    return store.applyConnectionSnapshot(alloc, snapshot);
-}
-
 fn persistConnectionSnapshot(
     _: ?*anyopaque,
     alloc: Allocator,

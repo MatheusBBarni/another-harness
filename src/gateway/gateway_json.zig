@@ -1,14 +1,9 @@
 const std = @import("std");
 const model_history = @import("../core/agent/model_history.zig");
-const builtin = @import("builtin");
 const image_attachments = @import("../core/images/image_attachments.zig");
 const io_mod = @import("../core/shared/io.zig");
 const model_capabilities = @import("../core/config/model_capabilities.zig");
 const types = @import("../core/shared/types.zig");
-const test_model_descriptors = if (builtin.is_test)
-    @import("../builtins/gateway/model_descriptors.zig")
-else
-    struct {};
 
 pub const ChatRole = types.ChatRole;
 pub const ChatMessage = types.ChatMessage;
@@ -22,14 +17,6 @@ pub const StructuredResponseFormat = struct {
 };
 
 const pending_tool_review_result_text = "Tool call has not executed; it is pending permission review.";
-
-fn testProviderOptions(model: []const u8, effort: types.ReasoningEffort, fast_mode: bool) model_capabilities.ResolvedProviderOptions {
-    return model_capabilities.resolveProviderOptionsForCapabilities(
-        test_model_descriptors.provider.fallback(model).capabilities,
-        effort,
-        fast_mode,
-    );
-}
 
 pub fn roleName(role: ChatRole) []const u8 {
     return switch (role) {

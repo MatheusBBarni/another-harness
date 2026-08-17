@@ -2741,7 +2741,6 @@ test "processQueuedPrompt keeps exact model identity and emits selected fast mod
 
     try std.testing.expectEqual(@as(usize, 1), gateway.request_models.items.len);
     try std.testing.expectEqualStrings("zai/glm-5.2", gateway.request_models.items[0]);
-    try std.testing.expectEqual(@as(usize, 0), hooks.capability_queries.items.len);
     try expectRootFieldAbsent(&gateway, 0, "fast");
     try expectBodyContains(&gateway, 0, "\"providerOptions\":{\"gateway\":{\"speed\":\"fast\"}}");
 }

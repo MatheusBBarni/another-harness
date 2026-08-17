@@ -60,14 +60,6 @@ const CapabilityResolverState = enum {
     failed,
 };
 
-pub fn modelCatalogForAdapter(
-    admitted_adapter_kind: []const u8,
-    adapter: agent_stream_provider.ProviderAdapter,
-) ?model_catalog.Provider {
-    if (!std.mem.eql(u8, admitted_adapter_kind, adapter.kind)) return null;
-    return adapter.model_catalog;
-}
-
 pub const CapabilityResolver = struct {
     catalog: std.ArrayList(model_catalog.ModelCatalogEntry) = .empty,
     state: CapabilityResolverState = .idle,
@@ -235,25 +227,6 @@ const fake_descriptor_provider = model_catalog.ModelDescriptorProvider{
     .fallback_fn = fakeFallbackDescriptor,
     .catalog_fn = fakeCatalogDescriptor,
 };
-
-test "model catalog selection requires the admitted adapter kind" {
-    var fake = FakeCatalog{ .outcome = .ready };
-    const adapter = agent_stream_provider.ProviderAdapter{
-        .kind = "matching-adapter",
-        .supported_protocol = "matching-adapter",
-        .model_catalog = fake.provider(),
-        .stream_fn = agent_stream_provider.unavailable_adapter.stream_fn,
-    };
-
-    const matching = modelCatalogForAdapter("matching-adapter", adapter).?;
-    try std.testing.expect(matching.context.? == @as(*anyopaque, @ptrCast(&fake)));
-    try std.testing.expect(modelCatalogForAdapter("other-adapter", adapter) == null);
-    try std.testing.expectEqual(@as(usize, 0), fake.calls);
-
-    var without_catalog = adapter;
-    without_catalog.model_catalog = null;
-    try std.testing.expect(modelCatalogForAdapter("matching-adapter", without_catalog) == null);
-}
 
 test "available capabilities never fetch and use a completed catalog snapshot" {
     const alloc = std.testing.allocator;

@@ -894,11 +894,6 @@ pub const FakeAgentRuntimeDeps = struct {
     last_route_recovery_fast_mode: bool = false,
     last_route_recovery_finish_reason: ?types.ProviderFinishReason = null,
     last_route_recovery_unsafe_reason: ?types.RouteRecoveryUnsafeReason = null,
-    capability_overrides: []const ModelCapabilityOverride = &.{},
-    available_capability_overrides: []const ModelCapabilityOverride = &.{},
-    capability_queries: std.ArrayList([]u8) = .empty,
-    cancel_on_capability_resolution: ?*std.atomic.Value(bool) = null,
-    cancel_after_capability_resolution: ?*std.atomic.Value(bool) = null,
     credential_refresh_tokens: []const []const u8 = &.{},
     credential_refresh_index: usize = 0,
     credential_refresh_sources: std.ArrayList(adapter_auth.Source) = .empty,
@@ -971,7 +966,6 @@ pub const FakeAgentRuntimeDeps = struct {
             worker_runtime.freeToolLifecycleEvent(self.alloc, event);
         }
         self.lifecycle_events.deinit(self.alloc);
-        freeStringList(self.alloc, &self.capability_queries);
         self.credential_refresh_sources.deinit(self.alloc);
         self.credential_refresh_modes.deinit(self.alloc);
         for (self.recovery_checkpoints.items) |*checkpoint| checkpoint.deinit(self.alloc);
@@ -1019,8 +1013,6 @@ pub const FakeAgentRuntimeDeps = struct {
             .push_provider_failure = providerFailure,
             .resolve_route_credential = resolveRouteCredential,
             .request_route_recovery = if (self.enable_route_recovery) requestRouteRecovery else null,
-            .available_model_descriptor = availableModelDescriptor,
-            .resolve_model_descriptor = resolveModelDescriptor,
             .format_tool_execution_error = formatError,
             .record_tool_call_rejected = recordRejected,
             .report_inner_tool_usage = reportCapturedInnerToolUsage,
@@ -1077,51 +1069,6 @@ pub const FakeAgentRuntimeDeps = struct {
                 cancel_flag.store(true, .seq_cst);
             }
         }
-    }
-
-    fn resolveModelDescriptor(raw: *anyopaque, _: Allocator, model: []const u8) !model_capabilities.ModelDescriptor {
-        const self: *FakeAgentRuntimeDeps = @ptrCast(@alignCast(raw));
-        try self.capability_queries.append(self.alloc, try self.alloc.dupe(u8, model));
-        if (self.cancel_on_capability_resolution) |cancel_flag| {
-            cancel_flag.store(true, .seq_cst);
-            return error.Cancelled;
-        }
-        const descriptor = blk: {
-            for (self.capability_overrides) |override| {
-                if (std.mem.eql(u8, override.model, model)) {
-                    var descriptor = test_adapter.model_descriptor_provider.fallback(model);
-                    descriptor.capabilities = override.capabilities;
-                    descriptor.source = .configured;
-                    break :blk descriptor;
-                }
-            }
-            for (self.available_capability_overrides) |override| {
-                if (std.mem.eql(u8, override.model, model)) {
-                    var descriptor = test_adapter.model_descriptor_provider.fallback(model);
-                    descriptor.capabilities = override.capabilities;
-                    descriptor.source = .configured;
-                    break :blk descriptor;
-                }
-            }
-            break :blk test_adapter.model_descriptor_provider.fallback(model);
-        };
-        if (self.cancel_after_capability_resolution) |cancel_flag| {
-            cancel_flag.store(true, .seq_cst);
-        }
-        return descriptor;
-    }
-
-    fn availableModelDescriptor(raw: *anyopaque, model: []const u8) model_capabilities.ModelDescriptor {
-        const self: *FakeAgentRuntimeDeps = @ptrCast(@alignCast(raw));
-        for (self.available_capability_overrides) |override| {
-            if (std.mem.eql(u8, override.model, model)) {
-                var descriptor = test_adapter.model_descriptor_provider.fallback(model);
-                descriptor.capabilities = override.capabilities;
-                descriptor.source = .configured;
-                return descriptor;
-            }
-        }
-        return test_adapter.model_descriptor_provider.fallback(model);
     }
 
     fn requestRouteRecovery(raw: *anyopaque, _: Allocator, request: runtime_deps.RouteRecoveryRequest) !runtime_deps.RouteRecoveryDecision {

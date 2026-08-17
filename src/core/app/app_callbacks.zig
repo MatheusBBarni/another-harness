@@ -322,8 +322,6 @@ pub fn Bindings(comptime App: type) type {
                     agentRequestRouteRecovery
                 else
                     null,
-                .available_model_descriptor = agentAvailableModelDescriptor,
-                .resolve_model_descriptor = agentResolveModelDescriptor,
                 .format_tool_execution_error = agentFormatToolExecutionError,
                 .record_tool_call_rejected = agentRecordToolCallRejected,
                 .report_usage = agentReportUsage,
@@ -592,14 +590,6 @@ pub fn Bindings(comptime App: type) type {
             if (comptime @hasDecl(App, "resolveModelDescriptorForRequest")) {
                 return app.resolveModelDescriptorForRequest(model);
             }
-            if (comptime @hasDecl(App, "resolvedModelDescriptor")) {
-                return app.resolvedModelDescriptor(model);
-            }
-            return model_capabilities.configuredDescriptor(model, .{});
-        }
-
-        fn agentAvailableModelDescriptor(ctx: *anyopaque, model: []const u8) model_capabilities.ModelDescriptor {
-            const app: *App = @ptrCast(@alignCast(ctx));
             if (comptime @hasDecl(App, "resolvedModelDescriptor")) {
                 return app.resolvedModelDescriptor(model);
             }
@@ -1397,7 +1387,6 @@ const FakeApp = struct {
     last_notice_tone: types.NoticeTone = .information,
     last_notice_visibility: types.NoticeVisibility = .compact_and_full,
     last_notice_record: bool = false,
-    capability_request_count: usize = 0,
 
     fn init(alloc: std.mem.Allocator) FakeApp {
         return .{ .alloc = alloc };
@@ -1427,10 +1416,9 @@ const FakeApp = struct {
     }
 
     pub fn resolveModelDescriptorForRequest(
-        self: *FakeApp,
+        _: *FakeApp,
         model: []const u8,
     ) !model_capabilities.ModelDescriptor {
-        self.capability_request_count += 1;
         return model_capabilities.configuredDescriptor(model, .{
             .supports_reasoning = true,
             .reasoning_efforts = .fromSlice(&.{types.ReasoningEffort.literal("future-tier")}),
@@ -1807,22 +1795,6 @@ test "authentication failures publish authentication failure before status text"
     try std.testing.expectEqual(@as(usize, 2), app.worker.events.items.len);
     try std.testing.expect(app.worker.events.items[0] == .authentication_failed);
     try std.testing.expect(app.worker.events.items[1] == .api_status_text);
-}
-
-test "agent deps use request-time model capability resolution when available" {
-    var app = FakeApp.init(std.testing.allocator);
-    defer app.deinit();
-
-    const deps = Bindings(FakeApp).agentRuntimeDeps(&app);
-    const descriptor = try deps.resolve_model_descriptor(
-        deps.ctx,
-        std.testing.allocator,
-        "provider/new-reasoning-model",
-    );
-
-    try std.testing.expectEqual(@as(usize, 1), app.capability_request_count);
-    try std.testing.expectEqual(model_capabilities.CapabilitySource.configured, descriptor.source);
-    try std.testing.expect(model_capabilities.reasoningEffortSupported(descriptor.capabilities, types.ReasoningEffort.literal("future-tier")));
 }
 
 test "agent deps record rejected tool calls in feedback diagnostics" {
