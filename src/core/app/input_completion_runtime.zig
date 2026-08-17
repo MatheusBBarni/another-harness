@@ -424,6 +424,7 @@ pub fn CompletionRuntime(comptime App: type) type {
             const projection = render_input.helpMenuProjection(
                 &app.input_runtime.help_menu,
                 app.slashRegistry(),
+                if (comptime @hasField(App, "auth")) app.auth.authServiceLabel() else "",
                 app.input_runtime.edit_state.input.items,
             );
             const scan = ui_input.scanInputCursorVertical(

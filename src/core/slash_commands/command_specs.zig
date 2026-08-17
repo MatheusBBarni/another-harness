@@ -624,10 +624,18 @@ pub fn formatSlashCompletionDescription(
     buffer: []u8,
 ) !?[]const u8 {
     const spec = slashCompletionDescriptionSpec(registry, prefix, n) orelse return null;
+    return try formatSlashSpecDescription(spec, auth_service_label, buffer);
+}
+
+pub fn formatSlashSpecDescription(
+    spec: SlashSpec,
+    auth_service_label: []const u8,
+    buffer: []u8,
+) ![]const u8 {
     if (spec.kind == .login and auth_service_label.len > 0) {
         return try std.fmt.bufPrint(buffer, "sign in with {s}", .{auth_service_label});
     }
-    return spec.completion_description;
+    return spec.completion_description orelse "";
 }
 
 pub fn nthSlashCompletionCategory(registry: SlashRegistry, prefix: []const u8, n: usize) ?SlashPresentationCategory {

@@ -1263,6 +1263,14 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       expect(pane).toContain("↑↓ Navigate");
       expect(pane).toContain("Enter Open");
 
+      await session.sendLiteralText("login");
+      grid = await waitForHelpMenu(session, 1);
+      pane = grid.join("\n");
+      expect(pane).toContain("/login");
+      expect(pane).toContain("sign in with Vercel");
+
+      await session.sendKeys("C-u");
+      await waitForHelpMenu(session, 39);
       await session.sendLiteralText("paste");
       grid = await waitForHelpMenu(session, 1);
       pane = grid.join("\n");

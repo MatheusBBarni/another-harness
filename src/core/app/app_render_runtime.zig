@@ -2529,6 +2529,7 @@ pub fn Runtime(comptime App: type) type {
                 .help = render_input.helpMenuProjection(
                     &app.input_runtime.help_menu,
                     app.slashRegistry(),
+                    ctx.auth_picker.auth_service_label,
                     ctx.input.edit_state.input.items,
                 ),
                 .composer = .{

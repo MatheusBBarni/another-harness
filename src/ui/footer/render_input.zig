@@ -100,6 +100,7 @@ pub const SessionMenuProjection = struct {
 pub const HelpMenuProjection = struct {
     active: bool = false,
     registry: command_specs.SlashRegistry = .{},
+    auth_service_label: []const u8 = "",
     selected_index: usize = 0,
     window_start: usize = 0,
     query: []const u8 = "",
@@ -256,11 +257,13 @@ pub fn settingsMenuProjection(
 pub fn helpMenuProjection(
     menu: *const command_specs.HelpMenu,
     registry: command_specs.SlashRegistry,
+    auth_service_label: []const u8,
     query: []const u8,
 ) HelpMenuProjection {
     return .{
         .active = menu.active,
         .registry = registry,
+        .auth_service_label = auth_service_label,
         .selected_index = menu.selected_index,
         .window_start = menu.window_start,
         .query = query,
