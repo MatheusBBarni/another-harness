@@ -833,11 +833,19 @@ fn slashMenuRowContent(
     skills: []const skill_runtime.Skill,
     match_idx: usize,
     include_metadata: bool,
-) ?SlashMenuRowContent {
+    auth_service_label: []const u8,
+    description_buffer: []u8,
+) !?SlashMenuRowContent {
     return switch (mixedSlashCompletionEntry(registry, prefix, skills, match_idx) orelse return null) {
         .command => |command_idx| .{
             .label = command_specs.nthSlashCompletionLabel(registry, prefix, command_idx) orelse return null,
-            .description = command_specs.nthSlashCompletionDescription(registry, prefix, command_idx) orelse "",
+            .description = try command_specs.formatSlashCompletionDescription(
+                registry,
+                prefix,
+                command_idx,
+                auth_service_label,
+                description_buffer,
+            ) orelse "",
             .metadata = if (include_metadata)
                 if (command_specs.nthSlashCompletionCategory(registry, prefix, command_idx)) |category| category.label() else ""
             else
@@ -857,11 +865,21 @@ pub fn mixedSlashMenuColumnWidths(
     skills: []const skill_runtime.Skill,
     window: PickerWindow,
     include_metadata: bool,
-) SlashMenuColumnWidths {
+    auth_service_label: []const u8,
+) !SlashMenuColumnWidths {
     var widths: SlashMenuColumnWidths = .{ .label = 0, .metadata = 0 };
     var match_idx = window.start;
     while (match_idx < window.end) : (match_idx += 1) {
-        const content = slashMenuRowContent(registry, prefix, skills, match_idx, include_metadata) orelse continue;
+        var description_buffer: [command_specs.provider_command_presentation_buffer_bytes]u8 = undefined;
+        const content = try slashMenuRowContent(
+            registry,
+            prefix,
+            skills,
+            match_idx,
+            include_metadata,
+            auth_service_label,
+            &description_buffer,
+        ) orelse continue;
         widths.label = @max(widths.label, display_width.visibleWidth(content.label));
         widths.metadata = @max(widths.metadata, display_width.visibleWidth(content.metadata));
     }
@@ -878,8 +896,18 @@ pub noinline fn composeSlashMenuOptionRow(
     column_widths: SlashMenuColumnWidths,
     width: u16,
     include_metadata: bool,
+    auth_service_label: []const u8,
 ) !std.ArrayList(u8) {
-    const content = slashMenuRowContent(registry, prefix, skills, match_idx, include_metadata) orelse return .empty;
+    var description_buffer: [command_specs.provider_command_presentation_buffer_bytes]u8 = undefined;
+    const content = try slashMenuRowContent(
+        registry,
+        prefix,
+        skills,
+        match_idx,
+        include_metadata,
+        auth_service_label,
+        &description_buffer,
+    ) orelse return .empty;
 
     var row: std.ArrayList(u8) = .empty;
     errdefer row.deinit(alloc);
@@ -943,13 +971,21 @@ pub fn composeSlashCompletionOptionRow(
     start_col: u16,
     command_width: usize,
     width: u16,
+    auth_service_label: []const u8,
 ) !std.ArrayList(u8) {
     var row: std.ArrayList(u8) = .empty;
     const width_usize: usize = width;
     if (width_usize == 0) return row;
 
     const label = command_specs.nthSlashCompletionLabel(registry, prefix, match_idx) orelse return row;
-    const description = command_specs.nthSlashCompletionDescription(registry, prefix, match_idx) orelse "";
+    var description_buffer: [command_specs.provider_command_presentation_buffer_bytes]u8 = undefined;
+    const description = try command_specs.formatSlashCompletionDescription(
+        registry,
+        prefix,
+        match_idx,
+        auth_service_label,
+        &description_buffer,
+    ) orelse "";
     const label_col: u16 = if (start_col > 1) start_col else 3;
     if (label_col > 1) try row_text.appendAbsoluteColumn(alloc, &row, label_col);
 
@@ -986,9 +1022,10 @@ pub fn composeMixedSlashCompletionOptionRow(
     start_col: u16,
     command_width: usize,
     width: u16,
+    auth_service_label: []const u8,
 ) !std.ArrayList(u8) {
     return switch (mixedSlashCompletionEntry(registry, prefix, skills, match_idx) orelse return .empty) {
-        .command => |command_idx| composeSlashCompletionOptionRow(alloc, registry, prefix, command_idx, selected, start_col, command_width, width),
+        .command => |command_idx| composeSlashCompletionOptionRow(alloc, registry, prefix, command_idx, selected, start_col, command_width, width, auth_service_label),
         .skill => |skill| composeSkillCompletionOptionRow(alloc, skill, selected, start_col, command_width, width),
     };
 }
@@ -1053,7 +1090,7 @@ test "footer composes slash completions as vertical described rows" {
     var saw_model_row = false;
     var match_idx = window.start;
     while (match_idx < window.end) : (match_idx += 1) {
-        var row = try composeSlashCompletionOptionRow(alloc, picker_test_slash_registry, prefix, match_idx, match_idx == selected, 1, command_width, 80);
+        var row = try composeSlashCompletionOptionRow(alloc, picker_test_slash_registry, prefix, match_idx, match_idx == selected, 1, command_width, 80, "test service");
         defer row.deinit(alloc);
 
         saw_model_row = saw_model_row or
@@ -1105,9 +1142,9 @@ test "slash menu header reports command totals and visible range" {
 
 test "slash menu rows prioritize marker label description and category by width" {
     const wide_layout = slashMenuLayout(picker_test_slash_registry, "/m", &.{}, 0, 0, 24, 0, 0).?;
-    const column_widths = mixedSlashMenuColumnWidths(picker_test_slash_registry, "/m", &.{}, wide_layout.window, true);
+    const column_widths = try mixedSlashMenuColumnWidths(picker_test_slash_registry, "/m", &.{}, wide_layout.window, true, "test service");
 
-    var wide = try composeSlashMenuOptionRow(std.testing.allocator, picker_test_slash_registry, "/m", &.{}, 0, true, column_widths, 100, true);
+    var wide = try composeSlashMenuOptionRow(std.testing.allocator, picker_test_slash_registry, "/m", &.{}, 0, true, column_widths, 100, true, "test service");
     defer wide.deinit(std.testing.allocator);
     try std.testing.expect(std.mem.startsWith(u8, wide.items, ui_render.selected_completion_style));
     try std.testing.expect(std.mem.find(u8, wide.items, ui_render.system_notice_label_style) == null);
@@ -1121,13 +1158,13 @@ test "slash menu rows prioritize marker label description and category by width"
     const model_offset = std.mem.find(u8, wide.items, "Model") orelse return error.TestExpectedMetadata;
     const model_column = display_width.visibleWidthIgnoringAnsi(wide.items[0..model_offset]);
 
-    var extensions = try composeSlashMenuOptionRow(std.testing.allocator, picker_test_slash_registry, "/m", &.{}, 2, false, column_widths, 100, true);
+    var extensions = try composeSlashMenuOptionRow(std.testing.allocator, picker_test_slash_registry, "/m", &.{}, 2, false, column_widths, 100, true, "test service");
     defer extensions.deinit(std.testing.allocator);
     const extensions_offset = std.mem.find(u8, extensions.items, "Extensions") orelse return error.TestExpectedMetadata;
     try std.testing.expectEqual(model_column, display_width.visibleWidthIgnoringAnsi(extensions.items[0..extensions_offset]));
     try std.testing.expectEqual(@as(usize, 99), display_width.visibleWidthIgnoringAnsi(extensions.items));
 
-    var narrow = try composeSlashMenuOptionRow(std.testing.allocator, picker_test_slash_registry, "/m", &.{}, 0, true, column_widths, 42, true);
+    var narrow = try composeSlashMenuOptionRow(std.testing.allocator, picker_test_slash_registry, "/m", &.{}, 0, true, column_widths, 42, true, "test service");
     defer narrow.deinit(std.testing.allocator);
     try std.testing.expect(std.mem.find(u8, narrow.items, "❯") == null);
     try std.testing.expect(std.mem.find(u8, narrow.items, "/model") != null);
@@ -1139,9 +1176,9 @@ test "slash menu rows prioritize marker label description and category by width"
 
 test "slash menu hides metadata for commands and skills" {
     const command_layout = slashMenuLayout(picker_test_slash_registry, "/m", &.{}, 0, 0, 24, 0, 0).?;
-    const command_widths = mixedSlashMenuColumnWidths(picker_test_slash_registry, "/m", &.{}, command_layout.window, false);
+    const command_widths = try mixedSlashMenuColumnWidths(picker_test_slash_registry, "/m", &.{}, command_layout.window, false, "test service");
 
-    var command = try composeSlashMenuOptionRow(std.testing.allocator, picker_test_slash_registry, "/m", &.{}, 0, true, command_widths, 60, false);
+    var command = try composeSlashMenuOptionRow(std.testing.allocator, picker_test_slash_registry, "/m", &.{}, 0, true, command_widths, 60, false, "test service");
     defer command.deinit(std.testing.allocator);
     try std.testing.expect(std.mem.find(u8, command.items, "/model") != null);
     try std.testing.expect(std.mem.find(u8, command.items, "reasoning effort to use") != null);
@@ -1154,8 +1191,8 @@ test "slash menu hides metadata for commands and skills" {
         .source = .global_codex,
     }};
     const skill_layout = slashMenuLayout(picker_test_slash_registry, "/fx-test", &skills, 0, 0, 24, 0, 0).?;
-    const skill_widths = mixedSlashMenuColumnWidths(picker_test_slash_registry, "/fx-test", &skills, skill_layout.window, false);
-    var skill = try composeSlashMenuOptionRow(std.testing.allocator, picker_test_slash_registry, "/fx-test", &skills, 0, true, skill_widths, 64, false);
+    const skill_widths = try mixedSlashMenuColumnWidths(picker_test_slash_registry, "/fx-test", &skills, skill_layout.window, false, "test service");
+    var skill = try composeSlashMenuOptionRow(std.testing.allocator, picker_test_slash_registry, "/fx-test", &skills, 0, true, skill_widths, 64, false, "test service");
     defer skill.deinit(std.testing.allocator);
     try std.testing.expect(std.mem.find(u8, skill.items, "choose focused regression coverage") != null);
     try std.testing.expect(std.mem.find(u8, skill.items, "codex") == null);
@@ -1176,8 +1213,8 @@ test "slash menu keeps matching skill source labels" {
     defer header.deinit(std.testing.allocator);
     try std.testing.expect(std.mem.find(u8, header.items, "Results 1") != null);
 
-    const column_widths = mixedSlashMenuColumnWidths(picker_test_slash_registry, "/fx-test", &skills, layout.window, true);
-    var row = try composeSlashMenuOptionRow(std.testing.allocator, picker_test_slash_registry, "/fx-test", &skills, 0, true, column_widths, 64, true);
+    const column_widths = try mixedSlashMenuColumnWidths(picker_test_slash_registry, "/fx-test", &skills, layout.window, true, "test service");
+    var row = try composeSlashMenuOptionRow(std.testing.allocator, picker_test_slash_registry, "/fx-test", &skills, 0, true, column_widths, 64, true, "test service");
     defer row.deinit(std.testing.allocator);
     try std.testing.expect(std.mem.find(u8, row.items, "fx-test-strategy") != null);
     try std.testing.expect(std.mem.find(u8, row.items, "choose focused") != null);
@@ -1189,7 +1226,7 @@ test "slash menu keeps matching skill source labels" {
 
 test "slash completion option row clips styled descriptions safely" {
     const alloc = std.testing.allocator;
-    var row = try composeSlashCompletionOptionRow(alloc, picker_test_slash_registry, "/mo", 0, true, 1, 8, 30);
+    var row = try composeSlashCompletionOptionRow(alloc, picker_test_slash_registry, "/mo", 0, true, 1, 8, 30, "test service");
     defer row.deinit(alloc);
 
     try std.testing.expect(std.mem.find(u8, row.items, ui_render.selected_completion_style) != null);
@@ -1200,7 +1237,7 @@ test "slash completion option row clips styled descriptions safely" {
 
 test "slash completion option row aligns argument labels without command prefix" {
     const alloc = std.testing.allocator;
-    var row = try composeSlashCompletionOptionRow(alloc, picker_test_slash_registry, "/sandbox ", 0, false, 12, 8, 40);
+    var row = try composeSlashCompletionOptionRow(alloc, picker_test_slash_registry, "/sandbox ", 0, false, 12, 8, 40, "test service");
     defer row.deinit(alloc);
 
     try std.testing.expect(std.mem.startsWith(u8, row.items, "\x1b[12G"));
@@ -1222,7 +1259,7 @@ test "mixed slash completion includes matching skills with source labels" {
     const skill = nthMixedSlashCompletionSkill(picker_test_slash_registry, "/fx-test", &skills, 0) orelse return error.TestExpectedEqual;
     try std.testing.expectEqualStrings("fx-test-strategy", skill.name);
 
-    var row = try composeMixedSlashCompletionOptionRow(alloc, picker_test_slash_registry, "/fx-test", &skills, 0, true, 1, 8, 50);
+    var row = try composeMixedSlashCompletionOptionRow(alloc, picker_test_slash_registry, "/fx-test", &skills, 0, true, 1, 8, 50, "test service");
     defer row.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, row.items, "fx-test-strategy") != null);
     try std.testing.expect(std.mem.find(u8, row.items, "codex") != null);

@@ -1,10 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const stream_provider = @import("../core/agent/stream_provider.zig");
-const adapter_registry = @import("../core/gateway/adapter_registry.zig");
 const command_specs = @import("../core/slash_commands/command_specs.zig");
-
-const Allocator = std.mem.Allocator;
 
 pub const TopLevelKind = command_specs.TopLevelKind;
 pub const TopLevelSpec = command_specs.TopLevelSpec;
@@ -90,13 +86,13 @@ const top_level_blueprint = [_]TopLevelSpec{
         .kind = .login,
         .token = "login",
         .usage = "login",
-        .summary = "",
+        .summary = "Sign in",
     },
     .{
         .kind = .logout,
         .token = "logout",
         .usage = "logout",
-        .summary = "",
+        .summary = "Sign out",
     },
     .{
         .kind = .setup,
@@ -159,7 +155,7 @@ const top_level_blueprint = [_]TopLevelSpec{
         .kind = .teams,
         .token = "teams",
         .usage = "teams",
-        .summary = "",
+        .summary = "Choose a team",
     },
     .{
         .kind = .session,
@@ -375,7 +371,7 @@ const slash_blueprint = [_]SlashSpec{
     .{ .kind = .resume_session, .command = "/resume", .help_entry = "/resume", .completion_description = "resume a saved session", .presentation_category = .session },
     .{ .kind = .continue_recovery, .command = "/continue", .help_entry = "/continue", .completion_description = "continue a paused model response", .presentation_category = .session, .requires_prompt_credential = true },
     .{ .kind = .rename_session, .command = "/rename", .help_entry = "/rename <title>", .completion_description = "rename the current session", .presentation_category = .session, .has_args = true, .accepts_payload = true },
-    .{ .kind = .login, .command = "/login", .help_entry = "/login", .completion_description = null, .presentation_category = .account },
+    .{ .kind = .login, .command = "/login", .help_entry = "/login", .completion_description = "sign in", .presentation_category = .account },
     .{ .kind = .logout, .command = "/logout", .help_entry = "/logout", .completion_description = "sign out of fx login", .presentation_category = .account },
     .{ .kind = .setup, .command = "/setup", .help_entry = "/setup", .completion_description = "set up AI Gateway access", .presentation_category = .account },
     .{ .kind = .stats, .command = "/stats", .help_entry = "/stats", .completion_description = "show token and turn statistics", .presentation_category = .account },
@@ -412,95 +408,10 @@ const slash_blueprint = [_]SlashSpec{
     .{ .kind = .quit, .command = "/quit", .aliases = &.{"/exit"}, .help_entry = "/quit", .completion_description = "exit the interactive shell", .presentation_category = .general, .show_in_welcome = true },
 };
 
-pub const Catalog = struct {
-    auth_service: @import("../core/gateway/adapter_auth.zig").AuthServicePresentation,
-    login_summary: []u8,
-    logout_summary: []u8,
-    teams_summary: []u8,
-    login_completion: []u8,
-    top_level_specs: []TopLevelSpec,
-    slash_specs: []SlashSpec,
-    top_level: TopLevelRegistry,
-    slash: SlashRegistry,
-
-    pub fn init(
-        alloc: Allocator,
-        adapters: adapter_registry.AdapterRegistry,
-        adapter_kind: []const u8,
-    ) !Catalog {
-        const adapter = try adapters.resolve(adapter_kind);
-        const auth = adapter.auth orelse return error.MissingAuthCapability;
-        var auth_service = try auth.authServicePresentation(alloc);
-        errdefer auth_service.deinit(alloc);
-
-        const login_summary = try std.fmt.allocPrint(alloc, "Sign in with {s}", .{auth_service.service_label});
-        errdefer alloc.free(login_summary);
-        const logout_summary = try std.fmt.allocPrint(alloc, "Sign out of the current {s} session", .{auth_service.service_label});
-        errdefer alloc.free(logout_summary);
-        const teams_summary = try std.fmt.allocPrint(alloc, "Choose the {s} team used by AI Gateway", .{auth_service.service_label});
-        errdefer alloc.free(teams_summary);
-        const login_completion = try std.fmt.allocPrint(alloc, "sign in with {s}", .{auth_service.service_label});
-        errdefer alloc.free(login_completion);
-
-        const owned_top_level = try alloc.dupe(TopLevelSpec, &top_level_blueprint);
-        errdefer alloc.free(owned_top_level);
-        const owned_slash = try alloc.dupe(SlashSpec, &slash_blueprint);
-        errdefer alloc.free(owned_slash);
-
-        for (owned_top_level) |*spec| switch (spec.kind) {
-            .login => spec.summary = login_summary,
-            .logout => spec.summary = logout_summary,
-            .teams => spec.summary = teams_summary,
-            else => {},
-        };
-        for (owned_slash) |*spec| switch (spec.kind) {
-            .login => spec.completion_description = login_completion,
-            else => {},
-        };
-
-        return .{
-            .auth_service = auth_service,
-            .login_summary = login_summary,
-            .logout_summary = logout_summary,
-            .teams_summary = teams_summary,
-            .login_completion = login_completion,
-            .top_level_specs = owned_top_level,
-            .slash_specs = owned_slash,
-            .top_level = .{
-                .specs = owned_top_level,
-                .description = "Fast, native coding agent for the terminal.",
-                .interactive_hint = "𝒇x starts an interactive session by default. Use `fx ask` to run one noninteractive request.",
-                .help_groups = top_level_help_groups[0..],
-                .flags = top_level_flags[0..],
-                .examples = top_level_examples[0..],
-                .notes = top_level_notes[0..],
-                .resources = top_level_resources[0..],
-            },
-            .slash = .{ .commands = owned_slash },
-        };
-    }
-
-    pub fn deinit(self: *Catalog, alloc: Allocator) void {
-        alloc.free(self.top_level_specs);
-        alloc.free(self.slash_specs);
-        alloc.free(self.login_summary);
-        alloc.free(self.logout_summary);
-        alloc.free(self.teams_summary);
-        alloc.free(self.login_completion);
-        self.auth_service.deinit(alloc);
-        self.* = undefined;
-    }
-
-    pub fn topLevelSummary(self: *const Catalog, kind: TopLevelKind) []const u8 {
-        for (self.top_level_specs) |spec| if (spec.kind == kind) return spec.summary;
-        unreachable;
-    }
-};
-
-pub fn testTopLevelRegistry() TopLevelRegistry {
-    if (!builtin.is_test) @compileError("test catalog is test-only");
+pub fn topLevelRegistry(auth_service_label: []const u8) TopLevelRegistry {
     return .{
-        .specs = test_top_level_blueprint[0..],
+        .specs = top_level_blueprint[0..],
+        .auth_service_label = auth_service_label,
         .description = "Fast, native coding agent for the terminal.",
         .interactive_hint = "𝒇x starts an interactive session by default. Use `fx ask` to run one noninteractive request.",
         .help_groups = top_level_help_groups[0..],
@@ -511,30 +422,19 @@ pub fn testTopLevelRegistry() TopLevelRegistry {
     };
 }
 
-pub fn testSlashRegistry() SlashRegistry {
-    if (!builtin.is_test) @compileError("test catalog is test-only");
-    return .{ .commands = test_slash_blueprint[0..] };
+pub fn slashRegistry() SlashRegistry {
+    return .{ .commands = slash_blueprint[0..] };
 }
 
-const test_top_level_blueprint = blk: {
-    var specs = top_level_blueprint;
-    for (&specs) |*spec| switch (spec.kind) {
-        .login => spec.summary = "Sign in with test service",
-        .logout => spec.summary = "Sign out of the current test service session",
-        .teams => spec.summary = "Choose the test service team used by AI Gateway",
-        else => {},
-    };
-    break :blk specs;
-};
+pub fn testTopLevelRegistry() TopLevelRegistry {
+    if (!builtin.is_test) @compileError("test catalog is test-only");
+    return topLevelRegistry("test service");
+}
 
-const test_slash_blueprint = blk: {
-    var specs = slash_blueprint;
-    for (&specs) |*spec| switch (spec.kind) {
-        .login => spec.completion_description = "sign in with test service",
-        else => {},
-    };
-    break :blk specs;
-};
+pub fn testSlashRegistry() SlashRegistry {
+    if (!builtin.is_test) @compileError("test catalog is test-only");
+    return slashRegistry();
+}
 
 pub const argCompletionAnchor = command_specs.argCompletionAnchor;
 pub const argCompletionIndexForLabel = command_specs.argCompletionIndexForLabel;
@@ -643,47 +543,52 @@ test "built-in paste completion describes clipboard image attachment" {
     try std.testing.expectEqualStrings("attach an image from the clipboard when supported", description);
 }
 
-test "owned catalog materializes the same four templates for a test peer" {
-    const adapters = [_]stream_provider.ProviderAdapter{.{
-        .kind = "peer",
-        .supported_protocol = "peer",
-        .auth = .{ .kind = "peer", .auth_service_label = "Example Cloud" },
-        .stream_fn = stream_provider.unavailable_adapter.stream_fn,
-    }};
-    const registry = try adapter_registry.AdapterRegistry.init(&adapters);
-    var catalog = try Catalog.init(std.testing.allocator, registry, "peer");
-    defer catalog.deinit(std.testing.allocator);
+test "provider-labelled command copy is formatted without owned catalog state" {
+    const cases = [_]struct {
+        service_label: []const u8,
+        login: []const u8,
+        logout: []const u8,
+        teams: []const u8,
+        completion: []const u8,
+    }{
+        .{
+            .service_label = "Vercel",
+            .login = "Sign in with Vercel",
+            .logout = "Sign out of the current Vercel session",
+            .teams = "Choose the Vercel team used by AI Gateway",
+            .completion = "sign in with Vercel",
+        },
+        .{
+            .service_label = "Example Cloud",
+            .login = "Sign in with Example Cloud",
+            .logout = "Sign out of the current Example Cloud session",
+            .teams = "Choose the Example Cloud team used by AI Gateway",
+            .completion = "sign in with Example Cloud",
+        },
+    };
 
-    try std.testing.expectEqualStrings("Sign in with Example Cloud", catalog.topLevelSummary(.login));
-    try std.testing.expectEqualStrings("Sign out of the current Example Cloud session", catalog.topLevelSummary(.logout));
-    try std.testing.expectEqualStrings("Choose the Example Cloud team used by AI Gateway", catalog.topLevelSummary(.teams));
-    try std.testing.expectEqualStrings("sign in with Example Cloud", catalog.slash.lookup("/login").?.completion_description.?);
-}
+    for (cases) |case| {
+        const registry = topLevelRegistry(case.service_label);
+        const kinds = [_]TopLevelKind{ .login, .logout, .teams };
+        const summaries = [_][]const u8{ case.login, case.logout, case.teams };
+        for (kinds, summaries) |kind, summary| {
+            const help = try command_specs.renderTopLevelCommandHelp(
+                std.testing.allocator,
+                registry,
+                kind,
+            );
+            defer std.testing.allocator.free(help);
+            try std.testing.expect(std.mem.find(u8, help, summary) != null);
+        }
 
-test "owned command catalog cleans every label and specification allocation failure" {
-    const adapters = [_]stream_provider.ProviderAdapter{.{
-        .kind = "peer",
-        .supported_protocol = "peer",
-        .auth = .{ .kind = "peer", .auth_service_label = "Example Cloud" },
-        .stream_fn = stream_provider.unavailable_adapter.stream_fn,
-    }};
-    const registry = try adapter_registry.AdapterRegistry.init(&adapters);
-    const backing = std.testing.allocator;
-    var probe = std.testing.FailingAllocator.init(backing, .{});
-    var complete = try Catalog.init(probe.allocator(), registry, "peer");
-    complete.deinit(probe.allocator());
-    try std.testing.expectEqual(probe.allocated_bytes, probe.freed_bytes);
-
-    for (0..probe.alloc_index) |fail_index| {
-        var failing = std.testing.FailingAllocator.init(
-            backing,
-            .{ .fail_index = fail_index },
-        );
-        if (Catalog.init(failing.allocator(), registry, "peer")) |catalog_value| {
-            var catalog = catalog_value;
-            catalog.deinit(failing.allocator());
-        } else |err| try std.testing.expectEqual(error.OutOfMemory, err);
-        try std.testing.expect(failing.has_induced_failure);
-        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        var buffer: [command_specs.provider_command_presentation_buffer_bytes]u8 = undefined;
+        const completion = try command_specs.formatSlashCompletionDescription(
+            slashRegistry(),
+            "/log",
+            0,
+            case.service_label,
+            &buffer,
+        ) orelse return error.TestExpectedEqual;
+        try std.testing.expectEqualStrings(case.completion, completion);
     }
 }

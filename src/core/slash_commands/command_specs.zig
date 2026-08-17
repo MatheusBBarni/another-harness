@@ -119,6 +119,7 @@ pub const TopLevelResource = struct {
 
 pub const TopLevelRegistry = struct {
     specs: []const TopLevelSpec = &.{},
+    auth_service_label: []const u8 = "",
     description: []const u8,
     interactive_hint: []const u8,
     help_groups: []const TopLevelHelpGroup = &.{},
@@ -237,6 +238,7 @@ pub const HelpMenu = struct {
 };
 
 pub const top_level_help_default_width: usize = 80;
+pub const provider_command_presentation_buffer_bytes: usize = 384;
 
 pub const HelpStyle = enum {
     plain,
@@ -328,13 +330,15 @@ pub fn renderTopLevelHelpWithStyle(alloc: Allocator, registry: TopLevelRegistry,
 
 pub fn renderTopLevelCommandHelp(alloc: Allocator, registry: TopLevelRegistry, kind: TopLevelKind) ![]u8 {
     const spec = topLevelSpec(registry, kind);
+    var summary_buf: [provider_command_presentation_buffer_bytes]u8 = undefined;
+    const summary = try topLevelSummary(&summary_buf, registry, spec);
     var out: std.Io.Writer.Allocating = .init(alloc);
     defer out.deinit();
 
     try out.writer.writeAll("fx ");
     try out.writer.writeAll(spec.token);
     try out.writer.writeAll("\n\n");
-    try out.writer.writeAll(spec.summary);
+    try out.writer.writeAll(summary);
     try out.writer.writeAll("\n\nUsage:\n");
     try out.writer.writeAll("  fx ");
     try out.writer.writeAll(spec.usage);
@@ -609,26 +613,21 @@ pub fn nthSlashCompletionLabel(registry: SlashRegistry, prefix: []const u8, n: u
 }
 
 pub fn nthSlashCompletionDescription(registry: SlashRegistry, prefix: []const u8, n: usize) ?[]const u8 {
-    if (allowlistArgCompletionPrefix(prefix) != null) return null;
-    if (sandboxArgCompletionPrefix(prefix) != null) return null;
-    if (statuslineArgCompletionPrefix(prefix) != null) return null;
-    if (notificationsArgCompletionPrefix(prefix) != null) return null;
-    if (permissionsArgCompletionPrefix(prefix) != null) return null;
-    if (appearanceArgCompletionPrefix(prefix) != null) return null;
-    if (inputArgCompletionPrefix(prefix) != null) return null;
-    if (maxxingArgCompletionPrefix(prefix) != null) return null;
-    if (workspaceArgCompletionPrefix(prefix) != null) return null;
-    if (prefix.len == 0 or prefix[0] != '/') return null;
+    return (slashCompletionDescriptionSpec(registry, prefix, n) orelse return null).completion_description;
+}
 
-    var idx: usize = 0;
-    for (registry.commands) |spec| {
-        if (spec.help_entry == null) continue;
-        if (matchedCompletionCommand(spec, prefix) != null) {
-            if (idx == n) return spec.completion_description;
-            idx += 1;
-        }
+pub fn formatSlashCompletionDescription(
+    registry: SlashRegistry,
+    prefix: []const u8,
+    n: usize,
+    auth_service_label: []const u8,
+    buffer: []u8,
+) !?[]const u8 {
+    const spec = slashCompletionDescriptionSpec(registry, prefix, n) orelse return null;
+    if (spec.kind == .login and auth_service_label.len > 0) {
+        return try std.fmt.bufPrint(buffer, "sign in with {s}", .{auth_service_label});
     }
-    return null;
+    return spec.completion_description;
 }
 
 pub fn nthSlashCompletionCategory(registry: SlashRegistry, prefix: []const u8, n: usize) ?SlashPresentationCategory {
@@ -1369,6 +1368,43 @@ fn topLevelSpec(registry: TopLevelRegistry, kind: TopLevelKind) TopLevelSpec {
     unreachable;
 }
 
+fn nthSlashCompletionSpec(registry: SlashRegistry, prefix: []const u8, n: usize) ?SlashSpec {
+    var idx: usize = 0;
+    for (registry.commands) |spec| {
+        if (spec.help_entry == null) continue;
+        if (matchedCompletionCommand(spec, prefix) != null) {
+            if (idx == n) return spec;
+            idx += 1;
+        }
+    }
+    return null;
+}
+
+fn slashCompletionDescriptionSpec(registry: SlashRegistry, prefix: []const u8, n: usize) ?SlashSpec {
+    if (allowlistArgCompletionPrefix(prefix) != null or
+        sandboxArgCompletionPrefix(prefix) != null or
+        statuslineArgCompletionPrefix(prefix) != null or
+        notificationsArgCompletionPrefix(prefix) != null or
+        permissionsArgCompletionPrefix(prefix) != null or
+        appearanceArgCompletionPrefix(prefix) != null or
+        inputArgCompletionPrefix(prefix) != null or
+        maxxingArgCompletionPrefix(prefix) != null or
+        workspaceArgCompletionPrefix(prefix) != null or
+        prefix.len == 0 or
+        prefix[0] != '/') return null;
+    return nthSlashCompletionSpec(registry, prefix, n);
+}
+
+fn topLevelSummary(buffer: []u8, registry: TopLevelRegistry, spec: TopLevelSpec) ![]const u8 {
+    if (registry.auth_service_label.len == 0) return spec.summary;
+    return switch (spec.kind) {
+        .login => std.fmt.bufPrint(buffer, "Sign in with {s}", .{registry.auth_service_label}),
+        .logout => std.fmt.bufPrint(buffer, "Sign out of the current {s} session", .{registry.auth_service_label}),
+        .teams => std.fmt.bufPrint(buffer, "Choose the {s} team used by AI Gateway", .{registry.auth_service_label}),
+        else => spec.summary,
+    };
+}
+
 fn slashSpec(registry: SlashRegistry, kind: SlashKind) SlashSpec {
     return slashSpecPtr(registry, kind).*;
 }
@@ -1433,7 +1469,12 @@ fn maxTopLevelResourceLabelWidth(registry: TopLevelRegistry) usize {
 
 fn writeTopLevelHelpEntry(writer: *std.Io.Writer, registry: TopLevelRegistry, entry: TopLevelHelpEntry, usage_width: usize, columns: usize, style: HelpStyle) !void {
     const spaces = "                                                                ";
-    const summary = entry.summary orelse topLevelSpec(registry, entry.kind.?).summary;
+    var summary_buf: [provider_command_presentation_buffer_bytes]u8 = undefined;
+    const summary = entry.summary orelse try topLevelSummary(
+        &summary_buf,
+        registry,
+        topLevelSpec(registry, entry.kind.?),
+    );
     if (entry.kind) |kind| {
         if (topLevelSpec(registry, kind).hidden_from_top_level_help) return;
     }

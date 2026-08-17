@@ -872,12 +872,13 @@ pub fn composeFooterFrame(
                         row += 1;
                     }
 
-                    const column_widths = picker_presentation.mixedSlashMenuColumnWidths(
+                    const column_widths = try picker_presentation.mixedSlashMenuColumnWidths(
                         ctx.slash_registry,
                         slash_prefix,
                         ctx.skills_menu.items,
                         layout.window,
                         ctx.input.slash_menu_categories,
+                        ctx.auth_picker.auth_service_label,
                     );
                     var match_idx = layout.window.start;
                     while (match_idx < layout.window.end) : (match_idx += 1) {
@@ -891,6 +892,7 @@ pub fn composeFooterFrame(
                             column_widths,
                             shell.layout.cols,
                             ctx.input.slash_menu_categories,
+                            ctx.auth_picker.auth_service_label,
                         );
                         try pushFooterBandRow(alloc, &frame, plan, row, &slash_row);
                         row += 1;
@@ -903,7 +905,7 @@ pub fn composeFooterFrame(
                     var row = rows.picker_start;
                     var match_idx = window.start;
                     while (match_idx < window.end) : (match_idx += 1) {
-                        var slash_row = try picker_presentation.composeMixedSlashCompletionOptionRow(alloc, ctx.slash_registry, slash_prefix, ctx.skills_menu.items, match_idx, match_idx == selected, input.picker_start_col, command_width, shell.layout.cols);
+                        var slash_row = try picker_presentation.composeMixedSlashCompletionOptionRow(alloc, ctx.slash_registry, slash_prefix, ctx.skills_menu.items, match_idx, match_idx == selected, input.picker_start_col, command_width, shell.layout.cols, ctx.auth_picker.auth_service_label);
                         try pushFooterBandRow(alloc, &frame, plan, row, &slash_row);
                         row += 1;
                     }

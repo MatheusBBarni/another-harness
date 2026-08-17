@@ -375,6 +375,12 @@ const production_adapter_registry = if (host_target.is_wasm)
 else
     builtin_gateway.production_adapter_registry;
 
+fn commandAuthServiceLabel() ![]const u8 {
+    const adapter = try production_adapter_registry.resolve(builtin_gateway.connection_seed.adapter_id);
+    const auth = adapter.auth orelse return error.MissingAuthCapability;
+    return auth.authServiceLabel();
+}
+
 const App = struct {
     pub const app_version = version;
     pub const host_profile = if (host_target.is_wasm) host_runtime_profile.wasm else host_runtime_profile.native;
@@ -3008,17 +3014,12 @@ pub fn runWasmTerminal(init: std.process.Init) !void {
     defer cli_args.deinit(alloc);
     while (args.next()) |arg| try cli_args.append(alloc, arg);
 
-    var command_catalog = try builtin_commands.Catalog.init(
-        alloc,
-        production_adapter_registry,
-        builtin_gateway.connection_seed.adapter_id,
-    );
-    defer command_catalog.deinit(alloc);
+    const command_registry = builtin_commands.topLevelRegistry(try commandAuthServiceLabel());
 
     const parsed = try cli_surface.parseInteractiveLaunch(
         alloc,
         cli_args.items,
-        command_catalog.top_level,
+        command_registry,
     );
     var launch = switch (parsed) {
         .interactive => |value| value,
@@ -3029,7 +3030,7 @@ pub fn runWasmTerminal(init: std.process.Init) !void {
         },
     };
     defer launch.deinit(alloc);
-    launch.slash_registry = command_catalog.slash;
+    launch.slash_registry = builtin_commands.slashRegistry();
     const outcome = try app_entry_runtime.runInteractiveCooperative(App, alloc, &launch);
     switch (outcome) {
         .returned => {},
@@ -3121,14 +3122,10 @@ fn mainC(c_argc: c_int, c_argv: [*][*:0]c_char, c_envp: [*:null]?[*:0]c_char) !v
     }
 
     if (shouldRunBenchmarkNoArgRaw(raw_args, raw_env)) {
-        var buffer: [builtin_commands.top_level_help_fast_buffer_bytes]u8 = undefined;
-        var fixed: std.heap.FixedBufferAllocator = .init(&buffer);
-        const command_catalog = try builtin_commands.Catalog.init(
-            fixed.allocator(),
-            production_adapter_registry,
-            builtin_gateway.connection_seed.adapter_id,
-        );
-        switch (cli_surface.parse(command_catalog.top_level, &.{})) {
+        switch (cli_surface.parse(
+            builtin_commands.topLevelRegistry(try commandAuthServiceLabel()),
+            &.{},
+        )) {
             .interactive => exitFast(0),
             else => exitFast(1),
         }
@@ -3164,15 +3161,9 @@ fn writeTopLevelHelpFast(raw_env: RawEnviron) !void {
     const style = topLevelHelpStyle(raw_env);
     var buffer: [builtin_commands.top_level_help_fast_buffer_bytes]u8 = undefined;
     var fixed: std.heap.FixedBufferAllocator = .init(&buffer);
-    var command_catalog = try builtin_commands.Catalog.init(
-        fixed.allocator(),
-        production_adapter_registry,
-        builtin_gateway.connection_seed.adapter_id,
-    );
-    defer command_catalog.deinit(fixed.allocator());
     const text = try command_specs.renderTopLevelHelpWithStyle(
         fixed.allocator(),
-        command_catalog.top_level,
+        builtin_commands.topLevelRegistry(try commandAuthServiceLabel()),
         columns,
         version,
         style,
@@ -3184,18 +3175,13 @@ fn runNonBenchmark(raw_args: []const [*:0]const u8, raw_env: RawEnviron, cli_arg
     io_mod.setRawEnviron(raw_env);
 
     const alloc = processAllocator();
-    var command_catalog = try builtin_commands.Catalog.init(
-        alloc,
-        production_adapter_registry,
-        builtin_gateway.connection_seed.adapter_id,
-    );
-    defer command_catalog.deinit(alloc);
+    const command_registry = builtin_commands.topLevelRegistry(try commandAuthServiceLabel());
     const cfg = if (cli_args.len == 0)
-        emptyEntryConfig(command_catalog.top_level)
+        emptyEntryConfig(command_registry)
     else if (needsFullEntryConfig(cli_args))
-        fullEntryConfig(command_catalog.top_level)
+        fullEntryConfig(command_registry)
     else
-        localEntryConfig(command_catalog.top_level);
+        localEntryConfig(command_registry);
 
     var early_threaded: ?std.Io.Threaded = null;
     defer if (early_threaded) |*threaded| threaded.deinit();
@@ -3223,7 +3209,7 @@ fn runNonBenchmark(raw_args: []const [*:0]const u8, raw_env: RawEnviron, cli_arg
 
             var owned_launch = launch;
             defer owned_launch.deinit(alloc);
-            owned_launch.slash_registry = command_catalog.slash;
+            owned_launch.slash_registry = builtin_commands.slashRegistry();
             defer debug_trace.shutdown();
 
             const outcome = try app_entry_runtime.runInteractive(App, alloc, &owned_launch);
