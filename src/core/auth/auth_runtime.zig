@@ -2501,7 +2501,7 @@ test "change team search filters by name and slug without losing original indexe
 
     var selection = try makeTestTeamSelection(alloc, &.{
         .{ .id = "team_456", .slug = "other-team", .name = "Other Team" },
-        .{ .id = "team_123", .slug = "vercel-internal-playground", .name = "Internal Playground" },
+        .{ .id = "team_123", .slug = "example-playground", .name = "Example Playground" },
         .{ .id = "team_789", .slug = "zero-conf", .name = "Zero Conf" },
     }, null);
     defer selection.deinit(alloc);
@@ -2512,7 +2512,7 @@ test "change team search filters by name and slug without losing original indexe
     try std.testing.expectEqualStrings("PLAY", name_match.team_query);
     try std.testing.expectEqual(@as(usize, 1), name_match.choiceCount());
     try std.testing.expect((Choice{ .team = 1 }).eql(name_match.choiceAt(0).?));
-    try std.testing.expectEqualStrings("Internal Playground", name_match.choiceLabel(name_match.choiceAt(0).?));
+    try std.testing.expectEqualStrings("Example Playground", name_match.choiceLabel(name_match.choiceAt(0).?));
 
     for (0..4) |_| try std.testing.expect(runtime.deleteTeamQueryByte());
     for ("zero-conf") |byte| try std.testing.expect(try runtime.appendTeamQueryByte(alloc, byte));

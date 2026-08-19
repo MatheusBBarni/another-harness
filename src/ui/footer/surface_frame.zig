@@ -1728,8 +1728,8 @@ test "surface footer places the cursor after the Vercel team query" {
     var shell = surfaceTestShell(24, 80);
     defer shell.deinit(alloc);
     var team_id = "team_123".*;
-    var team_slug = "vercel-internal-playground".*;
-    var team_name = "Internal Playground".*;
+    var team_slug = "example-playground".*;
+    var team_name = "Example Playground".*;
     const teams = [_]adapter_auth.Team{.{
         .id = &team_id,
         .slug = &team_slug,
