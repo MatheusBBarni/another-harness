@@ -21,6 +21,7 @@ const github_publish = @import("../github/github_publish.zig");
 const github_workflows = @import("../github/github_workflows.zig");
 const host = @import("../hosts/host.zig");
 const login_flow = @import("../auth/login_flow.zig");
+const login_provider = @import("../auth/login_provider.zig");
 const oauth_transport = @import("../auth/oauth_transport.zig");
 const secret = @import("../auth/secret.zig");
 const output_contracts = @import("../output/output_contracts.zig");
@@ -707,15 +708,16 @@ fn runNonInteractiveWithDeps(
         .pr => |rest| return runGithubWorkflow(alloc, rest, cfg, global_args.modifiers, deps, .pull_request),
         .issue => |rest| return runGithubWorkflow(alloc, rest, cfg, global_args.modifiers, deps, .issue),
         .login => |rest| {
-            if (rest.len != 0) {
-                try writeStderr(deps, "usage: fx login\n");
+            const provider = login_provider.parseLoginProvider(rest) catch {
+                try writeStderr(deps, "usage: fx login [grok|vercel]\n");
                 return .handled_failure;
-            }
-            login_flow.runLogin(
-                alloc,
-                cfg.gateway_provider.oauth_transport,
-                cfg.url_opener,
-            ) catch |err| {
+            };
+            const login_result = switch (provider) {
+                .picker => login_flow.runLoginPicker(alloc, cfg.gateway_provider.oauth_transport, cfg.url_opener),
+                .vercel => login_flow.runLogin(alloc, cfg.gateway_provider.oauth_transport, cfg.url_opener),
+                .grok => login_flow.runGrokLogin(alloc, cfg.gateway_provider.oauth_transport, cfg.url_opener),
+            };
+            login_result catch |err| {
                 const message = switch (err) {
                     error.ClientIdMissing => "fx login: missing FX_OAUTH_CLIENT_ID; configure the fx Vercel App client id first\n",
                     error.AccessDenied => "fx login: authorization denied\n",

@@ -23,6 +23,7 @@ const credential_source_order = [_]credentials.Source{
     .ai_gateway_api_key,
     .fx_login,
     .stored_key,
+    .grok_oauth,
 };
 
 const SourceProbeFn = *const fn (?*anyopaque, Allocator, credentials.Source) anyerror!bool;
@@ -103,6 +104,13 @@ pub fn refreshFxLoginToken(
     source: credentials.Source,
     mode: CredentialRefreshMode,
 ) !?[]u8 {
+    if (source == .grok_oauth) {
+        var credential = (try credentials.loadGrokLoginCredential(alloc, transport)) orelse return null;
+        defer credential.deinit(alloc);
+        const token = credential.token;
+        credential.token = &.{};
+        return token;
+    }
     if (source != .fx_login) return null;
 
     var credential = switch (mode) {

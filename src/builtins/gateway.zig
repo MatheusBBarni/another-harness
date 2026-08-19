@@ -28,6 +28,9 @@ const web_search_provider = @import("../core/tooling/web_search_provider.zig");
 const gateway_schema = @import("../core/tooling/gateway_schema.zig");
 const tool_advertisement = @import("../core/tooling/tool_advertisement.zig");
 const tool_dispatch = @import("../core/tooling/tool_dispatch.zig");
+const grok_route = @import("../gateway/grok_route.zig");
+const grok_stream = @import("../gateway/grok_stream.zig");
+const openai_compat = @import("../core/gateway/openai_compat.zig");
 const sort_utils = @import("../core/shared/sort_utils.zig");
 
 const Allocator = std.mem.Allocator;
@@ -150,6 +153,17 @@ pub fn buildAgentRequest(
         null;
     if (budget) |active| try active.check();
 
+    if (request.openai_compat) {
+        const route = grok_route.forModel(request.model) orelse return error.InvalidGrokModel;
+        return openai_compat.buildChatCompletionsBody(
+            alloc,
+            route.api_model,
+            request.messages,
+            request.serialized_tools,
+            request.tool_choice,
+            request.max_output_tokens,
+        );
+    }
     if (request.verified_images) |images| {
         const response_format = request.response_format orelse
             return error.MissingStructuredResponseFormat;
@@ -425,6 +439,9 @@ fn streamAgentCompletion(
     alloc: Allocator,
     request: agent_stream_provider_contract.Request,
 ) anyerror!agent_stream_provider_contract.Result {
+    if (grok_stream.isGrokChatUrl(request.chat_url)) {
+        return grok_stream.stream(alloc, request);
+    }
     const result = gateway_client.streamGatewayCompletion(
         alloc,
         .{

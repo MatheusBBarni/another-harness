@@ -26,6 +26,7 @@ const command_admission = @import("../../permissions/command_admission.zig");
 const permission_auto_classifier = @import("../../permissions/auto_classifier.zig");
 const auto_classifier_context = @import("../../permissions/auto_classifier_context.zig");
 
+const grok_route = @import("../../../gateway/grok_route.zig");
 const runtime_config = @import("config.zig");
 const runtime_finalization = @import("finalization.zig");
 const runtime_deps = @import("deps.zig");
@@ -1400,7 +1401,7 @@ fn refreshGatewayCredentialForJob(
     trace_ctx: TraceContext,
 ) !bool {
     const source = job.credential_source orelse return false;
-    if (source != .fx_login) return false;
+    if (source != .fx_login and source != .grok_oauth) return false;
     const refresh = deps.refresh_gateway_credential orelse return false;
 
     const refreshed = refresh(deps.ctx, alloc, source, mode) catch |err| {
@@ -2625,6 +2626,7 @@ fn processQueuedPromptLoop(
                 config.first_call_tool_choice
             else
                 .auto;
+            const grok_backend = job.credential_source == .grok_oauth and grok_route.forModel(gateway_model) != null;
             const request_payload = deps.agent_stream_provider.build(
                 overlay_arena,
                 .{
@@ -2647,6 +2649,7 @@ fn processQueuedPromptLoop(
                     .provider_options = provider_opts,
                     .max_output_tokens = request_max_output_tokens(request_capabilities),
                     .budget = .{ .cancel_flag = config.cancel_flag },
+                    .openai_compat = grok_backend,
                 },
             ) catch |err| {
                 if (err == error.Cancelled) {
@@ -2715,7 +2718,7 @@ fn processQueuedPromptLoop(
                 lifecycle.scope.session_id,
                 gateway_model,
                 config.gateway_retry_count,
-                config.gateway_chat_url,
+                if (grok_backend) grok_route.forModel(gateway_model).?.url else config.gateway_chat_url,
                 request_payload,
                 deps.cooperative_transport_pulse,
                 &gateway_delivery,

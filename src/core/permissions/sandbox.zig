@@ -267,7 +267,6 @@ pub fn runForegroundSessionBootstrap(args: []const [:0]const u8) !void {
     };
     const term = waitForForegroundTarget(&target) catch |err| {
         target.kill(zio);
-        _ = target.wait(zio) catch {};
         writeForegroundSessionReplaceFailure(args[1], err);
         std.process.exit(foreground_session_replace_failure_exit_code);
     };
@@ -2741,9 +2740,6 @@ fn cleanupChild(child: *std.process.Child) void {
     }
     if (builtin.os.tag == .windows or builtin.os.tag == .wasi) {
         child.kill(io_mod.getIo());
-        _ = child.wait(io_mod.getIo()) catch |err| {
-            debug_trace.logf("core", "command cleanup wait failed err={s}", .{@errorName(err)});
-        };
         return;
     }
     const pid = child.id orelse return;

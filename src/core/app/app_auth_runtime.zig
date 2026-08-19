@@ -89,7 +89,7 @@ pub fn Runtime(comptime App: type) type {
             // A remembered source always wins resolution, so an active fx login
             // is the only way one can be remembered; clearing otherwise is a
             // no-op against a store that holds nothing.
-            if (app.auth.credentialSource() == .fx_login) forgetCredentialSource(app);
+            if (app.auth.credentialSource() == .fx_login or app.auth.credentialSource() == .grok_oauth) forgetCredentialSource(app);
             applyCredentialChange(app, try app.auth.reconcileAfterFxLoginLogout(app.alloc));
             try writeAuthNotice(app, if (result.local_durability_failed)
                 .{

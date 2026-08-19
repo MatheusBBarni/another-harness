@@ -1,11 +1,15 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const config_runtime = @import("../config/config_runtime.zig");
 const credentials = @import("credentials.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
+const grok_oauth = @import("grok_oauth.zig");
+const grok_session = @import("grok_session.zig");
 const host = @import("../hosts/host.zig");
 const host_target = @import("../hosts/target.zig");
 const io_mod = @import("../shared/io.zig");
 const js_host_auth = @import("js_host_auth.zig");
+const login_provider = @import("login_provider.zig");
 const oauth = @import("oauth.zig");
 const oauth_session = @import("oauth_session.zig");
 const oauth_transport = @import("oauth_transport.zig");
@@ -554,6 +558,82 @@ pub fn runLogin(
     try oauth_session.saveNewSession(alloc, session);
     try writeStdout("Signed in to Vercel.\n");
     try writeStdout("AI Gateway access may still require billing or API setup for the selected account.\n");
+    persistLastLogin(alloc, .vercel, "");
+}
+
+pub fn runLoginPicker(
+    alloc: Allocator,
+    transport: oauth_transport.Provider,
+    url_opener: host.UrlOpener,
+) !void {
+    try writeStdout("Select a sign-in provider:\n  1. Vercel\n  2. Grok\nProvider [1]: ");
+    const input = try readLine(alloc);
+    defer alloc.free(input);
+    const trimmed = std.mem.trim(u8, input, " \t\r\n");
+    if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "1") or std.ascii.eqlIgnoreCase(trimmed, "vercel")) {
+        return runLogin(alloc, transport, url_opener);
+    }
+    if (std.mem.eql(u8, trimmed, "2") or std.ascii.eqlIgnoreCase(trimmed, "grok")) {
+        return runGrokLogin(alloc, transport, url_opener);
+    }
+    return error.InvalidLoginProvider;
+}
+
+pub fn runGrokLogin(
+    alloc: Allocator,
+    transport: oauth_transport.Provider,
+    url_opener: host.UrlOpener,
+) !void {
+    var device = try grok_oauth.requestDeviceAuthorization(alloc, transport);
+    defer device.deinit(alloc);
+
+    const display_url = device.verification_uri_complete orelse device.verification_uri;
+    try writeStdout("Open ");
+    try writeStdout(display_url);
+    try writeStdout("\nCode: ");
+    try writeStdout(device.user_code);
+    try writeStdout("\n\n");
+
+    var browser_prompt = try BrowserOpenPrompt.init(display_url);
+    try browser_prompt.writeWaitingMessage();
+
+    var token = try pollForTokenWithPrompt(
+        alloc,
+        transport,
+        grok_oauth.tokenMetadata(),
+        grok_oauth.client_id,
+        device,
+        &browser_prompt,
+        url_opener,
+    );
+    defer token.deinit(alloc);
+
+    var session = try grok_session.takeLoginSession(alloc, &token, io_mod.milliTimestamp());
+    defer session.deinit(alloc);
+    try grok_session.saveNewSession(alloc, session);
+    persistLastLogin(alloc, .grok, "");
+    try writeStdout("Signed in to Grok.\n");
+}
+
+fn persistLastLogin(alloc: Allocator, provider: login_provider.LoginProvider, previous_model: []const u8) void {
+    const ownership = login_provider.lastLoginOwnership(provider, previous_model);
+    var attempt = config_runtime.attemptUserPreferences(alloc, .{
+        .credential_source = ownership.credential_source,
+        .model = ownership.model,
+    });
+    defer attempt.deinit(alloc);
+}
+
+fn clearGrokHomeSession() bool {
+    const home = io_mod.getenv("HOME") orelse return false;
+    var home_dir = std.Io.Dir.openDirAbsolute(io_mod.getIo(), home, .{ .iterate = true }) catch return false;
+    defer home_dir.close(io_mod.getIo());
+    var fx_dir = home_dir.openDir(io_mod.getIo(), ".fx", .{
+        .iterate = true,
+        .follow_symlinks = false,
+    }) catch return false;
+    defer fx_dir.close(io_mod.getIo());
+    return grok_session.deleteGrokAuthFile(&fx_dir) catch false;
 }
 
 fn take_login_session(
@@ -653,13 +733,14 @@ pub fn logout(
     alloc: Allocator,
     transport: oauth_transport.Provider,
 ) !LogoutResult {
+    const grok_cleared = clearGrokHomeSession();
     var session: ?oauth_session.Session = null;
     var session_load_failed = false;
     defer if (session) |*loaded| loaded.deinit(alloc);
     const delete_outcome = blk: {
         var mutation = (oauth_session.beginExistingMutation() catch {
             return LogoutError.SessionDeleteFailed;
-        }) orelse return .{};
+        }) orelse return .{ .session_deleted = grok_cleared };
         defer mutation.deinit();
         session = mutation.load(alloc) catch load: {
             session_load_failed = true;
@@ -678,7 +759,7 @@ pub fn logout(
     }
 
     return .{
-        .session_deleted = delete_outcome != .missing,
+        .session_deleted = delete_outcome != .missing or grok_cleared,
         .local_durability_failed = local_durability_failed,
         .remote_revocation_failed = remote_revocation_failed,
     };

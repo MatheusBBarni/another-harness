@@ -1,9 +1,14 @@
 const std = @import("std");
 const build_options = @import("build_options");
+const grok_auth = @import("grok_auth.zig");
 const jsonrpc = @import("jsonrpc.zig");
 const core_types = @import("../core/shared/types.zig");
 
 const Allocator = std.mem.Allocator;
+
+test {
+    _ = @import("grok_auth.zig");
+}
 const writeJsonStr = jsonrpc.writeJsonStr;
 
 pub const protocol_version: u32 = 1;
@@ -188,7 +193,9 @@ pub fn writeInitializeResponse(w: *std.Io.Writer) !void {
     try w.writeAll("},\"agentInfo\":{\"name\":\"fx\",\"title\":\"fx\",\"version\":");
     try writeJsonStr(build_options.app_version, w);
     try w.writeAll("},");
-    try w.writeAll("\"authMethods\":[]}");
+    try w.writeAll("\"authMethods\":");
+    try w.writeAll(grok_auth.authMethodsJson());
+    try w.writeAll("}");
 }
 
 pub fn writePromptResponse(w: *std.Io.Writer, reason: StopReason) !void {
