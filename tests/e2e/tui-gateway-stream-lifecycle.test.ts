@@ -5768,7 +5768,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
   );
 
   test(
-    "minimal command summaries abbreviate the active workspace path",
+    "minimal command summaries hide no-op cwd prefixes and abbreviate the active workspace path",
     async () => {
       root = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-command-summary-")));
       const home = join(root, "home");
@@ -5804,7 +5804,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         JSON.stringify({ maxxing_mode: "minimal" }),
       );
 
-      const firstCommand = "printf TOOL_SUMMARY_FIRST_COMMAND";
+      const firstCommand = "cd . && printf TOOL_SUMMARY_FIRST_COMMAND";
+      const firstDisplayCommand = "printf TOOL_SUMMARY_FIRST_COMMAND";
       const nestedCommand = `cd ${nested} && pwd`;
       const thirdCommand = "printf TOOL_SUMMARY_THIRD_COMMAND";
       const finalText = "TOOL_SUMMARY_FINAL";
@@ -5869,7 +5870,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         "Ran cd ./vercel/packages/cli/test/fixtures/unit/commands/git/connect/unlink && pwd",
       );
       expect(compact).not.toContain(workspace);
-      expect(countOccurrences(compact, `Ran ${firstCommand}`)).toBe(1);
+      expect(countOccurrences(compact, `Ran ${firstDisplayCommand}`)).toBe(1);
+      expect(compact).not.toContain(`Ran ${firstCommand}`);
       expect(countOccurrences(compact, `Ran ${thirdCommand}`)).toBe(1);
 
       await session.resizeWindow(80, 24);
@@ -5879,6 +5881,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       expect(review).toContain(
         "├ Ran cd ./vercel/packages/cli/test/fixtures/unit/commands/git/connect/unlink",
       );
+      expect(review).toContain(`├ Ran ${firstDisplayCommand}`);
+      expect(review).not.toContain(`Ran ${firstCommand}`);
       expect(review).toContain("● 3 tool calls · 3 commands");
       expect(review).not.toContain(workspace);
 
@@ -5927,6 +5931,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       expect(resumed).toContain(
         "Ran cd ./vercel/packages/cli/test/fixtures/unit/commands/git/connect/unlink && pwd",
       );
+      expect(resumed).toContain(`Ran ${firstDisplayCommand}`);
+      expect(resumed).not.toContain(`Ran ${firstCommand}`);
       expect(resumed).not.toContain(workspace);
       expect(summaryGateway.requests).toHaveLength(2);
       expect(readFileSync(resumedStderrPath, "utf8")).toBe("");
