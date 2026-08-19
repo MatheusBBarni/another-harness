@@ -934,6 +934,120 @@ test "Vercel adapter sink failure does not mutate user cancellation" {
     try std.testing.expect(!cancelled.load(.seq_cst));
 }
 
+test "Vercel adapter enforces serialized request limit before admission" {
+    const FakeLegacy = struct {
+        payload: []const u8,
+        calls: usize = 0,
+
+        fn build(raw: ?*anyopaque, alloc: Allocator, _: agent_stream_provider_contract.BuildRequest) anyerror![]u8 {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            return alloc.dupe(u8, self.payload);
+        }
+
+        fn stream(raw: ?*anyopaque, _: Allocator, _: agent_stream_provider_contract.Request) anyerror!agent_stream_provider_contract.Result {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            return .{ .status = .ok, .completion = .{ .finish_reason = .stop } };
+        }
+    };
+    const Capture = struct {
+        admitted: usize = 0,
+        failures: usize = 0,
+        finishes: usize = 0,
+
+        fn emit(raw: *anyopaque, event: agent_stream_provider_contract.StreamEvent) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            switch (event) {
+                .provider_admitted => self.admitted += 1,
+                .failure => |failure| {
+                    try std.testing.expectEqual(agent_stream_provider_contract.StreamFailure.Category.request_too_large, failure.category);
+                    self.failures += 1;
+                },
+                .finish => self.finishes += 1,
+                else => {},
+            }
+        }
+    };
+
+    const accepted_payload = "x" ** (16 * 1024);
+    const rejected_payload = accepted_payload ++ "x";
+    var fake = FakeLegacy{ .payload = rejected_payload };
+    var adapter = provider_adapter;
+    adapter.legacy_provider = .{
+        .context = &fake,
+        .build_fn = FakeLegacy.build,
+        .stream_fn = FakeLegacy.stream,
+    };
+    var cancelled = std.atomic.Value(bool).init(false);
+    var delivery = agent_stream_provider_contract.DeliveryCertainty.init();
+    var attempt_evidence: agent_stream_provider_contract.AttemptEvidence = .{};
+    var route = route_snapshot_contract.RouteSnapshot{
+        .connection_id = @constCast("vercel"),
+        .adapter_kind = @constCast(connection_seed.adapter_id),
+        .endpoint = @constCast("provider:endpoint"),
+        .protocol = @constCast("vercel_ai_gateway"),
+        .credential_ref = @constCast("automatic"),
+        .primary_model_id = @constCast("test/model"),
+        .permission_review_model_id = null,
+        .vision_model_id = null,
+        .subagent_model_id = @constCast("test/model"),
+        .capabilities = .{},
+        .capability_source = .configured,
+        .selected_fast_mode = false,
+        .fast_model_suffix = null,
+    };
+    const request = agent_stream_provider_contract.AdapterRequest{
+        .model_request = .{
+            .tools = &.{},
+            .messages = &.{},
+            .tool_choice = .none,
+            .capabilities = .{},
+        },
+        .serialized_request_limit_bytes = 16 * 1024,
+        .route = &route,
+        .credential = "credential",
+        .tenant = null,
+        .model_id = "test/model",
+        .retry_count = 1,
+        .trace_ctx = .{},
+        .content_capture_limit = null,
+        .delivery = &delivery,
+        .attempt_evidence = &attempt_evidence,
+        .cancel_flag = &cancelled,
+    };
+
+    var state = agent_stream_provider_contract.EventState.init(std.testing.allocator);
+    defer state.deinit();
+    var sink_error: ?anyerror = null;
+    var capture: Capture = .{};
+    try adapter.stream(std.testing.allocator, request, .{
+        .context = &capture,
+        .state = &state,
+        .sink_error = &sink_error,
+        .emit_fn = Capture.emit,
+    });
+    try std.testing.expectEqual(@as(usize, 0), fake.calls);
+    try std.testing.expectEqual(@as(usize, 0), capture.admitted);
+    try std.testing.expectEqual(@as(usize, 1), capture.failures);
+    try std.testing.expect(!state.provider_admitted);
+
+    state.deinit();
+    state = agent_stream_provider_contract.EventState.init(std.testing.allocator);
+    fake.payload = accepted_payload;
+    capture = .{};
+    sink_error = null;
+    try adapter.stream(std.testing.allocator, request, .{
+        .context = &capture,
+        .state = &state,
+        .sink_error = &sink_error,
+        .emit_fn = Capture.emit,
+    });
+    try std.testing.expectEqual(@as(usize, 1), fake.calls);
+    try std.testing.expectEqual(@as(usize, 1), capture.admitted);
+    try std.testing.expectEqual(@as(usize, 1), capture.finishes);
+    try std.testing.expect(state.provider_admitted);
+}
+
 test "Vercel and peer adapters receive equivalent neutral requests with isolated wire formats" {
     const Probe = struct {
         vercel_calls: usize = 0,

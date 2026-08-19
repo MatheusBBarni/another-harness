@@ -1373,25 +1373,6 @@ test "terminal tool schema exposes one nullable object backed by the terminal ac
     );
 }
 
-test "terminal action contracts and admission agree on every action field" {
-    const branches = &terminal_action_schemas;
-    try std.testing.expectEqual(std.meta.tags(terminal_contracts.Action).len, branches.len);
-
-    for (branches) |branch| {
-        const action_property = schemaProperty(branch, "action").?;
-        try std.testing.expectEqual(@as(usize, 1), action_property.enum_values.len);
-        const action = std.meta.stringToEnum(
-            terminal_contracts.Action,
-            action_property.enum_values[0],
-        ) orelse return error.TestUnexpectedResult;
-        const admitted_fields = terminal_impl.actionFieldNames(action);
-        try std.testing.expectEqual(branch.properties.len, admitted_fields.len);
-        for (branch.properties, admitted_fields) |property, admitted_field| {
-            try std.testing.expectEqualStrings(property.name, admitted_field);
-        }
-    }
-}
-
 test "terminal advertisement projects a provider-neutral object schema" {
     const alloc = std.testing.allocator;
     var projection = try tool_advertisement.buildGatewayToolProjectionForSet(
@@ -1415,11 +1396,18 @@ test "terminal advertisement projects a provider-neutral object schema" {
     try std.testing.expectEqual(terminal_gateway_properties.len, input_schema.properties.len);
     const action_property = schemaProperty(input_schema, "action") orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(
-        std.meta.tags(terminal_contracts.Action).len,
+        terminal_actions.len,
         action_property.enum_values.len,
     );
-    try std.testing.expectEqual(@as(usize, 1), input_schema.required.len);
-    try std.testing.expectEqualStrings("action", input_schema.required[0]);
+    try std.testing.expectEqual(terminal_gateway_properties.len, input_schema.required.len);
+    for (terminal_gateway_properties, input_schema.required) |property, required_name| {
+        try std.testing.expectEqualStrings(property.name, required_name);
+        if (std.mem.eql(u8, property.name, "action")) continue;
+        try std.testing.expect(property.nullable);
+        try std.testing.expect(
+            std.mem.find(u8, property.nullable_description, terminal_null_guidance) != null,
+        );
+    }
 }
 
 fn allowTerminalTool(

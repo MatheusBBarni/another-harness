@@ -658,6 +658,7 @@ test "neutral adapter events materialize owned completion state" {
         .{},
         null,
         null,
+        null,
         .agent,
     );
     defer result.deinit(std.testing.allocator);
@@ -733,6 +734,7 @@ test "normalized adapter failure retains semantic recovery facts" {
         .{},
         null,
         null,
+        null,
         .agent,
     );
     defer result.deinit(std.testing.allocator);
@@ -799,6 +801,7 @@ test "normalized delivery-ambiguous failure keeps usage incomplete" {
         .{},
         null,
         null,
+        null,
         .agent,
     );
     var owned_result = result;
@@ -854,6 +857,7 @@ test "ambiguous-delivery category implies ambiguous delivery evidence" {
         null,
         alloc,
         .{},
+        null,
         null,
         null,
         .agent,

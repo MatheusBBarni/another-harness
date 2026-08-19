@@ -7,6 +7,7 @@ const command_admission = @import("../permissions/command_admission.zig");
 const command_environment = @import("../execution/command_environment.zig");
 const file_mutation = @import("file_mutation.zig");
 const file_mutation_contract = @import("file_mutation_contract.zig");
+const gateway_schema = @import("gateway_schema.zig");
 const image_attachments = @import("../images/image_attachments.zig");
 const io_mod = @import("../shared/io.zig");
 const text_utils = @import("../shared/text_utils.zig");
@@ -5769,7 +5770,7 @@ test "built-in structured review sends exact arguments without redundant schema"
 
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
     try std.testing.expectEqualStrings(arguments, fake.exact_arguments_json.?);
-    try std.testing.expect(fake.schema_json == null);
+    try std.testing.expectEqualStrings("terminal", fake.schema_name.?);
     try std.testing.expectEqual(ToolPermissionDecision.once, outcome.decision);
 }
 

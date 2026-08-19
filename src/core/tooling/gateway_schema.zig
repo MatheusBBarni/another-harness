@@ -267,12 +267,12 @@ test "nullable properties preserve concrete constraints and add one null branch"
         },
     };
 
-    const json = try builtinFunctionSchemaJsonAlloc(alloc, schema);
+    const json = try inputSchemaJsonAlloc(alloc, schema);
     defer alloc.free(json);
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
     defer parsed.deinit();
 
-    const properties = parsed.value.object.get("inputSchema").?.object.get("properties").?.object;
+    const properties = parsed.value.object.get("properties").?.object;
     const choice = properties.get("choice").?.object;
     try std.testing.expectEqualStrings(
         "Concrete choice. Set null when unused.",

@@ -211,6 +211,7 @@ test "Vercel and test peer traffic follows profile route and prepared dispatch a
         ) !void {
             const self: *@This() = @ptrCast(@alignCast(provider_adapter.context.?));
             if (std.mem.eql(u8, request.model_id, "root")) self.root += 1 else if (std.mem.eql(u8, request.model_id, "reviewer")) self.reviewer += 1 else if (std.mem.eql(u8, request.model_id, "vision")) self.vision += 1 else if (std.mem.eql(u8, request.model_id, "subagent")) self.subagent += 1 else return error.TestUnexpectedModel;
+            try events.emit(.provider_admitted);
             try events.emit(.{ .finish = .{ .reason = .stop } });
         }
 
