@@ -1,9 +1,18 @@
 const std = @import("std");
+const types = @import("../shared/types.zig");
 
 pub const LoginProvider = enum {
     picker,
     grok,
     vercel,
+};
+
+pub const grok_default_model = "xai/grok-4.6";
+pub const gateway_default_model = "zai/glm-5.2";
+
+pub const LastLoginOwnership = struct {
+    credential_source: types.CredentialSource,
+    model: []const u8,
 };
 
 pub fn parseLoginProvider(rest: []const []const u8) error{InvalidLoginProvider}!LoginProvider {
@@ -12,6 +21,26 @@ pub fn parseLoginProvider(rest: []const []const u8) error{InvalidLoginProvider}!
     if (std.mem.eql(u8, rest[0], "grok")) return .grok;
     if (std.mem.eql(u8, rest[0], "vercel")) return .vercel;
     return error.InvalidLoginProvider;
+}
+
+pub fn lastLoginOwnership(provider: LoginProvider, previous_model: []const u8) LastLoginOwnership {
+    return switch (provider) {
+        .picker, .vercel => .{
+            .credential_source = .fx_login,
+            .model = restoreGatewayModel(previous_model),
+        },
+        .grok => .{
+            .credential_source = .grok_oauth,
+            .model = grok_default_model,
+        },
+    };
+}
+
+fn restoreGatewayModel(previous_model: []const u8) []const u8 {
+    if (previous_model.len == 0 or std.mem.startsWith(u8, previous_model, "xai/grok-")) {
+        return gateway_default_model;
+    }
+    return previous_model;
 }
 
 test "login grok and vercel skip the picker; unknown args fail" {
@@ -23,7 +52,6 @@ test "login grok and vercel skip the picker; unknown args fail" {
 }
 
 test "last grok login selects grok_oauth and xai/grok-4.6" {
-    const types = @import("../shared/types.zig");
     const grok = lastLoginOwnership(.grok, "zai/glm-5.2");
     try std.testing.expectEqual(types.CredentialSource.grok_oauth, grok.credential_source);
     try std.testing.expectEqualStrings("xai/grok-4.6", grok.model);

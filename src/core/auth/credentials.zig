@@ -35,6 +35,7 @@ pub const CatalogAuthenticatedSource = enum {
     ai_gateway_api_key,
     fx_login,
     stored_key,
+    grok_oauth,
 
     fn credentialSource(self: CatalogAuthenticatedSource) Source {
         return switch (self) {
@@ -42,6 +43,7 @@ pub const CatalogAuthenticatedSource = enum {
             .ai_gateway_api_key => .ai_gateway_api_key,
             .fx_login => .fx_login,
             .stored_key => .stored_key,
+            .grok_oauth => .grok_oauth,
         };
     }
 };
@@ -133,6 +135,7 @@ pub fn catalogAccessForCredential(
         .vercel_oidc_token => .vercel_oidc_token,
         .ai_gateway_api_key => .ai_gateway_api_key,
         .stored_key => .stored_key,
+        .grok_oauth => .grok_oauth,
         .fx_login => blk: {
             const team = team_context orelse
                 return .{ .public_only = .fx_login_team_required };
@@ -284,6 +287,7 @@ pub fn loadSource(
         .ai_gateway_api_key => loadEnvCredential(alloc, "AI_GATEWAY_API_KEY", source),
         .fx_login => loadFxLoginCredential(alloc, transport),
         .stored_key => loadStoredKeyCredential(alloc, secret_store),
+        .grok_oauth => null,
     };
 }
 
@@ -295,6 +299,7 @@ pub fn sourceExists(
     return switch (source) {
         .vercel_oidc_token => nonEmptyEnvValue("VERCEL_OIDC_TOKEN") != null,
         .ai_gateway_api_key => nonEmptyEnvValue("AI_GATEWAY_API_KEY") != null,
+        .grok_oauth => false,
         .fx_login => blk: {
             const loaded = oauth_session.load(alloc) catch |err| switch (err) {
                 error.OutOfMemory => return err,
@@ -471,11 +476,12 @@ pub fn sourceLabel(source: Source) []const u8 {
         .ai_gateway_api_key => "AI_GATEWAY_API_KEY",
         .fx_login => "fx login",
         .stored_key => "stored API key (" ++ stored_key_backend_label ++ ")",
+        .grok_oauth => "grok login",
     };
 }
 
 pub fn sourceRefreshable(source: Source) bool {
-    return source == .fx_login;
+    return source == .fx_login or source == .grok_oauth;
 }
 
 test "stored key label discloses the backend that answered" {

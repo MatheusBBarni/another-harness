@@ -23,6 +23,7 @@ const credential_source_order = [_]credentials.Source{
     .ai_gateway_api_key,
     .fx_login,
     .stored_key,
+    .grok_oauth,
 };
 
 const SourceProbeFn = *const fn (?*anyopaque, Allocator, credentials.Source) anyerror!bool;
