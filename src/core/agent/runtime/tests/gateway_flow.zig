@@ -2548,7 +2548,10 @@ test "processQueuedPrompt projects bounded output limits into gateway requests" 
         defer hooks.deinit();
         var fixture = PromptFixture{};
         var job = fixture.job();
-        job.model = @constCast("provider/model");
+        job.route = test_support.testRouteForCapabilities(
+            "provider/model",
+            available_overrides[0].capabilities,
+        );
 
         try runFakePrompt(&gateway, &hooks, fixture.config(), job);
 
@@ -2862,6 +2865,7 @@ test "selecting connection B during route A changes only the next admitted turn"
         ) !void {
             const self: *@This() = @ptrCast(@alignCast(adapter.context.?));
             self.calls += 1;
+            try events.emit(.provider_admitted);
             switch (self.calls) {
                 1 => {
                     try expectRoute(request, "connection-a", "fake://a", "fake-ref-a", "secret-a", "fake/model-a");

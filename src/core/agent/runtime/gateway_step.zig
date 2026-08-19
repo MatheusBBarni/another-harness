@@ -817,17 +817,18 @@ test "usage reservation failure stops before adapter network effects" {
     var delivery = DeliveryCertainty.init();
     var attempt_evidence: AttemptEvidence = .{};
     var callback_ctx: u8 = 0;
+    var route = testingRoute("provider:endpoint");
     try std.testing.expectError(
         error.UsageCapacityExceeded,
         streamModelRequest(
-            .{ .context = &fake, .stream_fn = Fake.stream },
+            .{ .kind = "test", .context = &fake, .stream_fn = Fake.stream },
             alloc,
+            &route,
             "credential",
             null,
             null,
             "test/model",
             1,
-            "provider:endpoint",
             .{
                 .model = "test/model",
                 .serialized_tools = "[]",
@@ -864,8 +865,11 @@ test "normalized failure state preserves HTTP status and delivery independently"
 
     for ([_]std.http.Status{ .payment_required, .not_found, .request_timeout }) |status| {
         var callback_ctx: u8 = 0;
+        var attempt_evidence: AttemptEvidence = .{};
         var collector = AdapterEventCollector{
             .alloc = std.testing.allocator,
+            .usage = null,
+            .attempt_evidence = &attempt_evidence,
             .content_capture_limit = null,
             .callback_ctx = &callback_ctx,
             .on_content_chunk = Callbacks.content,
@@ -890,8 +894,11 @@ test "normalized failure state preserves HTTP status and delivery independently"
     }
 
     var callback_ctx: u8 = 0;
+    var attempt_evidence: AttemptEvidence = .{};
     var collector = AdapterEventCollector{
         .alloc = std.testing.allocator,
+        .usage = null,
+        .attempt_evidence = &attempt_evidence,
         .content_capture_limit = null,
         .callback_ctx = &callback_ctx,
         .on_content_chunk = Callbacks.content,
@@ -923,6 +930,7 @@ test "normalized delivery-ambiguous failure keeps usage incomplete" {
             _: agent_stream_provider.AdapterRequest,
             events: agent_stream_provider.EventSink,
         ) anyerror!void {
+            try events.emit(.provider_admitted);
             try events.emit(.{ .failure = .{
                 .category = .provider_internal,
                 .http_status = .internal_server_error,
@@ -952,6 +960,7 @@ test "normalized delivery-ambiguous failure keeps usage incomplete" {
         "test/model",
         1,
         .{
+            .model = "test/model",
             .serialized_tools = "[]",
             .messages = &.{},
             .tool_choice = .none,

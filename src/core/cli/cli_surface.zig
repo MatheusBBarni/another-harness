@@ -163,6 +163,7 @@ pub const Config = struct {
     build_channel: update_target.Channel = .stable,
     command_catalog: CommandCatalog,
     default_model: []const u8,
+    default_fast_mode: bool = false,
     default_agent_step_limit: usize,
     models_path: []const u8,
     gateway_retry_count: usize,

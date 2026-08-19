@@ -1202,6 +1202,7 @@ fn loadConfiguredStartupState(state: *const ServerState, alloc: Allocator) !app_
                 home_dir,
                 workspace_root,
                 state.cfg.default_model,
+                false,
                 state.cfg.default_agent_step_limit,
                 state.cfg.gateway_provider.connection_seed,
             );
@@ -1210,6 +1211,7 @@ fn loadConfiguredStartupState(state: *const ServerState, alloc: Allocator) !app_
     return app_lifecycle.loadStartupStateWithoutCredentials(
         alloc,
         state.cfg.default_model,
+        false,
         state.cfg.default_agent_step_limit,
         state.cfg.gateway_provider.connection_seed,
     );

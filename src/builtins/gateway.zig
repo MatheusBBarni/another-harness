@@ -459,6 +459,19 @@ test "Vercel adapter enforces serialized request limit before admission" {
     defer state.deinit();
     var sink_error: ?anyerror = null;
     var capture: Capture = .{};
+    var route = route_snapshot_contract.RouteSnapshot{
+        .connection_id = @constCast("vercel"),
+        .adapter_kind = @constCast(connection_seed.adapter_id),
+        .endpoint = @constCast("provider:endpoint"),
+        .protocol = @constCast("vercel_ai_gateway"),
+        .credential_ref = @constCast("automatic"),
+        .primary_model_id = @constCast("test/model"),
+        .permission_review_model_id = null,
+        .capabilities = .{},
+        .capability_source = .configured,
+        .selected_fast_mode = false,
+        .fast_model_suffix = null,
+    };
     var request = agent_stream_provider_contract.AdapterRequest{
         .model_request = .{
             .model = "test/model",
@@ -468,11 +481,11 @@ test "Vercel adapter enforces serialized request limit before admission" {
             .capabilities = .{},
         },
         .serialized_request_limit_bytes = 16 * 1024,
+        .route = &route,
         .credential = "credential",
         .tenant = null,
         .model_id = "test/model",
         .retry_count = 1,
-        .endpoint = "provider:endpoint",
         .trace_ctx = .{},
         .content_capture_limit = null,
         .delivery = &delivery,

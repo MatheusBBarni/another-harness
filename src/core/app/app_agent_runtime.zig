@@ -2483,6 +2483,7 @@ test "fake non-Vercel adapter completes a TUI-admitted queued root turn" {
             try std.testing.expectEqualStrings("fake://tui", request.route.endpoint);
             try std.testing.expectEqualStrings("fake-ref", request.route.credential_ref);
             try std.testing.expectEqualStrings("api-key", request.credential);
+            try events.emit(.provider_admitted);
             try events.emit(.{ .text_delta = "tui complete" });
             try events.emit(.{ .finish = .{ .reason = .stop } });
         }

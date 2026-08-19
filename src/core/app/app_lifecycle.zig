@@ -2126,6 +2126,7 @@ test "loadStartupState applies core env overrides" {
         oauth_transport.unavailable_provider,
         host.unavailable_secret_store,
         "default-model",
+        false,
         12,
         test_connection_seed,
     );

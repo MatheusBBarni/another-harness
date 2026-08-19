@@ -637,6 +637,7 @@ const App = struct {
             &app,
             footer_rows,
             builtin_gateway.default_model,
+            false,
             default_max_agent_steps,
             handle_sigwinch,
             launch.record_requested,

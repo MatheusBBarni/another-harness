@@ -3449,6 +3449,7 @@ test "fake non-Vercel adapter completes an ACP root turn on its admitted route" 
             try std.testing.expectEqualStrings("fake-protocol", request.route.protocol);
             try std.testing.expectEqualStrings("fake://acp", request.route.endpoint);
             try std.testing.expectEqualStrings("fake-key", request.credential);
+            try events.emit(.provider_admitted);
             try events.emit(.{ .finish = .{ .reason = .stop } });
         }
     };
