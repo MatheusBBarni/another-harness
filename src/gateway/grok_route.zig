@@ -5,6 +5,7 @@ test {
 }
 
 pub const chat_completions_url = "https://api.x.ai/v1/chat/completions";
+pub const responses_url = "https://api.x.ai/v1/responses";
 
 pub const Route = struct {
     api_model: []const u8,
@@ -17,9 +18,10 @@ pub fn forModel(fx_model: []const u8) ?Route {
     if (!std.mem.startsWith(u8, fx_model, prefix)) return null;
     const api_model = fx_model[prefix.len..];
     if (api_model.len == 0) return null;
+    const url = if (std.mem.eql(u8, api_model, "grok-4.5")) responses_url else chat_completions_url;
     return .{
         .api_model = api_model,
-        .url = chat_completions_url,
+        .url = url,
         .uses_gateway_headers = false,
     };
 }
