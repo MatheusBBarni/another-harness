@@ -2739,6 +2739,24 @@ test "session_commands selectModelFromPicker skips effort changes for models wit
     try std.testing.expect(!app.fast_mode);
 }
 
+test "session_commands model picker accepts the current selected model slice" {
+    const alloc = std.testing.allocator;
+    var app = try FakeApp.init(alloc, "/tmp/workspace", "anthropic/claude-opus-4.6");
+    defer app.deinit();
+    const efforts = [_]types.ReasoningEffort{types.ReasoningEffort.literal("high")};
+    app.setGatewayControls("anthropic/claude-opus-4.6", &efforts, true);
+
+    try Commands(FakeApp).selectModelFromPicker(
+        &app,
+        app.selected_model.items,
+        types.ReasoningEffort.literal("high"),
+        false,
+    );
+
+    try std.testing.expectEqualStrings("anthropic/claude-opus-4.6", app.selected_model.items);
+    try std.testing.expectEqual(types.ReasoningEffort.literal("high"), app.effort);
+}
+
 test "session_commands selectModelFromPicker persists portable Gateway reasoning effort" {
     const alloc = std.testing.allocator;
     var app = try FakeApp.init(alloc, "/tmp/workspace", "anthropic/claude-opus-4.6");
