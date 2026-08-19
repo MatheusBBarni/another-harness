@@ -4692,6 +4692,11 @@ describe("acp: model-independent", () => {
         expect(JSON.stringify(result.messages)).toContain("ACP needs one detail.");
         expect(JSON.stringify(result.messages)).toContain("ACP recovered normally.");
         expect(JSON.stringify(result.messages)).not.toContain("internal_error");
+        expect(
+          result.messages.some(
+            (message: any) => message.method === "session/request_permission",
+          ),
+        ).toBe(false);
         expect(gateway.requests).toHaveLength(2);
         expect(gateway.requests[1].body).toContain(`"toolCallId":"${malformedCallId}"`);
         expect(gateway.requests[1].body).toContain('"input":{}');

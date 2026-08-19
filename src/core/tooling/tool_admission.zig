@@ -5251,6 +5251,23 @@ test "configured command authority skips automatic review" {
         configured.execution_authority.?.run_command.shell_allowed.source,
     );
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
+
+    const compound = try requestPermissionOutcome(
+        input,
+        arena_state.allocator(),
+        .{
+            .id = "compound",
+            .name = "terminal",
+            .arguments_json = "{\"action\":\"exec\",\"command\":\"touch configured.txt && printf bypass\"}",
+        },
+        .auto,
+        &.{},
+    );
+    try std.testing.expectEqual(
+        command_admission.ShellAuthorizationSource.auto_classifier,
+        compound.execution_authority.?.run_command.shell_allowed.source,
+    );
+    try std.testing.expectEqual(@as(usize, 2), fake.calls);
 }
 
 test "session deny narrows configured command allow" {

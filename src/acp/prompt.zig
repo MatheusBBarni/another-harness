@@ -1281,6 +1281,10 @@ fn requestAcpPermission(
     _: ?*const diff_mod.FileReview,
     _: ?[]const PermissionGrant,
 ) anyerror!permission_request.OwnedPermissionResponse {
+    var validated_arguments: std.Io.Writer.Allocating = .init(alloc);
+    defer validated_arguments.deinit();
+    try writeValidatedToolArguments(alloc, &validated_arguments.writer, call.arguments_json);
+
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
     const request_id = server.beginPermissionRequest(ctx.state) orelse return error.PermissionRequestAlreadyPending;
     errdefer {
@@ -1303,7 +1307,7 @@ fn requestAcpPermission(
     try params.writer.writeAll(",\"kind\":");
     try jsonrpc.writeJsonStr(mapToolKind(call.name).jsonString(), &params.writer);
     try params.writer.writeAll(",\"status\":\"pending\",\"rawInput\":");
-    try params.writer.writeAll(call.arguments_json);
+    try params.writer.writeAll(validated_arguments.written());
     try params.writer.writeAll("},\"options\":[");
     try writePermissionOption(&params.writer, "allow_once", "Allow once", "allow_once");
     try params.writer.writeByte(',');
@@ -1320,6 +1324,13 @@ fn requestAcpPermission(
     );
     const decision = server.awaitPermissionDecision(ctx.state, request_id);
     return permission_request.OwnedPermissionResponse.init(alloc, decision, null);
+}
+
+fn writeValidatedToolArguments(alloc: Allocator, writer: *std.Io.Writer, arguments_json: []const u8) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, arguments_json, .{}) catch
+        return error.InvalidToolArgumentsJson;
+    defer parsed.deinit();
+    try std.json.Stringify.value(parsed.value, .{}, writer);
 }
 
 fn writePermissionOption(
@@ -2916,6 +2927,23 @@ test "mapToolKind maps all file tools" {
     try std.testing.expectEqual(acp_types.ToolCallKind.other, mapToolKind("memory"));
     try std.testing.expectEqual(acp_types.ToolCallKind.other, mapToolKind("skill"));
     try std.testing.expectEqual(acp_types.ToolCallKind.other, mapToolKind("install_skill"));
+}
+
+test "ACP permission arguments are validated and reserialized before emission" {
+    const alloc = std.testing.allocator;
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+
+    try writeValidatedToolArguments(alloc, &out.writer, " { \"path\" : \"README.md\" } ");
+    try std.testing.expectEqualStrings("{\"path\":\"README.md\"}", out.written());
+
+    var malformed: std.Io.Writer.Allocating = .init(alloc);
+    defer malformed.deinit();
+    try std.testing.expectError(
+        error.InvalidToolArgumentsJson,
+        writeValidatedToolArguments(alloc, &malformed.writer, "{\"path\":}"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), malformed.written().len);
 }
 
 test "acp exposes web_search progress updates" {

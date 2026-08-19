@@ -151,6 +151,67 @@ describe("lean auto mode reliability", () => {
   );
 
   test(
+    "configured wildcard commands cannot absorb shell operators or substitutions",
+    async () => {
+      const root = createIsolatedRoot();
+      const operatorMarker = join(root.workspace, "operator-bypass-must-not-run");
+      const substitutionMarker = join(
+        root.workspace,
+        "substitution-bypass-must-not-run",
+      );
+      writeFileSync(
+        join(root.home, ".fx", "settings.json"),
+        JSON.stringify({
+          sandbox: "none",
+          permission: { "*": { "printf *": "allow" } },
+          maxxing_mode: "legacy",
+        }),
+      );
+      const gateway = startGateway(
+        [
+          commandCall(
+            `printf safe && touch ${JSON.stringify(operatorMarker)}`,
+            "operator_bypass",
+          ),
+          (body) => {
+            expect(body).toContain("auto_denied");
+            return commandCall(
+              `printf "$(touch ${substitutionMarker})"`,
+              "substitution_bypass",
+            );
+          },
+          (body) => {
+            expect(body).toContain("auto_denied");
+            return commandCall("printf safe", "static_command");
+          },
+          fakeGatewayFinalText("static command complete"),
+        ],
+        [
+          fakeGatewayPermissionDecision("ask", "operator_requires_review"),
+          fakeGatewayPermissionDecision("ask", "substitution_requires_review"),
+        ],
+      );
+
+      const result = await runFx(
+        ["ask", "--quiet", "--json", "--no-save", "Exercise configured commands safely."],
+        {
+          cwd: root.workspace,
+          env: gatewayEnv(root, gateway),
+          timeoutMs: TIMEOUT,
+        },
+      );
+
+      expect(result.code, `stdout: ${result.stdout}\nstderr: ${result.stderr}`).toBe(0);
+      expect(existsSync(operatorMarker)).toBe(false);
+      expect(existsSync(substitutionMarker)).toBe(false);
+      expect(gateway.classifierRequests).toHaveLength(2);
+      expect(gateway.requests).toHaveLength(4);
+      expect(result.stdout).toContain("static command complete");
+    },
+    TIMEOUT,
+  );
+
+  test(
     "an exact read-only git status is reviewed once through the user profile",
     async () => {
       const root = createIsolatedRoot();
