@@ -944,7 +944,10 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       await session.waitForComposer(10_000);
 
       await session.sendKeys("-l '/m'");
-      await session.waitForText("Commands 3", 5_000);
+      await session.waitForPane(
+        (pane) => pane.includes("Commands ") && pane.includes("/model"),
+        5_000,
+      );
 
       const initialGrid = await session.capturePaneGrid();
       const modelRow = initialGrid.find((line) =>
@@ -1021,7 +1024,10 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
         5_000,
       );
       await session.sendLiteralText("/m");
-      await session.waitForText("Results 7", 5_000);
+      await session.waitForPane(
+        (pane) => pane.includes("Results ") && pane.includes("/model"),
+        5_000,
+      );
       grid = await session.capturePaneGrid();
       const modelRow = grid.find((line) => line.includes("/model"));
       const mcpRow = grid.find((line) => line.includes("/mcp"));
@@ -1046,7 +1052,10 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       session = await launch();
       await session.waitForComposer(10_000);
       await session.sendLiteralText("/m");
-      await session.waitForText("Results 7", 5_000);
+      await session.waitForPane(
+        (pane) => pane.includes("Results ") && pane.includes("/model"),
+        5_000,
+      );
       grid = await session.capturePaneGrid();
       const restartedModelRow = grid.find((line) => line.includes("/model"));
       const restartedMcpRow = grid.find((line) => line.includes("/mcp"));
@@ -1135,7 +1144,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       mkdirSync(workspace, { recursive: true });
       writeFileSync(
         join(skillDir, "SKILL.md"),
-        "---\nname: resume-helper\ndescription: resume a saved workflow\n---\n\nResume helper body\n",
+        "---\nname: resume-helper\ndescription: resume a named saved workflow\n---\n\nResume helper body\n",
       );
 
       session = await TmuxSession.create({
@@ -1165,6 +1174,14 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
           !current.includes("no matching slash commands"),
         5_000,
       );
+
+      await session.sendKeys("C-u");
+      await session.sendLiteralText("/name");
+      pane = await session.waitForPane(
+        (current) => current.includes("/rename") && current.includes("resume-helper"),
+        5_000,
+      );
+      expect(pane.indexOf("/rename")).toBeLessThan(pane.indexOf("resume-helper"));
 
       await session.sendKeys("C-u");
       await session.pasteText("\n   ");
