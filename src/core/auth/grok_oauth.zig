@@ -8,6 +8,7 @@ const Allocator = std.mem.Allocator;
 test {
     _ = @import("grok_session.zig");
     _ = @import("login_provider.zig");
+    _ = @import("../../gateway/grok_route.zig");
 }
 
 pub const client_id = "b1a00492-073a-47ea-816f-4c329264a828";
