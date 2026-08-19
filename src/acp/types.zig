@@ -4,6 +4,10 @@ const jsonrpc = @import("jsonrpc.zig");
 const core_types = @import("../core/shared/types.zig");
 
 const Allocator = std.mem.Allocator;
+
+test {
+    _ = @import("grok_auth.zig");
+}
 const writeJsonStr = jsonrpc.writeJsonStr;
 
 pub const protocol_version: u32 = 1;
