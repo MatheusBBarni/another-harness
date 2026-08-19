@@ -116,3 +116,35 @@ test "billing json becomes a super grok usage snapshot" {
     try std.testing.expectEqualStrings("2026-08-24T17:33:48.278Z", snapshot.reset_at.?);
     try std.testing.expectEqual(@as(i64, 250), snapshot.prepaid_cents.?);
 }
+
+test "credits and xai-usage render snapshot; 401 asks for relogin without leaking the token" {
+    const json =
+        \\{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2026-08-24T17:33:48.278812+00:00"},"creditUsagePercent":12.4,"prepaidBalance":{"val":250}},"subscription_tier":"SuperGrok"}
+    ;
+    var snapshot = try parseBilling(std.testing.allocator, json);
+    defer snapshot.deinit(std.testing.allocator);
+
+    const credits = try renderCreditsText(std.testing.allocator, snapshot);
+    defer std.testing.allocator.free(credits);
+    try std.testing.expect(std.mem.indexOf(u8, credits, "SuperGrok") != null);
+    try std.testing.expect(std.mem.indexOf(u8, credits, "12% weekly") != null);
+    try std.testing.expect(std.mem.indexOf(u8, credits, "$2.50") != null);
+
+    const usage = try renderXaiUsageText(std.testing.allocator, snapshot, null);
+    defer std.testing.allocator.free(usage);
+    try std.testing.expectEqualStrings(
+        "SuperGrok 12% weekly · resets 2026-08-24T17:33:48.278Z · prepaid $2.50",
+        usage,
+    );
+
+    const leaked = "sk-secret-token-value";
+    const err401 = try renderBillingHttpError(std.testing.allocator, 401, leaked);
+    defer std.testing.allocator.free(err401);
+    try std.testing.expect(std.mem.indexOf(u8, err401, "fx login grok") != null);
+    try std.testing.expect(std.mem.indexOf(u8, err401, leaked) == null);
+
+    const err403 = try renderBillingHttpError(std.testing.allocator, 403, leaked);
+    defer std.testing.allocator.free(err403);
+    try std.testing.expect(std.mem.indexOf(u8, err403, "fx login grok") != null);
+    try std.testing.expect(std.mem.indexOf(u8, err403, leaked) == null);
+}
