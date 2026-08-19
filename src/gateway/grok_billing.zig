@@ -149,6 +149,35 @@ fn renderBillingHttpError(alloc: Allocator, status: u16, _: []const u8) ![]u8 {
     );
 }
 
+pub const RequestWindow = struct {
+    remaining: u64,
+    limit: u64,
+};
+
+fn parseRequestWindow(remaining_text: ?[]const u8, limit_text: ?[]const u8) ?RequestWindow {
+    const remaining = parseCount(remaining_text orelse return null) orelse return null;
+    const limit = parseCount(limit_text orelse return null) orelse return null;
+    return .{ .remaining = remaining, .limit = limit };
+}
+
+fn parseCount(text: []const u8) ?u64 {
+    if (text.len == 0) return null;
+    return std.fmt.parseInt(u64, text, 10) catch null;
+}
+
+fn renderStatusLineFragment(alloc: Allocator, snapshot: Snapshot, window: ?RequestWindow) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try out.writer.print("SG {d}%", .{snapshot.percent});
+    if (snapshot.reset_at) |reset_at| {
+        try out.writer.print(" · {s}", .{reset_at});
+    }
+    if (window) |rpm| {
+        try out.writer.print(" · {d}/{d} RPM", .{ rpm.remaining, rpm.limit });
+    }
+    return out.toOwnedSlice();
+}
+
 fn parsePrepaidCents(config: std.json.ObjectMap) ?i64 {
     const prepaid = config.get("prepaidBalance") orelse config.get("prepaid_balance") orelse return null;
     if (prepaid != .object) return null;
