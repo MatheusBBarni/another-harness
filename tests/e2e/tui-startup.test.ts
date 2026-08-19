@@ -63,6 +63,63 @@ describe.skipIf(SKIP)("tui: startup and exit", () => {
 
 describe.skipIf(SKIP_TMUX)("tui: fresh-session commands", () => {
   test(
+    "/help keeps command descriptions close after a wide-to-narrow resize",
+    async () => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), "fx-e2e-help-columns-")));
+      const home = join(root, "home");
+      const stderrPath = join(root, "stderr.log");
+      mkdirSync(home, { recursive: true });
+      writeFileSync(stderrPath, "");
+
+      try {
+        session = await TmuxSession.create({
+          cwd: root,
+          env: {
+            HOME: home,
+            FX_AUTO_UPGRADE: "0",
+          },
+          stderrPath,
+          width: 160,
+          height: 40,
+        });
+
+        await session.waitForComposer(10_000);
+        await session.sendText("/help");
+        const wide = await session.waitForPane(
+          (pane) => pane.includes("/help") && pane.includes("show available slash commands"),
+          5_000,
+        );
+        const wideHelp = wide.split("\n").find(
+          (line) => line.includes("/help") && line.includes("show available slash commands"),
+        );
+        expect(wideHelp).toBeDefined();
+        expect(wideHelp!.indexOf("show available slash commands")).toBe(48);
+
+        await session.resizeWindow(60, 40);
+        const narrow = await session.waitForPane(
+          (pane) => pane.split("\n").some(
+            (line) => line.includes("/help") && line.includes("show available"),
+          ),
+          5_000,
+        );
+        const narrowHelp = narrow.split("\n").find(
+          (line) => line.includes("/help") && line.includes("show available"),
+        );
+        expect(narrowHelp).toBeDefined();
+        expect(narrowHelp!.indexOf("show available")).toBe(40);
+        expect(readFileSync(stderrPath, "utf8")).toBe("");
+      } finally {
+        if (session) {
+          await session.kill();
+          session = null;
+        }
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
     "restore the launch header without retaining prior output",
     async () => {
       const root = realpathSync(mkdtempSync(join(tmpdir(), "fx-e2e-fresh-session-")));
