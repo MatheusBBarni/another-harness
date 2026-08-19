@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -15,6 +16,7 @@ import { FX_BIN, runFx } from "../evals/eval-helpers";
 import {
   fakeGatewayFinalText,
   fakeGatewayPermissionDecision,
+  fakeGatewaySse,
   fakeGatewayToolCall,
   startFakeGateway,
   TmuxSession,
@@ -151,7 +153,7 @@ describe("lean auto mode reliability", () => {
   );
 
   test(
-    "an exact read-only git status is reviewed once through the user profile",
+    "an exact read-only git status bypasses automatic review",
     async () => {
       const root = createIsolatedRoot();
       const initialized = Bun.spawnSync(["/usr/bin/git", "init", "--quiet"], {
@@ -177,7 +179,7 @@ describe("lean auto mode reliability", () => {
 
       expect(result.code).toBe(0);
       expect(gateway.requests).toHaveLength(2);
-      expect(gateway.classifierRequests).toHaveLength(1);
+      expect(gateway.classifierRequests).toHaveLength(0);
       const json = JSON.parse(result.stdout.trim()) as {
         tool_calls: Array<{ name: string; status: string }>;
       };
@@ -275,6 +277,115 @@ describe("lean auto mode reliability", () => {
       expect(result.code).toBe(0);
       expect(result.stdout).not.toContain("NonInteractivePermissionRequired");
       expect(result.stdout).toContain("Which safe alternative should I use?");
+      expect(gateway.requests).toHaveLength(4);
+      expect(gateway.classifierRequests).toHaveLength(3);
+      for (const marker of markers) expect(existsSync(marker)).toBe(false);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "equivalent denied wrappers are reviewed once and recovery continues",
+    async () => {
+      const root = createIsolatedRoot();
+      const marker = join(root.workspace, "equivalent-denial-must-not-run");
+      const direct = `touch ${JSON.stringify(marker)}`;
+      const wrapped = `sh -c '${direct}'`;
+      const gateway = startGateway(
+        [
+          commandCall(direct, "direct_denial"),
+          (body) => {
+            expect(body).toContain("auto_denied");
+            return commandCall(wrapped, "wrapped_denial");
+          },
+          (body) => {
+            expect(body).toContain("auto_denied");
+            return fakeGatewayFinalText("Equivalent denial handled once.");
+          },
+        ],
+        [fakeGatewayPermissionDecision("ask", "single_review")],
+      );
+
+      const result = await runFx(
+        ["ask", "--quiet", "--json", "--no-save", "Try the action safely."],
+        {
+          cwd: root.workspace,
+          env: gatewayEnv(root, gateway),
+          timeoutMs: TIMEOUT,
+        },
+      );
+
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain("Equivalent denial handled once.");
+      expect(gateway.requests).toHaveLength(3);
+      expect(gateway.classifierRequests).toHaveLength(1);
+      expect(existsSync(marker)).toBe(false);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "a mixed success batch resets automatic recovery",
+    async () => {
+      const root = createIsolatedRoot();
+      writeFileSync(
+        join(root.home, ".fx", "settings.json"),
+        JSON.stringify({
+          sandbox: "none",
+          permission: { bash: { pwd: "allow" } },
+          maxxing_mode: "legacy",
+        }),
+      );
+      const markers = Array.from(
+        { length: 3 },
+        (_, index) => join(root.workspace, `mixed-blocked-${index + 1}-must-not-run`),
+      );
+      const gateway = startGateway(
+        [
+          commandCall(`touch ${JSON.stringify(markers[0]!)}`, "mixed_block_1"),
+          commandCall(`touch ${JSON.stringify(markers[1]!)}`, "mixed_block_2"),
+          fakeGatewaySse([
+            {
+              type: "tool-call",
+              toolCallId: "mixed_block_3",
+              toolName: "terminal",
+              input: { action: "exec", command: `touch ${JSON.stringify(markers[2]!)}` },
+            },
+            {
+              type: "tool-call",
+              toolCallId: "mixed_safe_pwd",
+              toolName: "terminal",
+              input: { action: "exec", command: "pwd" },
+            },
+            {
+              type: "finish",
+              finishReason: { unified: "tool-calls", raw: "tool-calls" },
+            },
+          ]),
+          (body) => {
+            expect(body).not.toContain('"tools":[]');
+            expect(body).not.toContain('"toolChoice":{"type":"none"}');
+            return fakeGatewayFinalText("Mixed success recovery continued.");
+          },
+        ],
+        [
+          fakeGatewayPermissionDecision("ask", "mixed_review_1"),
+          fakeGatewayPermissionDecision("ask", "mixed_review_2"),
+          fakeGatewayPermissionDecision("ask", "mixed_review_3"),
+        ],
+      );
+
+      const result = await runFx(
+        ["ask", "--quiet", "--json", "--no-save", "Use safe alternatives where needed."],
+        {
+          cwd: root.workspace,
+          env: gatewayEnv(root, gateway),
+          timeoutMs: TIMEOUT,
+        },
+      );
+
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain("Mixed success recovery continued.");
       expect(gateway.requests).toHaveLength(4);
       expect(gateway.classifierRequests).toHaveLength(3);
       for (const marker of markers) expect(existsSync(marker)).toBe(false);
@@ -469,6 +580,144 @@ describe("lean auto mode reliability", () => {
       expect(gateway.classifierRequests).toHaveLength(0);
       expect(gateway.requests).toHaveLength(3);
       expect(readFileSync(stderrPath, "utf8")).toBe("");
+    },
+    TIMEOUT,
+  );
+
+  test.skipIf(!tmuxAvailable())(
+    "an auto denial can enter exact human approval without trusting question text",
+    async () => {
+      const root = createIsolatedRoot();
+      const marker = join(root.workspace, "action-bound-request-ran");
+      const fakeCurl = join(root.workspace, "curl");
+      writeFileSync(
+        fakeCurl,
+        `#!/bin/sh\nprintf 'executed\\n' >> ${JSON.stringify(marker)}\n`,
+      );
+      chmodSync(fakeCurl, 0o755);
+      const command =
+        "TOKEN='fx-secret-fixture'; ./curl -sS -H \"Authorization: Bearer ${TOKEN}\" " +
+        "'https://example.invalid/stats?from=now-720m&to=now'";
+      const stderrPath = join(root.root, "action-bound-stderr.log");
+      const tracePath = join(root.root, "action-bound-trace.log");
+      writeFileSync(stderrPath, "");
+      let approvalRequestId = "";
+      const gateway = startGateway(
+        [
+          commandCall(command, "secret_request_denied"),
+          (body) => {
+            const match = body.match(/approval_request_id[^0-9a-f]+([0-9a-f]{64})/);
+            expect(match).not.toBeNull();
+            approvalRequestId = match![1]!;
+            return fakeGatewayToolCall("approve_exact_action", "ask_user_question", {
+              permission_request_id: approvalRequestId,
+              questions: [{
+                question: "Approve exact action?",
+                options: [
+                  { label: "Allow once", description: "Run only the bound action." },
+                  { label: "Deny", description: "Keep the action blocked." },
+                ],
+              }],
+            });
+          },
+          (body) => {
+            expect(body).toContain(approvalRequestId);
+            expect(body).toContain('\\"authorized\\":true');
+            return commandCall(command, "secret_request_retry");
+          },
+          fakeGatewayFinalText("Action-bound request complete"),
+        ],
+        [fakeGatewayPermissionDecision("ask", "secret_request_review")],
+      );
+
+      activeSession = await TmuxSession.create({
+        cmd: FX_BIN,
+        cwd: root.workspace,
+        env: {
+          ...gatewayEnv(root, gateway),
+          FX_TRACE_LOG: tracePath,
+          FX_TRACE_SCOPES: "permission,tool",
+        },
+        stderrPath,
+        width: 140,
+        height: 42,
+      });
+      await activeSession.waitForComposer(TIMEOUT);
+      await activeSession.sendText("Use the same token and run the 12-hour request.");
+      const approvalPane = await waitForEither(
+        activeSession,
+        [COMMAND_APPROVAL_PROMPT, "Approve exact action?"],
+        TIMEOUT,
+      );
+      expect(approvalPane).toContain(COMMAND_APPROVAL_PROMPT);
+      expect(approvalPane).toContain("curl");
+      expect(existsSync(marker)).toBe(false);
+      await activeSession.sendKeys("1");
+      await activeSession.waitForText("Action-bound request complete", TIMEOUT);
+
+      expect(readFileSync(marker, "utf8")).toBe("executed\n");
+      const trace = readFileSync(tracePath, "utf8");
+      expect(gateway.classifierRequests, trace).toHaveLength(0);
+      expect(trace).toContain("fallback_reason=invalid_or_unavailable");
+      expect(readFileSync(stderrPath, "utf8")).toBe("");
+
+      await activeSession.sendText("/quit");
+      expect(await activeSession.waitForSessionEnd()).toBe(true);
+      await activeSession.kill();
+      activeSession = null;
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "a noninteractive action-bound request stays recoverable and effect free",
+    async () => {
+      const root = createIsolatedRoot();
+      const marker = join(root.workspace, "headless-approval-must-not-run");
+      const command = `touch ${JSON.stringify(marker)}`;
+      let approvalRequestId = "";
+      const gateway = startGateway(
+        [
+          commandCall(command, "headless_denied"),
+          (body) => {
+            const match = body.match(/approval_request_id[^0-9a-f]+([0-9a-f]{64})/);
+            expect(match).not.toBeNull();
+            approvalRequestId = match![1]!;
+            return fakeGatewayToolCall("headless_approval", "ask_user_question", {
+              permission_request_id: approvalRequestId,
+              questions: [{
+                question: "Approve exact action?",
+                options: [{ label: "Allow once" }, { label: "Deny" }],
+              }],
+            });
+          },
+          (body) => {
+            expect(body).toContain(approvalRequestId);
+            expect(body).toContain('\\"authorized\\":false');
+            expect(body).toContain('\\"decision\\":\\"permission_required');
+            return fakeGatewayFinalText("Headless approval needs user direction.");
+          },
+        ],
+        [fakeGatewayPermissionDecision("ask", "headless_review")],
+      );
+
+      const result = await runFx(
+        ["ask", "--quiet", "--json", "--no-save", "Try the action, then ask if needed."],
+        {
+          cwd: root.workspace,
+          env: gatewayEnv(root, gateway),
+          timeoutMs: TIMEOUT,
+        },
+      );
+
+      expect(
+        result.code,
+        `stdout=${result.stdout}\nstderr=${result.stderr}`,
+      ).toBe(0);
+      expect(result.stdout).toContain("Headless approval needs user direction.");
+      expect(result.stdout).not.toContain("NonInteractivePermissionRequired");
+      expect(gateway.classifierRequests).toHaveLength(1);
+      expect(existsSync(marker)).toBe(false);
     },
     TIMEOUT,
   );

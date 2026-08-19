@@ -6155,11 +6155,8 @@ test "fx ask auto mode uses automatic allow for external prepared file mutation"
     var review_turn = TestReviewTurn.init("Write hello to desktop-test.txt.", call);
     const accepted = try requestToolPermissionOutcomeWithRequest(&ctx, arena, call, review_turn.context(), .auto, &.{}, null, null, &.{});
 
-    try std.testing.expectEqual(@as(usize, 1), fake.calls);
-    try std.testing.expectEqualStrings(
-        "Write hello to desktop-test.txt.",
-        fake.root_text,
-    );
+    try std.testing.expectEqual(@as(usize, 0), fake.calls);
+    try std.testing.expectEqualStrings("", fake.root_text);
     try std.testing.expectEqual(ToolPermissionDecision.once, accepted.decision);
     const authorization = switch (accepted.execution_authority orelse return error.TestExpectedEqual) {
         .file_mutation => |authorization| authorization,

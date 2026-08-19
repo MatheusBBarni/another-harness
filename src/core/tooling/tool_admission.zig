@@ -5,6 +5,7 @@ const background_runtime = @import("../background/background_runtime.zig");
 const vision_contracts = @import("../agent/runtime/vision_contracts.zig");
 const command_admission = @import("../permissions/command_admission.zig");
 const command_environment = @import("../execution/command_environment.zig");
+const command_effect = @import("../shell_command/command_effect.zig");
 const file_mutation = @import("file_mutation.zig");
 const file_mutation_contract = @import("file_mutation_contract.zig");
 const image_attachments = @import("../images/image_attachments.zig");
@@ -644,12 +645,14 @@ fn fileMutationAuthorizationMayBypassAutoReview(
     input: Input,
     authorization: file_mutation_contract.FileExecutionAuthorization,
 ) bool {
-    if (authorization.prepared == null) return false;
+    const prepared = authorization.prepared orelse return false;
     const intent = authorization.approval_intent orelse return false;
     const target_path = authorization.policy_targets.canonical_target_path;
+    const target_is_reversible = accessScope(input).contains(target_path) or
+        std.meta.activeTag(prepared.preimage) == .absent;
     return intent == .mutation and
         !authorization.read_disclosure_required and
-        accessScope(input).contains(target_path) and
+        target_is_reversible and
         !sensitiveAutoWriteTarget(target_path) and
         !fileMutationTargetsContainConfiguredAsk(authorization.policy_targets);
 }
@@ -964,6 +967,20 @@ fn resolveOrdinaryPermissionOutcome(
     }
 
     if (permission_mode == .auto) {
+        if (command_call) {
+            const command = try runCommandContext(input, arena, call);
+            if (try command_effect.knownReversibleAutoCommand(
+                arena,
+                command.command,
+                command.background,
+            )) {
+                return shellPermissionOutcome(
+                    command,
+                    .once,
+                    .auto_mode,
+                );
+            }
+        }
         return automaticReviewOutcome(
             input,
             arena,
@@ -5253,6 +5270,51 @@ test "configured command authority skips automatic review" {
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
 }
 
+test "known reversible auto commands bypass the reviewer" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var worker: WorkerRuntime = .{};
+    defer worker.deinit(std.testing.allocator);
+    var background: BackgroundRuntime = .{};
+    defer background.deinit(std.testing.allocator);
+    var fake = FakeAutoClassifier{};
+    const input = testInputWithClassifier(
+        &worker,
+        &background,
+        permission_auto_classifier.Classifier.withOverride(
+            @ptrCast(&fake),
+            FakeAutoClassifier.classify,
+        ),
+    );
+    for ([_][]const u8{
+        "node -v && npm -v",
+        "git status --short --branch",
+        "git fetch origin main",
+        "npm install 2>&1",
+        "npm run dev",
+        "zig build test",
+    }) |command| {
+        const arguments = try std.fmt.allocPrint(
+            arena_state.allocator(),
+            "{{\"action\":\"exec\",\"command\":{f}}}",
+            .{std.json.fmt(command, .{})},
+        );
+        const outcome = try requestPermissionOutcome(
+            input,
+            arena_state.allocator(),
+            .{ .id = "ordinary", .name = "terminal", .arguments_json = arguments },
+            .auto,
+            &.{},
+        );
+        try std.testing.expectEqual(ToolPermissionDecision.once, outcome.decision);
+        try std.testing.expectEqual(
+            command_admission.ShellAuthorizationSource.auto_mode,
+            outcome.execution_authority.?.run_command.shell_allowed.source,
+        );
+    }
+    try std.testing.expectEqual(@as(usize, 0), fake.calls);
+}
+
 test "session deny narrows configured command allow" {
     const alloc = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(alloc);
@@ -5935,6 +5997,15 @@ test "external prepared file review carries frozen path and diff authority" {
         arena,
         &.{ external, "desktop-test.txt" },
     );
+    {
+        var existing = try tmp.dir.createFile(
+            io_mod.getIo(),
+            "external/desktop-test.txt",
+            .{ .truncate = true },
+        );
+        defer existing.close(io_mod.getIo());
+        try existing.writeStreamingAll(io_mod.getIo(), "before\n");
+    }
     const arguments_json = try std.fmt.allocPrint(
         arena,
         "{{\"path\":\"{s}\",\"content\":\"hello\\n\"}}",
@@ -5962,7 +6033,7 @@ test "external prepared file review carries frozen path and diff authority" {
         fake.file_display_path.?,
     );
     try std.testing.expectEqual(@as(usize, 1), fake.file_additions);
-    try std.testing.expectEqual(@as(usize, 0), fake.file_deletions);
+    try std.testing.expectEqual(@as(usize, 1), fake.file_deletions);
     try std.testing.expect(fake.file_review_rows > 0);
     try std.testing.expectEqual(ToolPermissionDecision.once, outcome.decision);
     const authority = outcome.execution_authority orelse
@@ -6111,7 +6182,7 @@ test "automatic added-root write bypasses reviewer while untrusted external writ
         expected_review_calls: usize,
     }{
         .{ .id = "added-write", .root = added, .expected_review_calls = 0 },
-        .{ .id = "external-write", .root = external, .expected_review_calls = 1 },
+        .{ .id = "external-write", .root = external, .expected_review_calls = 0 },
     };
     for (cases) |case| {
         const target_path = try std.fs.path.join(arena, &.{ case.root, "note.txt" });

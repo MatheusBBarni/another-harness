@@ -4584,7 +4584,7 @@ test "three permission blocks use local fallback when step budget is exhausted" 
     try std.testing.expectEqual(@as(usize, 0), hooks.executed_names.items.len);
 }
 
-test "permission review receives only the active root request" {
+test "permission review receives bounded proven root request context" {
     const alloc = std.testing.allocator;
     const calls = [_]ToolCall{toolCall("call_1", "write_file", "{\"path\":\"a\",\"content\":\"x\"}")};
     const completions = [_]FakeCompletion{
@@ -4646,9 +4646,9 @@ test "permission review receives only the active root request" {
     try std.testing.expectEqual(@as(usize, 1), hooks.permission_user_intent_contexts.items.len);
     const context = hooks.permission_user_intent_contexts.items[0];
     try std.testing.expect(std.mem.find(u8, context, "Go ahead.") != null);
-    try std.testing.expect(std.mem.find(u8, context, "Inspect the final state before continuing.") == null);
-    try std.testing.expect(std.mem.find(u8, context, "true first root request") == null);
-    try std.testing.expect(std.mem.find(u8, context, "Create a.txt in the workspace.") == null);
+    try std.testing.expect(std.mem.find(u8, context, "Inspect the final state before continuing.") != null);
+    try std.testing.expect(std.mem.find(u8, context, "true first root request") != null);
+    try std.testing.expect(std.mem.find(u8, context, "Create a.txt in the workspace.") != null);
     try std.testing.expect(std.mem.find(u8, context, "surviving recent assistant") == null);
     try std.testing.expect(std.mem.find(u8, context, "excluded older assistant") == null);
     try std.testing.expect(std.mem.find(u8, context, "Do not make any more file changes.") == null);

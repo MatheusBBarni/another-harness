@@ -25,6 +25,7 @@ const tool_preparation = @import("../tool_preparation.zig");
 const command_admission = @import("../../permissions/command_admission.zig");
 const permission_auto_classifier = @import("../../permissions/auto_classifier.zig");
 const auto_classifier_context = @import("../../permissions/auto_classifier_context.zig");
+const ask_user_question = @import("../../../tools/agent/ask_user_question.zig");
 
 const runtime_config = @import("config.zig");
 const runtime_finalization = @import("finalization.zig");
@@ -2006,10 +2007,15 @@ fn buildReviewTurnContext(
     config: Config,
     model: []const u8,
     current_prompt: []const u8,
+    root_user_intent_context: []const u8,
     pending_assistant: ChatMessage,
     target_call_id: []const u8,
 ) permission_auto_classifier.ReviewTurnContext {
-    const current_root_request = currentRootRequest(config, current_prompt);
+    const current_root_request = currentRootRequest(
+        config,
+        current_prompt,
+        root_user_intent_context,
+    );
     return .{
         .model = model,
         .pending_assistant = pending_assistant,
@@ -2022,8 +2028,21 @@ fn buildReviewTurnContext(
     };
 }
 
-fn currentRootRequest(config: Config, current_prompt: []const u8) []const u8 {
-    return if (config.origin == .root)
+fn currentRootRequest(
+    config: Config,
+    current_prompt: []const u8,
+    root_user_intent_context: []const u8,
+) []const u8 {
+    return if (root_user_intent_context.len > 0)
+        if (std.mem.count(u8, root_user_intent_context, "\n") > 1)
+            auto_classifier_context.reviewRootUserContext(
+                root_user_intent_context,
+            ) orelse root_user_intent_context
+        else
+            auto_classifier_context.currentRootUserRequest(
+                root_user_intent_context,
+            ) orelse root_user_intent_context
+    else if (config.origin == .root)
         current_prompt
     else if (config.current_prompt_is_root_authority)
         current_prompt
@@ -2065,10 +2084,10 @@ fn automaticRecoveryExhausted(messages: []const ChatMessage) bool {
                 has_permission_denial = true;
             }
         }
-        if (has_permission_denial) {
-            blocked_groups +|= 1;
-        } else if (has_success) {
+        if (has_success) {
             blocked_groups = 0;
+        } else if (has_permission_denial) {
+            blocked_groups +|= 1;
         }
         index = group_end -| 1;
     }
@@ -2156,7 +2175,7 @@ test "parallel automatic denials count as one response group" {
     try std.testing.expect(!automaticRecoveryExhausted(&messages));
 }
 
-test "a mixed parallel response group is blocked regardless result order" {
+test "a mixed parallel response group resets recovery regardless result order" {
     const denied = "{\"error\":{\"type\":\"tool_permission_denied\",\"reason\":\"auto_denied\"}}";
     const calls = [_]ToolCall{
         .{ .id = "safe", .name = "run_command", .arguments_json = "{}" },
@@ -2179,8 +2198,8 @@ test "a mixed parallel response group is blocked regardless result order" {
     }
     success_first[9] = current;
     denial_first[9] = current;
-    try std.testing.expect(automaticRecoveryExhausted(&success_first));
-    try std.testing.expect(automaticRecoveryExhausted(&denial_first));
+    try std.testing.expect(!automaticRecoveryExhausted(&success_first));
+    try std.testing.expect(!automaticRecoveryExhausted(&denial_first));
 }
 
 test "permission recovery plan respects the ordinary step budget" {
@@ -2237,6 +2256,159 @@ fn buildToolExecutionRootUserContext(
     );
 }
 
+fn actionBoundPermissionResult(
+    alloc: Allocator,
+    request_id: runtime_tool_admission.PermissionActionId,
+    decision: types.ToolPermissionDecision,
+    authorized: bool,
+) ![]u8 {
+    const request_hex = std.fmt.bytesToHex(request_id, .lower);
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try out.writer.writeAll("{\"permission_request_id\":");
+    try std.json.Stringify.value(&request_hex, .{}, &out.writer);
+    try out.writer.writeAll(",\"authorized\":");
+    try out.writer.writeAll(if (authorized) "true" else "false");
+    try out.writer.writeAll(",\"decision\":");
+    try std.json.Stringify.value(@tagName(decision), .{}, &out.writer);
+    try out.writer.writeAll(",\"message\":");
+    try std.json.Stringify.value(
+        if (authorized)
+            "The exact bound action was approved. Retry only that action unchanged."
+        else
+            "The exact bound action was not approved. Do not retry it unchanged.",
+        .{},
+        &out.writer,
+    );
+    try out.writer.writeByte('}');
+    return try out.toOwnedSlice();
+}
+
+fn invalidActionBoundPermissionResult(
+    alloc: Allocator,
+    message: []const u8,
+) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    try out.writer.writeAll("{\"error\":{\"type\":\"permission_request_invalid\",\"message\":");
+    try std.json.Stringify.value(message, .{}, &out.writer);
+    try out.writer.writeAll("}}");
+    return try out.toOwnedSlice();
+}
+
+fn executeActionBoundPermissionRequest(
+    deps: *const AgentRuntimeDeps,
+    arena: Allocator,
+    recovery: *runtime_tool_admission.TurnPermissionRecovery,
+    call: ToolCall,
+    review_context: permission_auto_classifier.ReviewTurnContext,
+    local_grants: []const PermissionGrant,
+    advertised_dynamic_tool_names: []const []const u8,
+    workspace_root: []const u8,
+    step_ctx: TraceContext,
+) !?ToolExecutionResult {
+    if (!std.mem.eql(u8, call.name, "ask_user_question")) return null;
+    const reference = try ask_user_question.permissionRequestReference(
+        arena,
+        call.arguments_json,
+    );
+    const request_id = switch (reference) {
+        .none => return null,
+        .invalid => return .{
+            .status = .failure,
+            .model_output = try invalidActionBoundPermissionResult(
+                arena,
+                "permission_request_id must be the exact 64-character ID from an auto_denied result",
+            ),
+        },
+        .id => |value| value,
+    };
+    const denied_call = recovery.deniedCall(request_id) orelse return .{
+        .status = .failure,
+        .model_output = try invalidActionBoundPermissionResult(
+            arena,
+            "permission_request_id is not pending in this agent turn",
+        ),
+    };
+
+    var live_authority: ?runtime_tool_contracts.LiveToolAuthority = null;
+    var permission_grants = local_grants;
+    if (deps.live_tool_authority != null) {
+        const resolved = try resolveLiveToolAuthority(
+            deps,
+            arena,
+            denied_call,
+            workspace_root,
+            advertised_dynamic_tool_names,
+            null,
+        );
+        if (liveAuthorityRejectsExecution(resolved)) return .{
+            .status = .failure,
+            .model_output = try actionBoundPermissionResult(
+                arena,
+                request_id,
+                if (resolved.decision == .deny)
+                    .policy_denied
+                else
+                    .permission_required,
+                false,
+            ),
+        };
+        live_authority = resolved.authority;
+        permission_grants = resolved.authority.grants;
+    }
+    const outcome = runtime_tool_admission.requestToolPermissionTraced(
+        deps,
+        arena,
+        denied_call,
+        review_context,
+        .ask,
+        permission_grants,
+        live_authority,
+        null,
+        advertised_dynamic_tool_names,
+        workspace_root,
+        step_ctx,
+    ) catch |err| switch (err) {
+        error.NonInteractivePermissionRequired,
+        error.PermissionPromptUnavailable,
+        => return .{
+            .status = .failure,
+            .model_output = try actionBoundPermissionResult(
+                arena,
+                request_id,
+                .permission_required,
+                false,
+            ),
+        },
+        else => return err,
+    };
+    if (outcome.tool_failure) |failure| return .{
+        .status = .failure,
+        .model_output = failure,
+    };
+    const authority = outcome.execution_authority;
+    const authorized = !outcome.decision.isDenied() and
+        authority != null and
+        recovery.rememberApproval(
+            request_id,
+            authority.?,
+            outcome.human_approval,
+        );
+    return .{
+        .status = if (authorized or outcome.decision == .deny)
+            .success
+        else
+            .failure,
+        .model_output = try actionBoundPermissionResult(
+            arena,
+            request_id,
+            outcome.decision,
+            authorized,
+        ),
+    };
+}
+
 fn processQueuedPromptLoop(
     deps: *const AgentRuntimeDeps,
     semantic_presentation: ?runtime_assistant_stream.SemanticPresentationSink,
@@ -2268,6 +2440,8 @@ fn processQueuedPromptLoop(
     defer local_grants_ptr.* = local_grants;
     var turn_file_mutation_denials: runtime_tool_admission.TurnFileMutationDenials = .{};
     defer turn_file_mutation_denials.deinit(arena);
+    var turn_permission_recovery: runtime_tool_admission.TurnPermissionRecovery = .{};
+    defer turn_permission_recovery.deinit(arena);
     var terminal_validation_retry: runtime_tool_admission.TerminalValidationRetryState = .{};
     defer terminal_validation_retry.deinit(arena);
     var completed_tool_names = completed_tool_names_ptr.*;
@@ -4636,6 +4810,7 @@ fn processQueuedPromptLoop(
                         config,
                         successful_gateway_model,
                         job.prompt,
+                        root_user_intent_context,
                         pending_assistant,
                         parallel_call.id,
                     );
@@ -5620,6 +5795,7 @@ fn processQueuedPromptLoop(
                 config,
                 successful_gateway_model,
                 job.prompt,
+                root_user_intent_context,
                 pending_assistant,
                 execution_call.id,
             );
@@ -5637,16 +5813,43 @@ fn processQueuedPromptLoop(
                 turn_file_mutation_denials.preservedOutcome(identity)
             else
                 null;
-            if (preserved_denial != null) {
+            const approved_revalidation = turn_permission_recovery.takeApproval(
+                execution_call,
+            );
+            const preserved_automatic_denial = if (approved_revalidation == null)
+                try turn_permission_recovery.preservedOutcome(
+                    call_allocator,
+                    config.workspace_root,
+                    execution_call,
+                )
+            else
+                null;
+            const effective_preserved_denial = preserved_denial orelse
+                preserved_automatic_denial;
+            if (effective_preserved_denial != null) {
                 debug_trace.eventf(
                     "permission",
-                    "turn_file_mutation_denial_preserved",
+                    "turn_permission_denial_preserved",
                     step_ctx,
                     "call_id={s} tool_name={s}",
                     .{ tool_call.id, tool_call.name },
                 );
             }
-            const maybe_permission: ?command_admission.PermissionOutcome = if (preserved_denial) |outcome|
+            const maybe_permission: ?command_admission.PermissionOutcome = if (approved_revalidation) |revalidation|
+                try runtime_tool_admission.requestToolPermissionTraced(
+                    deps,
+                    call_allocator,
+                    execution_call,
+                    review_context,
+                    action_permission_mode,
+                    action_grants,
+                    if (live_authority) |resolved| resolved.authority else null,
+                    revalidation,
+                    advertised_dynamic_tool_names,
+                    config.workspace_root,
+                    step_ctx,
+                )
+            else if (effective_preserved_denial) |outcome|
                 outcome
             else
                 (if (prepared_file_mutation) |*prepared|
@@ -5887,7 +6090,25 @@ fn processQueuedPromptLoop(
                 }
                 const reason = permission_outcome.denial_reason orelse
                     decision.denialReason() orelse .user_denied;
-                const denied_output = try tool_result_errors.toolPermissionDeniedJson(arena, tool_call.name, reason);
+                const approval_request_id = try turn_permission_recovery.rememberAutoDenial(
+                    arena,
+                    config.workspace_root,
+                    tool_call,
+                    permission_outcome,
+                );
+                const denied_output = if (approval_request_id) |request_id| blk: {
+                    const request_hex = std.fmt.bytesToHex(request_id, .lower);
+                    break :blk try tool_result_errors.toolPermissionDeniedJsonWithRequestId(
+                        arena,
+                        tool_call.name,
+                        reason,
+                        &request_hex,
+                    );
+                } else try tool_result_errors.toolPermissionDeniedJson(
+                    arena,
+                    tool_call.name,
+                    reason,
+                );
                 if (!status_started and (is_file_mutation or defer_auto_command_lifecycle)) {
                     status_started = try runtime_tool_presentation.startToolVisibleLifecycle(
                         deps,
@@ -6102,7 +6323,17 @@ fn processQueuedPromptLoop(
             var sandbox_widening_feedback: ?[]const u8 = null;
             var sandbox_widening_required: ?runtime_tool_contracts.SandboxScopeRequired = null;
             var sandbox_widening_retry_started = false;
-            var execution = deps.execute_tool_call(deps.ctx, .{
+            var execution = (try executeActionBoundPermissionRequest(
+                deps,
+                arena,
+                &turn_permission_recovery,
+                execution_call,
+                review_context,
+                local_grants.items,
+                advertised_dynamic_tool_names,
+                config.workspace_root,
+                step_ctx,
+            )) orelse deps.execute_tool_call(deps.ctx, .{
                 .call_allocator = call_allocator,
                 .result_allocator = arena,
                 .call = execution_call,
