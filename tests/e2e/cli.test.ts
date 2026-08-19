@@ -2276,10 +2276,21 @@ describe("cli: sessions", () => {
           updated_at_ms: 2,
           history_len: 0,
         };
+        const scriptOnly = {
+          ...named,
+          id: "script-only-session",
+          title: "Review landing page",
+          updated_at_ms: 1_700_000_000_123,
+          conversation_language: "und-Latn",
+          history_len: 1,
+        };
         const indexPath = join(sessionsDir, "index.json");
         writeFileSync(
           indexPath,
-          JSON.stringify({ schema_version: 3, sessions: [named, unnamed] }),
+          JSON.stringify({
+            schema_version: 3,
+            sessions: [scriptOnly, named, unnamed],
+          }),
           { mode: 0o600 },
         );
 
@@ -2291,17 +2302,39 @@ describe("cli: sessions", () => {
         expect(first.code).toBe(0);
         expect(first.stderr).toBe("");
         expect(first.stdout).toContain(
-          " - Investigate cache misses\n   id=named-session turns=2",
+          " - Investigate cache misses\n   id=named-session | 2 turns | English | updated 1970-01-01 00:00:00.003 UTC",
         );
         expect(first.stdout).toContain(
-          " - Untitled session\n   id=unnamed-session turns=0",
+          " - Untitled session\n   id=unnamed-session | 0 turns | English | updated 1970-01-01 00:00:00.002 UTC",
         );
+        expect(first.stdout).toContain(
+          " - Review landing page\n   id=script-only-session | 1 turn | Latin script | updated 2023-11-14 22:13:20.123 UTC",
+        );
+        expect(first.stdout).not.toContain("updated_at_ms");
+        expect(first.stdout).not.toContain("language=");
+
+        const structured = await runFx(["sessions", "--json"], {
+          cwd: workspaceRoot,
+          env: { HOME: home, ...NO_GATEWAY_AUTH },
+          timeoutMs: TIMEOUT,
+        });
+        expect(structured.code).toBe(0);
+        expect(structured.stderr).toBe("");
+        expect(JSON.parse(structured.stdout).sessions[0]).toMatchObject({
+          id: "script-only-session",
+          updated_at_ms: 1_700_000_000_123,
+          conversation_language: "und-Latn",
+        });
 
         writeFileSync(
           indexPath,
           JSON.stringify({
             schema_version: 3,
-            sessions: [{ ...named, title: "Investigate cache hits" }, unnamed],
+            sessions: [
+              scriptOnly,
+              { ...named, title: "Investigate cache hits" },
+              unnamed,
+            ],
           }),
           { mode: 0o600 },
         );
@@ -2313,7 +2346,7 @@ describe("cli: sessions", () => {
         expect(renamed.code).toBe(0);
         expect(renamed.stderr).toBe("");
         expect(renamed.stdout).toContain(
-          " - Investigate cache hits\n   id=named-session turns=2",
+          " - Investigate cache hits\n   id=named-session | 2 turns | English",
         );
         expect(renamed.stdout).not.toContain("Investigate cache misses");
       } finally {
