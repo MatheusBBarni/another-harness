@@ -92,6 +92,63 @@ fn normalizeResetAt(alloc: Allocator, text: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc, "{s}.{s}Z", .{ text[0..19], millis });
 }
 
+fn periodLabel(period: Period) []const u8 {
+    return switch (period) {
+        .weekly => "weekly",
+        .monthly => "monthly",
+        .unknown => "current period",
+    };
+}
+
+fn formatPrepaidDollars(alloc: Allocator, cents: i64) ![]u8 {
+    const abs: u64 = @intCast(if (cents < 0) -cents else cents);
+    const dollars = abs / 100;
+    const remainder = abs % 100;
+    if (cents < 0) {
+        return std.fmt.allocPrint(alloc, "-${d}.{d:0>2}", .{ dollars, remainder });
+    }
+    return std.fmt.allocPrint(alloc, "${d}.{d:0>2}", .{ dollars, remainder });
+}
+
+fn renderCreditsText(alloc: Allocator, snapshot: Snapshot) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try out.writer.print("[credits] plan={s}\n", .{snapshot.plan});
+    try out.writer.print("[credits] used={d}% {s}\n", .{ snapshot.percent, periodLabel(snapshot.period) });
+    if (snapshot.prepaid_cents) |cents| {
+        const prepaid = try formatPrepaidDollars(alloc, cents);
+        defer alloc.free(prepaid);
+        try out.writer.print("[credits] balance={s}\n", .{prepaid});
+    }
+    return out.toOwnedSlice();
+}
+
+fn renderXaiUsageText(alloc: Allocator, snapshot: Snapshot, rpm: ?[]const u8) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    try out.writer.print("{s} {d}% {s}", .{ snapshot.plan, snapshot.percent, periodLabel(snapshot.period) });
+    if (snapshot.reset_at) |reset_at| {
+        try out.writer.print(" · resets {s}", .{reset_at});
+    }
+    if (snapshot.prepaid_cents) |cents| {
+        const prepaid = try formatPrepaidDollars(alloc, cents);
+        defer alloc.free(prepaid);
+        try out.writer.print(" · prepaid {s}", .{prepaid});
+    }
+    if (rpm) |window| {
+        try out.writer.print("\n{s}", .{window});
+    }
+    return out.toOwnedSlice();
+}
+
+fn renderBillingHttpError(alloc: Allocator, status: u16, _: []const u8) ![]u8 {
+    return std.fmt.allocPrint(
+        alloc,
+        "Grok billing HTTP {d}. Run fx login grok.",
+        .{status},
+    );
+}
+
 fn parsePrepaidCents(config: std.json.ObjectMap) ?i64 {
     const prepaid = config.get("prepaidBalance") orelse config.get("prepaid_balance") orelse return null;
     if (prepaid != .object) return null;
