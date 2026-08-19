@@ -25,11 +25,12 @@ pub fn parseChatCompletionsSse(alloc: Allocator, sse: []const u8) !types.Gateway
         tools.deinit(alloc);
     }
 
+    var finish_reason: ?types.ProviderFinishReason = null;
     var lines = std.mem.splitScalar(u8, sse, '\n');
     while (lines.next()) |line| {
         const payload = dataPayload(line) orelse continue;
         if (std.mem.eql(u8, payload, "[DONE]")) break;
-        applyDelta(alloc, payload, &content, &tools) catch continue;
+        applyDelta(alloc, payload, &content, &tools, &finish_reason) catch continue;
     }
 
     const owned_content = if (content.items.len == 0) null else try content.toOwnedSlice(alloc);
@@ -39,6 +40,7 @@ pub fn parseChatCompletionsSse(alloc: Allocator, sse: []const u8) !types.Gateway
     return .{
         .content = owned_content,
         .tool_calls = owned_tools,
+        .finish_reason = finish_reason orelse if (owned_tools.len > 0) .tool_calls else .stop,
     };
 }
 
@@ -53,6 +55,7 @@ fn applyDelta(
     payload: []const u8,
     content: *std.ArrayList(u8),
     tools: *std.ArrayList(PendingTool),
+    finish_reason: *?types.ProviderFinishReason,
 ) !void {
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, payload, .{});
     defer parsed.deinit();
@@ -61,6 +64,13 @@ fn applyDelta(
     if (choices != .array or choices.array.items.len == 0) return;
     const first = choices.array.items[0];
     if (first != .object) return;
+    if (first.object.get("finish_reason")) |value| {
+        if (value == .string) {
+            if (types.ProviderFinishReason.parse_legacy(value.string)) |reason| {
+                finish_reason.* = reason;
+            }
+        }
+    }
     const delta = first.object.get("delta") orelse return;
     if (delta != .object) return;
 
@@ -136,4 +146,16 @@ test "openai sse maps text and tool calls to GatewayCompletion" {
     try std.testing.expectEqualStrings("call_1", completion.tool_calls[0].id);
     try std.testing.expectEqualStrings("read", completion.tool_calls[0].name);
     try std.testing.expectEqualStrings("{}", completion.tool_calls[0].arguments_json);
+    try std.testing.expectEqual(types.ProviderFinishReason.tool_calls, completion.finish_reason.?);
+}
+
+test "openai sse stop finish reason completes instead of interrupting" {
+    const sse = "data: {\"choices\":[{\"delta\":{\"content\":\"Hi.\"}}]}\n\n" ++
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" ++
+        "data: [DONE]\n";
+    var completion = try parseChatCompletionsSse(std.testing.allocator, sse);
+    defer freeCompletion(std.testing.allocator, &completion);
+    try std.testing.expectEqualStrings("Hi.", completion.content.?);
+    try std.testing.expectEqual(types.ProviderFinishReason.stop, completion.finish_reason.?);
+    try std.testing.expectEqual(types.ProviderCompletionDisposition.completed, types.classifyProviderCompletion(completion));
 }
