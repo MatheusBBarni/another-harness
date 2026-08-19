@@ -2682,6 +2682,62 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
   );
 
   test(
+    "model picker skips effort stage for reasoning models without declared tiers",
+    async () => {
+      const fixture = createModelsMenuFixture();
+      const selectedModel = "deepseek/deepseek-v4-pro-0813";
+      gateway = startFakeGateway([], {
+        models: [
+          {
+            id: selectedModel,
+            type: "language",
+            released: 100,
+            tags: ["reasoning", "tool-use"],
+            context_window: 128_000,
+          },
+        ],
+      });
+      session = await TmuxSession.create({
+        cwd: fixture.workspace,
+        stderrPath: fixture.stderrPath,
+        env: {
+          HOME: fixture.home,
+          AI_GATEWAY_API_KEY: "fake-model-picker-key",
+          VERCEL_OIDC_TOKEN: undefined,
+          FX_GATEWAY_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+          FX_MODEL: "openai/gpt-4o",
+          FX_AUTO_UPGRADE: "0",
+        },
+        width: 120,
+        height: 32,
+      });
+      await session.waitForComposer(10_000);
+
+      await session.sendLiteralText("/model ");
+      await session.waitForText(selectedModel, 10_000);
+      await session.sendLiteralText(selectedModel);
+      await session.sendKeys("Enter");
+      await session.waitForText(`● Switched to ${selectedModel}`, 5_000);
+
+      const pane = (await session.capturePaneGrid()).join("\n");
+      expect(hasEmptyComposer(pane)).toBe(true);
+      expect(pane).not.toContain("Reasoning effort");
+      expect(pane).not.toContain("default");
+      expect(JSON.parse(readFileSync(fixture.settingsPath, "utf8")).model).toBe(selectedModel);
+      expect(capturePaneTitle(session)).toBe(`fx · ${selectedModel}`);
+      expect(session.isAlive()).toBe(true);
+      expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");
+
+      await session.sendText("/quit");
+      expect(await session.waitForSessionEnd(TIMEOUT)).toBe(true);
+      session = null;
+    },
+    TEST_TIMEOUT,
+  );
+
+  test(
     "skills catalog retains input ownership for global view shortcuts",
     async () => {
       const fixture = createSkillsMenuFixture();
