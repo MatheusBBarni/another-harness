@@ -205,7 +205,8 @@ try {
     expect(result.inputTaskRanDuringStream, "browser terminal input task was blocked until the buffered stream finished");
     expect(result.draftRenderedDuringStream, "browser terminal input rendered only after the stream source closed");
     expect(result.activeClearFetchAborted, "active /clear did not abort the browser fetch");
-    expect(result.activeClearFollowupCompleted, "browser terminal did not complete a follow-up prompt after active /clear");
+    expect(result.activeClearSessionRendered, "active /clear did not render a fresh browser session");
+    expect(result.activeClearFollowupFresh, "browser follow-up retained cancelled session history");
     expect(result.dataListeners === 0, `browser terminal leaked ${result.dataListeners} data listener(s)`);
     expect(result.resizeListeners === 0, `browser terminal leaked ${result.resizeListeners} resize listener(s)`);
     console.log("browser terminal startup and shutdown passed");

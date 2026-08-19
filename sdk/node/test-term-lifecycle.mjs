@@ -224,6 +224,7 @@ async function runActiveTransitionChild(scenario, command) {
   const childDisposals = { data: 0, resize: 0 };
   let childOutput = "";
   let fetchCount = 0;
+  const requestBodies = [];
   let firstFetchAborted = false;
   let streamStarted = false;
   const childDecoder = new TextDecoder();
@@ -243,6 +244,7 @@ async function runActiveTransitionChild(scenario, command) {
 
   const childFetch = async (_url, init) => {
     fetchCount += 1;
+    requestBodies.push(new TextDecoder().decode(init.body));
     process.stdout.write(`fetch_started:${fetchCount}\n`);
     if (fetchCount > 1) return completedResponse("FOLLOWUP_OK");
     if (scenario === "stalled") {
@@ -310,6 +312,13 @@ async function runActiveTransitionChild(scenario, command) {
     () => fetchCount === 2 && terminalGrid(childTerminal).includes("FOLLOWUP_OK"),
     "follow-up completion",
   );
+  const followupRequest = requestBodies[1] ?? "";
+  if (!followupRequest.includes("second prompt")) {
+    throw new Error(`follow-up request omitted the new prompt: ${followupRequest}`);
+  }
+  if (followupRequest.includes("first prompt") || followupRequest.includes("STREAM_STARTED")) {
+    throw new Error(`follow-up request retained cancelled session history: ${followupRequest}`);
+  }
   process.stdout.write("followup_completed\n");
   childRuntime.write("/exit\r");
   const childExit = await childRuntime.exited;

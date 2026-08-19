@@ -38,7 +38,8 @@
     let inputTaskChunkCount;
     let fetchCount = 0;
     let activeClearFetchAborted = false;
-    let activeClearFollowupCompleted = false;
+    let activeClearSessionRendered = false;
+    let activeClearFollowupFresh = false;
     let signalFetchStarted;
     let releaseBufferedStream;
     let finishBufferedStream;
@@ -55,12 +56,12 @@
           controller.enqueue(encoded.encode('data: {"type":"finish","finishReason":{"unified":"stop","raw":"stop"},"usage":{"inputTokens":{"total":1},"outputTokens":{"total":1}}}\n\n'));
           controller.enqueue(encoded.encode("data: [DONE]\n\n"));
           controller.close();
-          activeClearFollowupCompleted = true;
         },
       }), { status: 200, headers: { "content-type": "text/event-stream" } });
     };
     const mockFetch = async (_url, init) => {
       fetchCount += 1;
+      const requestBody = new TextDecoder().decode(init.body);
       if (fetchCount === 2) {
         return new Promise((_, reject) => {
           init.signal.addEventListener("abort", () => {
@@ -69,7 +70,12 @@
           }, { once: true });
         });
       }
-      if (fetchCount > 2) return completedResponse("BROWSER_FOLLOWUP_OK");
+      if (fetchCount > 2) {
+        activeClearFollowupFresh = requestBody.includes("follow-up prompt") &&
+          !requestBody.includes("clear active turn") &&
+          !requestBody.includes("STREAM_STARTED");
+        return completedResponse("BROWSER_FOLLOWUP_OK");
+      }
       signalFetchStarted();
       return new Response(new ReadableStream({
         async pull(controller) {
@@ -133,6 +139,7 @@
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     runtime.write("\x7f".repeat(liveDraft.length));
+    const freshWelcomeOffset = output.length;
     testState.stage = "starting-active-clear";
     runtime.write("clear active turn\r");
     const activeDeadline = performance.now() + 10000;
@@ -146,10 +153,15 @@
       if (performance.now() >= activeDeadline) throw new Error("active clear did not abort browser fetch");
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
+    while (!output.slice(freshWelcomeOffset).includes("Run /help for commands")) {
+      if (performance.now() >= activeDeadline) throw new Error("active clear did not render a fresh session");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    activeClearSessionRendered = true;
     testState.stage = "running-followup";
     runtime.write("follow-up prompt\r");
-    while (fetchCount < 3 || !activeClearFollowupCompleted) {
-      if (performance.now() >= activeDeadline) throw new Error("browser follow-up did not complete after active clear");
+    while (fetchCount < 3 || !activeClearFollowupFresh) {
+      if (performance.now() >= activeDeadline) throw new Error("browser follow-up did not start with fresh session history");
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     runtime.write("/exit\r");
@@ -161,7 +173,8 @@
       inputTaskRanDuringStream,
       draftRenderedDuringStream,
       activeClearFetchAborted,
-      activeClearFollowupCompleted,
+      activeClearSessionRendered,
+      activeClearFollowupFresh,
       dataListeners: dataListeners.size,
       resizeListeners: resizeListeners.size,
     };

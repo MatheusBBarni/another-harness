@@ -274,6 +274,8 @@ describe.skipIf(!tmuxAvailable())("tui: active session transitions", () => {
         await session.sendText("complete the follow-up");
         await session.waitForText("NATIVE_FOLLOWUP_OK", 10_000);
         expect(gateway.requests).toHaveLength(2);
+        expect(gateway.requests[1].body).toContain("complete the follow-up");
+        expect(gateway.requests[1].body).not.toContain("start an active turn");
         expect(session.isAlive()).toBe(true);
         expect(readFileSync(stderrPath, "utf8")).toBe("");
       } finally {
