@@ -205,3 +205,21 @@ test "credits and xai-usage render snapshot; 401 asks for relogin without leakin
     try std.testing.expect(std.mem.indexOf(u8, err403, "fx login grok") != null);
     try std.testing.expect(std.mem.indexOf(u8, err403, leaked) == null);
 }
+
+test "status line shows SG percent, reset, and optional RPM window" {
+    const json =
+        \\{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2026-08-24T17:33:48.278812+00:00"},"creditUsagePercent":12.4,"prepaidBalance":{"val":250}},"subscription_tier":"SuperGrok"}
+    ;
+    var snapshot = try parseBilling(std.testing.allocator, json);
+    defer snapshot.deinit(std.testing.allocator);
+
+    const billing_only = try renderStatusLineFragment(std.testing.allocator, snapshot, null);
+    defer std.testing.allocator.free(billing_only);
+    try std.testing.expectEqualStrings("SG 12% · 2026-08-24T17:33:48.278Z", billing_only);
+
+    const window = parseRequestWindow("8299", "8300") orelse return error.TestUnexpectedResult;
+    const with_rpm = try renderStatusLineFragment(std.testing.allocator, snapshot, window);
+    defer std.testing.allocator.free(with_rpm);
+    try std.testing.expectEqualStrings("SG 12% · 2026-08-24T17:33:48.278Z · 8299/8300 RPM", with_rpm);
+    try std.testing.expect(parseRequestWindow("nope", "8300") == null);
+}
