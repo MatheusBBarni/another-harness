@@ -1695,7 +1695,8 @@ test "rendered top-level help is a complete CLI navigation page" {
     try std.testing.expect(std.mem.find(u8, text, "Supported for interactive, resume, ask, ACP, PR, and issue launches") == null);
     try std.testing.expect(std.mem.find(u8, text, "Examples:") != null);
     try std.testing.expect(std.mem.find(u8, text, "fx ask \"Explain the changes in this repository\"") != null);
-    try std.testing.expect(std.mem.find(u8, text, "fx --resume last") != null);
+    try std.testing.expect(std.mem.find(u8, text, "fx session resume last") != null);
+    try std.testing.expect(std.mem.find(u8, text, "session resume [last|id]") != null);
     try std.testing.expect(std.mem.find(u8, text, "fx status --json") != null);
     try std.testing.expect(std.mem.find(u8, text, "Run `/help` inside an interactive session for slash commands.") != null);
     try std.testing.expect(std.mem.find(u8, text, "Learn more about 𝒇x:  https://fx.sh/docs") != null);
@@ -1780,7 +1781,7 @@ test "per-command help preserves long resume usage outside top-level index" {
     const text = try renderTopLevelCommandHelp(std.testing.allocator, testTopLevelRegistry(), .@"resume");
     defer std.testing.allocator.free(text);
 
-    try std.testing.expect(std.mem.find(u8, text, "Usage:\n  fx --resume [last|<id>] [--record] | resume [last|<id>] [--record] | resume --id <id> [--record] | --resume-last | --continue | -c | -r | --resume-<id>") != null);
+    try std.testing.expect(std.mem.find(u8, text, "Usage:\n  fx session resume [last|<id>] [--record] | session resume --id <id> [--record] | --resume [last|<id>] [--record] | resume [last|<id>] [--record] | resume --id <id> [--record] | --resume-last | --continue | -c | -r | --resume-<id>") != null);
     try std.testing.expect(std.mem.find(u8, text, "Options:") != null);
     try std.testing.expect(std.mem.find(u8, text, "--record") != null);
 }

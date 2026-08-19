@@ -161,11 +161,12 @@ pub const top_level_specs = [_]TopLevelSpec{
     .{
         .kind = .session,
         .token = "session",
-        .usage = "session <last|id>|--id <id> [--json] | session migrate <id>|--id <id> [--allow-large] [--json] | session recover <id>|--id <id> [--json]",
-        .summary = "Inspect one saved session",
+        .usage = "session <last|id>|--id <id> [--json] | session resume [last|<id>] [--record] | session resume --id <id> [--record] | session migrate <id>|--id <id> [--allow-large] [--json] | session recover <id>|--id <id> [--json]",
+        .summary = "Inspect, resume, migrate, or recover saved sessions",
         .options = &.{
             .{ .flag = "last", .description = "Inspect the current workspace session" },
             .{ .flag = "--id <id>", .description = "Inspect a saved session by exact id" },
+            .{ .flag = "resume [last|<id>]", .description = "Resume the latest workspace session or a session by id" },
             .{ .flag = "migrate <id>", .description = "Migrate a saved session to the current format" },
             .{ .flag = "recover <id>", .description = "Copy a recoverable corrupt session into a new session" },
             .{ .flag = "--allow-large", .description = "Permit migrating an oversized session" },
@@ -189,7 +190,7 @@ pub const top_level_specs = [_]TopLevelSpec{
         .token = "resume",
         .aliases = &.{ "--resume", "--resume-last", "--continue", "-c", "-r" },
         .hidden_from_top_level_help = true,
-        .usage = "--resume [last|<id>] [--record] | resume [last|<id>] [--record] | resume --id <id> [--record] | --resume-last | --continue | -c | -r | --resume-<id>",
+        .usage = "session resume [last|<id>] [--record] | session resume --id <id> [--record] | --resume [last|<id>] [--record] | resume [last|<id>] [--record] | resume --id <id> [--record] | --resume-last | --continue | -c | -r | --resume-<id>",
         .summary = "Continue a saved interactive session",
         .options = &.{
             .{ .flag = "-r", .description = "Choose the session to resume from a picker" },
@@ -276,6 +277,7 @@ pub const top_level_help_groups = [_]TopLevelHelpGroup{
     .{ .entries = &.{
         .{ .kind = .sessions, .usage = "sessions" },
         .{ .kind = .session, .usage = "session <last|id>" },
+        .{ .usage = "session resume [last|id]", .summary = "Resume the latest workspace session or a session by id" },
         .{ .usage = "session migrate <id>", .summary = "Migrate a saved session to the current format" },
         .{ .usage = "session recover <id>", .summary = "Copy a recoverable corrupt session" },
         .{ .kind = .replay, .usage = "replay <tape>" },
@@ -350,7 +352,7 @@ pub const top_level_flags = [_]TopLevelFlag{
 pub const top_level_examples = [_]TopLevelExample{
     .{ .command = "fx", .description = "Start a fresh interactive session" },
     .{ .command = "fx ask \"Explain the changes in this repository\"", .description = "Run one request and exit" },
-    .{ .command = "fx --resume last", .description = "Continue the latest session for this workspace" },
+    .{ .command = "fx session resume last", .description = "Continue the latest session for this workspace" },
     .{ .command = "fx status --json", .description = "Inspect the current configuration as JSON" },
 };
 

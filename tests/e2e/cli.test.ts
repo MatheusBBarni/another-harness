@@ -265,6 +265,7 @@ describe("cli: help", () => {
       expect(r.stdout).not.toContain("-c, -r, --continue");
       expect(r.stdout).toContain("--resume [last|<id>]");
       expect(r.stdout).toContain("--resume-last");
+      expect(r.stdout).toContain("session resume [last|id]");
       expect(r.stdout).toContain("-v, --version");
       expect(r.stdout).not.toContain("Must appear before the command");
       expect(r.stdout).toContain("Examples:\n");
@@ -332,6 +333,26 @@ Operational progress and diagnostics are written to stderr. JSON output keeps ra
         expect(result.code).toBe(0);
         expect(result.stderr).toBe("");
         expect(result.stdout).toBe(expected);
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "fx session help documents inspect resume migrate and recover",
+    async () => {
+      for (const args of [
+        ["session", "--help"],
+        ["session", "resume", "--help"],
+      ]) {
+        const r = await runFx(args);
+        expect(r.code).toBe(0);
+        expect(r.stderr).toBe("");
+        expect(r.stdout).toContain("Inspect, resume, migrate, or recover saved sessions");
+        expect(r.stdout).toContain("session <last|id>|--id <id>");
+        expect(r.stdout).toContain("session resume [last|<id>]");
+        expect(r.stdout).toContain("session migrate <id>|--id <id>");
+        expect(r.stdout).toContain("session recover <id>|--id <id>");
       }
     },
     TIMEOUT,
@@ -3673,7 +3694,13 @@ describe("cli: interactive startup", () => {
   test(
     "interactive startup without TTY exits one",
     async () => {
-      const cases = [[], ["resume", "last"], ["--resume"]];
+      const cases = [
+        [],
+        ["resume", "last"],
+        ["--resume"],
+        ["session", "resume", "last"],
+        ["session", "resume", "--id", "session.v3"],
+      ];
 
       for (const args of cases) {
         const home = realpathSync(mkdtempSync(join(tmpdir(), "fx-e2e-no-tty-")));
