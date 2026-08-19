@@ -5576,7 +5576,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
 
       await session.waitForComposer(TIMEOUT);
       await session.sendText("/mcp reload");
-      await session.waitForText("MCP profile reloaded (ready, runtime ", TIMEOUT);
+      await session.waitForText("MCP configuration reloaded successfully.", TIMEOUT);
       const readyDeadline = Date.now() + TIMEOUT;
       let mcpStatus = "";
       const readyStatus = "fixture source=profile scope=profile policy=optional transport=stdio state=ready";
