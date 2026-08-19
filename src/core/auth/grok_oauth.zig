@@ -14,6 +14,7 @@ pub const scope = "openid profile email offline_access grok-cli:access api:acces
 pub const referrer = "another-harness";
 pub const issuer = "https://auth.x.ai";
 const device_code_url = "https://auth.x.ai/oauth2/device/code";
+const token_url = "https://auth.x.ai/oauth2/token";
 
 fn requestDeviceAuthorization(
     alloc: Allocator,
@@ -36,6 +37,30 @@ fn requestDeviceAuthorization(
     const bytes = response.takeBody();
     defer secret.zeroAndFree(alloc, bytes);
     return oauth.parseDeviceAuthorization(alloc, bytes);
+}
+
+fn refreshAccessToken(
+    alloc: Allocator,
+    transport: oauth_transport.Provider,
+    refresh_token: []const u8,
+) !oauth.TokenSet {
+    var form: FormBody = .{};
+    var writer: std.Io.Writer.Allocating = .init(alloc);
+    defer writer.deinit();
+    try form.append(&writer.writer, "client_id", client_id);
+    try form.append(&writer.writer, "grant_type", "refresh_token");
+    try form.append(&writer.writer, "refresh_token", refresh_token);
+
+    var response = try transport.execute(alloc, .{
+        .method = .post_form,
+        .payload = writer.written(),
+        .url = token_url,
+    });
+    defer response.deinit(alloc);
+    if (response.disposition != .accepted) return oauth.OAuthError.OAuthRequestFailed;
+    const bytes = response.takeBody();
+    defer secret.zeroAndFree(alloc, bytes);
+    return oauth.parseTokenSet(alloc, bytes);
 }
 
 const FormBody = struct {
