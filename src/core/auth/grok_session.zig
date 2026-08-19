@@ -154,3 +154,36 @@ test "grok token response becomes a session with auth.x.ai issuer" {
     try std.testing.expectEqualStrings("openid profile email offline_access grok-cli:access api:access", parsed.scope);
     try std.testing.expectEqualStrings("Bearer", parsed.token_type);
 }
+
+test "logout deletes both session files even when one is missing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+
+    var both = try tmp.dir.makeOpenPath(io, "both", .{});
+    defer both.close(io);
+    {
+        var file = try both.createFile(io, "auth.json", .{});
+        file.close(io);
+    }
+    {
+        var file = try both.createFile(io, "grok-auth.json", .{});
+        file.close(io);
+    }
+    try deleteSessionFiles(&both);
+    try std.testing.expectError(error.FileNotFound, both.statFile(io, "auth.json", .{}));
+    try std.testing.expectError(error.FileNotFound, both.statFile(io, "grok-auth.json", .{}));
+
+    var only_grok = try tmp.dir.makeOpenPath(io, "only-grok", .{});
+    defer only_grok.close(io);
+    {
+        var file = try only_grok.createFile(io, "grok-auth.json", .{});
+        file.close(io);
+    }
+    try deleteSessionFiles(&only_grok);
+    try std.testing.expectError(error.FileNotFound, only_grok.statFile(io, "grok-auth.json", .{}));
+
+    var neither = try tmp.dir.makeOpenPath(io, "neither", .{});
+    defer neither.close(io);
+    try deleteSessionFiles(&neither);
+}
