@@ -59,7 +59,7 @@ pub const connection_seed = connection_registry.Seed{
     .protocol = "vercel_ai_gateway",
     .credential_ref = "automatic",
     .internal_models = .{
-        .permission_review = "openai/gpt-5.4",
+        .permission_review = "zai/glm-5.2",
         .vision = "google/gemini-2.5-flash",
     },
 };
@@ -478,6 +478,8 @@ test "Vercel adapter enforces serialized request limit before admission" {
         .credential_ref = @constCast("automatic"),
         .primary_model_id = @constCast("test/model"),
         .permission_review_model_id = null,
+        .vision_model_id = null,
+        .subagent_model_id = @constCast("test/model"),
         .capabilities = .{},
         .capability_source = .configured,
         .selected_fast_mode = false,
@@ -569,6 +571,20 @@ pub fn buildAgentRequest(
     if (request.response_format != null) return error.StructuredResponseRequiresVerifiedImages;
 
     if (request.vision_mode == .unavailable and request.selected_dynamic_tool_schemas.len == 0) {
+        if (request.required_tool_call_id) |target_call_id| {
+            const active = budget orelse return error.PendingToolReviewRequiresBudget;
+            const body = try gateway_json.buildGatewayPendingToolReviewRequestBodyWithMaxOutputTokens(
+                alloc,
+                request.serialized_tools,
+                request.messages,
+                target_call_id,
+                provider_options,
+                request.max_output_tokens orelse 2048,
+                active.deadline orelse return error.PendingToolReviewRequiresDeadline,
+                active.cancel_flag orelse return error.PendingToolReviewRequiresCancellation,
+            );
+            return finalizeAgentRequestBody(alloc, request.model, body);
+        }
         if (request.require_tool_call) {
             const body = if (budget) |active|
                 gateway_json.buildGatewayRequiredToolRequestBodyWithOptionsAndBudget(

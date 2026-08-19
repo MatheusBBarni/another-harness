@@ -646,7 +646,8 @@ describe("gateway stream lifecycle", () => {
         return parentCompletion;
       }
       if (hasCurrentToolResult(body, "route_vision_1")) {
-        return fakeGatewayToolCall("route_command_1", "run_command", {
+        return fakeGatewayToolCall("route_command_1", "terminal", {
+          action: "exec",
           command: `printf 'reviewed\\n' > ${JSON.stringify(commandPath)}`,
         });
       }

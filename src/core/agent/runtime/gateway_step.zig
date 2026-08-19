@@ -275,6 +275,7 @@ pub fn streamModelRequest(
     usage: ?*session_usage.Usage,
     usage_allocator: Allocator,
     trace_ctx: TraceContext,
+    serialized_request_limit_bytes: ?usize,
     content_capture_limit: ?usize,
     failure_info: ?*?StreamFailureInfo,
     provider_attempt_owner: agent_stream_provider.ProviderAttemptOwner,
@@ -299,6 +300,7 @@ pub fn streamModelRequest(
     var sink_error: ?anyerror = null;
     adapter.stream(alloc, .{
         .model_request = model_request,
+        .serialized_request_limit_bytes = serialized_request_limit_bytes,
         .route = route,
         .credential = credential,
         .tenant = tenant,
@@ -659,7 +661,7 @@ test "neutral adapter events materialize owned completion state" {
             events: agent_stream_provider.EventSink,
         ) anyerror!void {
             try events.emit(.provider_admitted);
-            var generation = [_]u8{ 'g', 'e', 'n', '_', 's', 'a', 'f', 'e' };
+            var generation = [_]u8{ 'g', 'e', 'n', '_', '0', '1', 'A', 'R', 'Z', '3', 'N', 'D', 'E', 'K', 'T', 'S', 'V', '4', 'R', 'R', 'F', 'F', 'Q', '6', '9', 'G', '5', 'F', 'A', 'V' };
             const local_call = types.ToolCall{
                 .id = "local_1",
                 .name = "read_file",
@@ -728,6 +730,7 @@ test "neutral adapter events materialize owned completion state" {
         &usage,
         std.testing.allocator,
         .{},
+        null,
         null,
         null,
         .agent,
@@ -808,6 +811,7 @@ test "non-http adapter failure drives legacy gateway compatibility bridge" {
         alloc,
         .{},
         null,
+        null,
         &failure_info,
         .agent,
     );
@@ -817,6 +821,7 @@ test "non-http adapter failure drives legacy gateway compatibility bridge" {
     try std.testing.expectEqual(std.http.Status.too_many_requests, result.status);
     try std.testing.expectEqualStrings("retry later", result.err_body.?);
     try std.testing.expectEqual(@as(?u64, 9), result.retry_after_seconds);
+    try std.testing.expect(failure_info.?.retryable);
     try std.testing.expect(!attempt_evidence.provider_admitted);
     var snapshot = try usage.snapshot(alloc);
     defer snapshot.deinit(alloc);
@@ -894,6 +899,8 @@ test "usage reservation failure stops before adapter network effects" {
             alloc,
             .{},
             null,
+            null,
+            null,
             .agent,
         ),
     );
@@ -901,7 +908,6 @@ test "usage reservation failure stops before adapter network effects" {
     try std.testing.expect(!attempt_evidence.provider_admitted);
     try std.testing.expectEqual(agent_stream_provider.DeliveryCertainty.State.definitely_unsent, delivery.load());
     for (held.items) |observation| try observation.fail(.unbilled);
-    try std.testing.expect(failure_info.?.retryable);
 }
 
 test "normalized failure state preserves HTTP status and delivery independently" {
@@ -1024,6 +1030,7 @@ test "normalized delivery-ambiguous failure keeps usage incomplete" {
         &usage,
         alloc,
         .{},
+        null,
         null,
         null,
         .agent,

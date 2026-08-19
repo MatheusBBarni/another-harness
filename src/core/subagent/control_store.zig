@@ -2261,7 +2261,7 @@ test "control codec rejects malformed partial unknown and oversized records" {
     defer record.deinit(alloc);
     const bytes = try renderRecord(alloc, record);
     defer alloc.free(bytes);
-    const unknown = try std.mem.replaceOwned(u8, alloc, bytes, "\"schema_version\":7", "\"schema_version\":99");
+    const unknown = try std.mem.replaceOwned(u8, alloc, bytes, "\"schema_version\":8", "\"schema_version\":99");
     defer alloc.free(unknown);
     try std.testing.expectError(error.UnsupportedControlSchema, parseRecord(alloc, unknown));
     const unknown_field = try std.mem.replaceOwned(
@@ -2322,7 +2322,7 @@ test "schema v2 migration closes absent legacy replay identities" {
         u8,
         alloc,
         current,
-        "\"schema_version\":7",
+        "\"schema_version\":8",
         "\"schema_version\":2",
     );
     defer alloc.free(versioned_with_mode);
@@ -2364,7 +2364,7 @@ test "schema v3 process epochs cannot seed manager replay authority" {
         u8,
         alloc,
         current,
-        "\"schema_version\":7",
+        "\"schema_version\":8",
         "\"schema_version\":3",
     );
     defer alloc.free(legacy_with_mode);
@@ -2399,7 +2399,7 @@ test "schema v4 manager epochs retain replay authority and migrate child permiss
         u8,
         alloc,
         current,
-        "\"schema_version\":7",
+        "\"schema_version\":8",
         "\"schema_version\":4",
     );
     defer alloc.free(legacy_with_mode);

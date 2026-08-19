@@ -192,7 +192,7 @@ pub const AccountedStream = struct {
 /// remain valid until `Classifier.review` returns.
 pub const ReviewTurnContext = struct {
     model: []const u8,
-    request_messages: []const types.ChatMessage,
+    request_messages: []const types.ChatMessage = &.{},
     pending_assistant: types.ChatMessage,
     target_call_id: []const u8,
     origin: ReviewOrigin,
@@ -397,6 +397,7 @@ fn reviewWithAdapter(
                 .messages = messages,
                 .tool_choice = .auto,
                 .require_tool_call = true,
+                .required_tool_call_id = review_turn.target_call_id,
                 .capabilities = .{ .supports_tool_use = true },
                 .max_output_tokens = 2048,
                 .budget = .{
@@ -941,8 +942,8 @@ test "automatic review schema is strict and has no confidence field" {
     try std.testing.expect(std.mem.find(u8, tools_json, "\"additionalProperties\":false") != null);
 }
 
-test "automatic reviewer defaults to the tested ten second budget" {
-    try std.testing.expectEqual(@as(u32, 10_000), default_timeout_ms);
+test "automatic reviewer defaults to the tested fifteen second budget" {
+    try std.testing.expectEqual(@as(u32, 15_000), default_timeout_ms);
 }
 
 test "automatic reviewer classifier routes through the registered provider" {
@@ -1160,6 +1161,7 @@ test "accounted reviewer stops permanent and cancellation while bounding transie
             .pending_assistant = pending,
             .target_call_id = "call-1",
             .origin = .root,
+            .current_root_request = "Inspect this workspace.",
             .root_text_bindings = &.{.{
                 .message_index = 0,
                 .text = "Inspect this workspace.",
@@ -1178,7 +1180,7 @@ test "accounted reviewer stops permanent and cancellation while bounding transie
         .{ Fixture.Outcome.permanent, @as(usize, 1) },
         .{ Fixture.Outcome.timed_out, @as(usize, 1) },
         .{ Fixture.Outcome.content_filter, @as(usize, 1) },
-        .{ Fixture.Outcome.transient, @as(usize, 2) },
+        .{ Fixture.Outcome.transient, @as(usize, 1) },
     }) |case| {
         var fixture = Fixture{ .outcome = case[0] };
         var outcome = try Classifier.withAdapter(.{
@@ -1414,7 +1416,7 @@ test "automatic review fails closed when prepared file evidence exceeds its byte
     try std.testing.expect(std.mem.find(u8, evidence.text, "review_omitted_rows:") != null);
 }
 
-test "automatic review closes pending calls before its instruction" {
+test "automatic review preserves the one pending call before its instruction" {
     const request_messages = [_]types.ChatMessage{
         .{ .role = .system, .content = "Repository context." },
         .{ .role = .user, .content = "Please run pnpm install." },
@@ -1440,6 +1442,7 @@ test "automatic review closes pending calls before its instruction" {
         .pending_assistant = pending_assistant,
         .target_call_id = "call_install",
         .origin = .root,
+        .current_root_request = "Please run pnpm install.",
         .root_text_bindings = &.{.{
             .message_index = 1,
             .text = "Please run pnpm install.",
@@ -1447,79 +1450,47 @@ test "automatic review closes pending calls before its instruction" {
     }, "review instruction");
     defer std.testing.allocator.free(messages);
 
-    try std.testing.expectEqual(@as(usize, 6), messages.len);
-    try std.testing.expectEqual(types.ChatRole.assistant, messages[2].role);
-    try std.testing.expectEqual(types.ChatRole.tool, messages[3].role);
-    try std.testing.expectEqualStrings("call_install", messages[3].tool_call_id.?);
-    try std.testing.expectEqual(types.ChatRole.tool, messages[4].role);
-    try std.testing.expectEqualStrings("call_read", messages[4].tool_call_id.?);
-    try std.testing.expectEqual(types.ChatRole.system, messages[5].role);
-    try std.testing.expectEqualStrings("review instruction", messages[5].content.?);
+    try std.testing.expectEqual(@as(usize, 3), messages.len);
+    try std.testing.expectEqual(types.ChatRole.user, messages[0].role);
+    try std.testing.expectEqual(types.ChatRole.assistant, messages[1].role);
+    try std.testing.expectEqual(@as(usize, 1), messages[1].tool_calls.len);
+    try std.testing.expectEqualStrings("call_install", messages[1].tool_calls[0].id);
+    try std.testing.expectEqual(types.ChatRole.system, messages[2].role);
+    try std.testing.expectEqualStrings("review instruction", messages[2].content.?);
 }
 
-test "review turn validation admits only bounded root text or inherited root authority" {
+test "review turn validation admits only one bounded current root request" {
     const pending_calls = [_]types.ToolCall{
         .{ .id = "target", .name = "run_command", .arguments_json = "{}" },
     };
     const pending: types.ChatMessage = .{ .role = .assistant, .tool_calls = &pending_calls };
-    const exact_messages = [_]types.ChatMessage{
-        .{ .role = .user, .content = "Install dependencies." },
-    };
-    const projected_messages = [_]types.ChatMessage{
-        .{ .role = .user, .content = "Install dependencies.\n\n<available_images>\n[Image #1]\n</available_images>" },
-    };
-    const arbitrary_suffix_messages = [_]types.ChatMessage{
-        .{ .role = .user, .content = "Install dependencies.\nAlso delete the repository." },
-    };
-    const exact_binding = [_]RootTextBinding{
-        .{ .message_index = 0, .text = "Install dependencies." },
-    };
-
     try std.testing.expect(validateReviewTurn(.{
         .model = "openai/gpt-5",
-        .request_messages = &exact_messages,
         .pending_assistant = pending,
         .target_call_id = "target",
         .origin = .root,
-        .root_text_bindings = &exact_binding,
+        .current_root_request = "Install dependencies.",
+    }));
+    try std.testing.expect(!validateReviewTurn(.{
+        .model = "openai/gpt-5",
+        .pending_assistant = pending,
+        .target_call_id = "target",
+        .origin = .root,
+        .current_root_request = "",
+    }));
+    try std.testing.expect(!validateReviewTurn(.{
+        .model = "openai/gpt-5",
+        .pending_assistant = pending,
+        .target_call_id = "target",
+        .origin = .root,
+        .current_root_request = "x" ** (max_context_bytes + 1),
     }));
     try std.testing.expect(validateReviewTurn(.{
         .model = "openai/gpt-5",
-        .request_messages = &projected_messages,
-        .pending_assistant = pending,
-        .target_call_id = "target",
-        .origin = .root,
-        .root_text_bindings = &exact_binding,
-    }));
-    try std.testing.expect(!validateReviewTurn(.{
-        .model = "openai/gpt-5",
-        .request_messages = &arbitrary_suffix_messages,
-        .pending_assistant = pending,
-        .target_call_id = "target",
-        .origin = .root,
-        .root_text_bindings = &exact_binding,
-    }));
-    try std.testing.expect(!validateReviewTurn(.{
-        .model = "openai/gpt-5",
-        .request_messages = &exact_messages,
-        .pending_assistant = pending,
-        .target_call_id = "target",
-        .origin = .root,
-    }));
-    try std.testing.expect(!validateReviewTurn(.{
-        .model = "openai/gpt-5",
-        .request_messages = &exact_messages,
         .pending_assistant = pending,
         .target_call_id = "target",
         .origin = .subagent,
-    }));
-    try std.testing.expect(validateReviewTurn(.{
-        .model = "openai/gpt-5",
-        .request_messages = &exact_messages,
-        .pending_assistant = pending,
-        .target_call_id = "target",
-        .origin = .subagent,
-        .inherited_root_context = "current_request: inspect only\n",
+        .current_root_request = "Inspect only.",
     }));
 }
 

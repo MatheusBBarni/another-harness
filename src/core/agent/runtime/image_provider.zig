@@ -66,6 +66,7 @@ pub fn inspect(
         descriptor.id,
         request.retry_count,
         .{
+            .model = descriptor.id,
             .serialized_tools = "[]",
             .messages = &messages,
             .tool_choice = .none,
@@ -86,6 +87,7 @@ pub fn inspect(
         request.usage,
         request.usage_allocator,
         request.trace_ctx,
+        null,
         request.capture_limit_bytes,
         null,
         .transport,

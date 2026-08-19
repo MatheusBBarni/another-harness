@@ -102,6 +102,9 @@ pub const ModelRequest = struct {
     messages: []const types.ChatMessage,
     tool_choice: types.ToolChoice,
     require_tool_call: bool = false,
+    /// Identifies the one pending tool call being reviewed. Adapters may use
+    /// this semantic fact to preserve provider-specific history ordering.
+    required_tool_call_id: ?[]const u8 = null,
     selected_dynamic_tool_schemas: []const []const u8 = &.{},
     vision_mode: VisionMode = .unavailable,
     vision_tool_schema: ?gateway_schema.FunctionSchema = null,
