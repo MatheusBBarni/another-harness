@@ -7,6 +7,17 @@ test {
 pub const chat_completions_url = "https://api.x.ai/v1/chat/completions";
 pub const responses_url = "https://api.x.ai/v1/responses";
 
+pub const catalog_ids = [_][]const u8{
+    "xai/grok-4.6",
+    "xai/grok-4.5",
+    "xai/grok-4.3",
+    "xai/grok-build-0.1",
+};
+
+pub fn catalogIds() []const []const u8 {
+    return &catalog_ids;
+}
+
 pub const Route = struct {
     api_model: []const u8,
     url: []const u8,
