@@ -633,8 +633,7 @@ fn clearGrokHomeSession() bool {
         .follow_symlinks = false,
     }) catch return false;
     defer fx_dir.close(io_mod.getIo());
-    grok_session.deleteGrokAuthFile(&fx_dir) catch return false;
-    return true;
+    return grok_session.deleteGrokAuthFile(&fx_dir) catch false;
 }
 
 fn take_login_session(

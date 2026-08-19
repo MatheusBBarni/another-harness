@@ -134,8 +134,13 @@ fn requiredInteger(object: std.json.ObjectMap, key: []const u8) !i64 {
 
 pub const grok_auth_file_name = "grok-auth.json";
 
-pub fn deleteGrokAuthFile(fx_dir: *std.Io.Dir) !void {
-    try deleteIfPresent(fx_dir, io_mod.getIo(), grok_auth_file_name);
+pub fn deleteGrokAuthFile(fx_dir: *std.Io.Dir) !bool {
+    const io = io_mod.getIo();
+    fx_dir.deleteFile(io, grok_auth_file_name) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    return true;
 }
 
 pub fn deleteSessionFiles(fx_dir: *std.Io.Dir) !void {
@@ -169,6 +174,8 @@ pub fn load(alloc: Allocator) !?Session {
         .resolve_beneath = true,
     }) catch return null;
     defer file.close(io_mod.getIo());
+    const stat = file.stat(io_mod.getIo()) catch return null;
+    if (stat.kind != .file or stat.permissions.toMode() & 0o077 != 0) return null;
     const bytes = io_mod.readFileToEnd(alloc, &file, max_auth_file_bytes) catch return null;
     defer secret.zeroAndFree(alloc, bytes);
     return parse(alloc, bytes) catch |err| switch (err) {
