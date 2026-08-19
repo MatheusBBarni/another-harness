@@ -19,6 +19,10 @@ pub fn catalogIds() []const []const u8 {
     return &catalog_ids;
 }
 
+pub fn serverSearchToolsJson(enabled: bool) []const u8 {
+    return if (enabled) "[{\"type\":\"web_search\"}]" else "[]";
+}
+
 pub const Route = struct {
     api_model: []const u8,
     url: []const u8,
