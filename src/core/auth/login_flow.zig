@@ -665,7 +665,9 @@ pub fn logout(
             session_load_failed = true;
             break :load null;
         };
-        break :blk mutation.delete(alloc) catch .{ .local_cleanup_failed = true };
+        break :blk mutation.delete(alloc) catch oauth_session.DeleteResult{
+            .local_cleanup_failed = true,
+        };
     };
 
     var remote_revocation_failed = session_load_failed;

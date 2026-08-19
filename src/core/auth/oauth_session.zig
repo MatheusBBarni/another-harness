@@ -135,7 +135,7 @@ const DeleteOutcome = enum {
     deleted_not_durable,
 };
 
-const DeleteResult = struct {
+pub const DeleteResult = struct {
     session_deleted: bool = false,
     local_cleanup_failed: bool = false,
 };

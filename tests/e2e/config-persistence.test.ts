@@ -285,7 +285,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         await session.sendText("/fast");
         await session.waitForText("● Fast: on", TIMEOUT);
         await session.sendText("/sandbox none");
-        await session.waitForText("● Sandbox: already set to none", TIMEOUT);
+        await session.waitForText("● Sandbox: switched to none", TIMEOUT);
         await session.sendText("/statusline sandbox");
         await session.waitForText("● Statusline: sandbox:", TIMEOUT);
         await session.sendText("/statusline context");
@@ -441,7 +441,7 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
         });
         await session.waitForText("Run /help", TIMEOUT);
         await session.sendText("/sandbox none");
-        await session.waitForText("● Sandbox: already set to none", TIMEOUT);
+        await session.waitForText("● Sandbox: switched to none", TIMEOUT);
         await session.sendText('/allowlist add command "local-a *"');
         await session.waitForText("(scope=local)", TIMEOUT);
         await session.sendText('/allowlist user add command "user *"');
