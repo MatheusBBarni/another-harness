@@ -966,6 +966,7 @@ const App = struct {
             app_callbacks.Bindings(App).workerEventHandlers(self),
             flushRequestedFrame,
         );
+        try SessionAppRuntime.settlePendingLiveSessionTransition(self);
     }
 
     fn flushRequestedFrame(self: *App) !void {
