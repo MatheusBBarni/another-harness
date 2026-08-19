@@ -2140,25 +2140,23 @@ test "automatic recovery resets after non automatic permission denials" {
     const user_denied = "{\"error\":{\"type\":\"tool_permission_denied\",\"reason\":\"user_denied\"}}";
     const policy_denied = "{\"error\":{\"type\":\"tool_permission_denied\",\"reason\":\"policy_denied\"}}";
     const permission_required = "{\"error\":{\"type\":\"tool_permission_denied\",\"reason\":\"permission_required\"}}";
-    const messages = [_]ChatMessage{
-        .{ .role = .assistant, .tool_calls = &.{.{ .id = "auto-1", .name = "run_command", .arguments_json = "{}" }} },
-        .{ .role = .tool, .content = auto_denied, .tool_call_id = "auto-1", .tool_result_status = .failure },
-        .{ .role = .assistant, .tool_calls = &.{.{ .id = "auto-2", .name = "run_command", .arguments_json = "{}" }} },
-        .{ .role = .tool, .content = auto_denied, .tool_call_id = "auto-2", .tool_result_status = .failure },
-        .{ .role = .assistant, .tool_calls = &.{.{ .id = "auto-3", .name = "run_command", .arguments_json = "{}" }} },
-        .{ .role = .tool, .content = auto_denied, .tool_call_id = "auto-3", .tool_result_status = .failure },
-        .{ .role = .assistant, .tool_calls = &.{.{ .id = "user", .name = "run_command", .arguments_json = "{}" }} },
-        .{ .role = .tool, .content = user_denied, .tool_call_id = "user", .tool_result_status = .failure },
-        .{ .role = .assistant, .tool_calls = &.{.{ .id = "policy", .name = "run_command", .arguments_json = "{}" }} },
-        .{ .role = .tool, .content = policy_denied, .tool_call_id = "policy", .tool_result_status = .failure },
-        .{ .role = .assistant, .tool_calls = &.{.{ .id = "headless", .name = "run_command", .arguments_json = "{}" }} },
-        .{ .role = .tool, .content = permission_required, .tool_call_id = "headless", .tool_result_status = .failure },
-    };
+    for ([_][]const u8{ user_denied, policy_denied, permission_required }) |reset_result| {
+        const messages = [_]ChatMessage{
+            .{ .role = .assistant, .tool_calls = &.{.{ .id = "auto-1", .name = "run_command", .arguments_json = "{}" }} },
+            .{ .role = .tool, .content = auto_denied, .tool_call_id = "auto-1", .tool_result_status = .failure },
+            .{ .role = .assistant, .tool_calls = &.{.{ .id = "auto-2", .name = "run_command", .arguments_json = "{}" }} },
+            .{ .role = .tool, .content = auto_denied, .tool_call_id = "auto-2", .tool_result_status = .failure },
+            .{ .role = .assistant, .tool_calls = &.{.{ .id = "auto-3", .name = "run_command", .arguments_json = "{}" }} },
+            .{ .role = .tool, .content = auto_denied, .tool_call_id = "auto-3", .tool_result_status = .failure },
+            .{ .role = .assistant, .tool_calls = &.{.{ .id = "reset", .name = "run_command", .arguments_json = "{}" }} },
+            .{ .role = .tool, .content = reset_result, .tool_call_id = "reset", .tool_result_status = .failure },
+        };
 
-    try std.testing.expectEqual(
-        permission_auto_classifier.AutoPermissionPhase.automatic_review,
-        automaticPermissionPhase(&messages),
-    );
+        try std.testing.expectEqual(
+            permission_auto_classifier.AutoPermissionPhase.automatic_review,
+            automaticPermissionPhase(&messages),
+        );
+    }
 }
 
 test "parallel automatic denials count as one response group" {

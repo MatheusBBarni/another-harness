@@ -4300,6 +4300,17 @@ describe("acp: model-independent", () => {
         const root = createIsolatedRoot(`fx-acp-auto-threshold-${testCase.suffix}-`);
         const target = join(root.external, `threshold-${testCase.suffix}.txt`);
         const fourthCallId = `${testCase.suffix}_threshold_call_4`;
+        const postRejectCallId = "reject_after_human_denial";
+        const postDecisionResponses = testCase.executes
+          ? []
+          : [(body: string) => {
+            expect(acpToolResultText(body, fourthCallId)).toContain("user_denied");
+            return fileToolCall(
+              postRejectCallId,
+              target,
+              "ACP_THRESHOLD_REJECTED_RETRY",
+            );
+          }];
         const gateway = startFakeGateway([
           ...Array.from({ length: 4 }, (_, index) => (body: string) => {
             if (index > 0) expect(body).toContain("auto_denied");
@@ -4313,6 +4324,7 @@ describe("acp: model-independent", () => {
               `ACP_THRESHOLD_${testCase.suffix.toUpperCase()}`,
             );
           }),
+          ...postDecisionResponses,
           finalText(`ACP threshold ${testCase.suffix} complete`),
         ], { classifierDecision: "ask" });
 
@@ -4334,8 +4346,8 @@ describe("acp: model-independent", () => {
           );
           expect(permissions).toHaveLength(1);
           expect(permissions[0]!.params.toolCall.toolCallId).toBe(fourthCallId);
-          expect(gateway.classifierRequests).toHaveLength(3);
-          expect(gateway.requests).toHaveLength(5);
+          expect(gateway.classifierRequests).toHaveLength(testCase.executes ? 3 : 4);
+          expect(gateway.requests).toHaveLength(testCase.executes ? 5 : 6);
           expect(existsSync(target)).toBe(testCase.executes);
           if (testCase.executes) {
             expect(readFileSync(target, "utf8")).toBe("ACP_THRESHOLD_ALLOW");
@@ -4345,6 +4357,9 @@ describe("acp: model-independent", () => {
           } else {
             expect(acpToolResultText(gateway.requests[4]!.body, fourthCallId)).toContain(
               "user_denied",
+            );
+            expect(acpToolResultText(gateway.requests[5]!.body, postRejectCallId)).toContain(
+              "auto_denied",
             );
           }
           expect(client.stderr).toBe("");
