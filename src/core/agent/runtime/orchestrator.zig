@@ -1442,9 +1442,9 @@ fn streamPermissionReviewAttempt(
     if (result.failure) |failure| {
         debug_trace.logf(
             "permission",
-            "event=auto_review_stream_rejected response_code={?d} category={s}",
+            "event=auto_review_stream_rejected response_status={d} category={s}",
             .{
-                failure.response_code,
+                failure.response_status,
                 @tagName(failure.category),
             },
         );
@@ -3057,7 +3057,7 @@ fn processQueuedPromptLoop(
                 .capabilities = request_descriptor.capabilities,
                 .reasoning_effort = config.effort,
                 .fast_mode = route_fast_mode,
-                .max_output_tokens = request_descriptor.capabilities.max_output_tokens,
+                .max_output_tokens = request_max_output_tokens(request_descriptor.capabilities),
                 .budget = .{ .cancel_flag = config.cancel_flag },
             };
             runtime_telemetry.traceModelRequestBuilt(
@@ -3129,7 +3129,7 @@ fn processQueuedPromptLoop(
                 step_ctx,
                 null,
                 null,
-                &gateway_failure_facts,
+                null,
                 .agent,
             ) catch |err| {
                 parent_turn_delivery.observeGatewayDelivery(

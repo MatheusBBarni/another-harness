@@ -2522,6 +2522,7 @@ test "app direct ask delivers semantic presentation through the runtime sink" {
             _: agent_stream_provider.AdapterRequest,
             events: agent_stream_provider.EventSink,
         ) !void {
+            try events.emit(.provider_admitted);
             try events.emit(.{ .text_delta = "Before table.\n" ++
                 "| Name | Count |\n" ++
                 "|------|------:|\n" ++

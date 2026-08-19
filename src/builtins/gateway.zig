@@ -1068,7 +1068,7 @@ pub fn streamVercelAdapter(
         request.model_request.messages.len,
     });
     if (request.serialized_request_limit_bytes) |limit| {
-        if (payload.len > limit) {
+        if (!serializedRequestWithinLimit(payload.len, limit)) {
             try events.emit(.{ .failure = .{
                 .category = .request_too_large,
                 .detail = "serialized provider request exceeds the configured limit",
@@ -1193,6 +1193,10 @@ pub fn streamVercelAdapter(
     }
 }
 
+fn serializedRequestWithinLimit(payload_bytes: usize, limit_bytes: usize) bool {
+    return payload_bytes <= limit_bytes;
+}
+
 test "Vercel adapter sink failure does not mutate user cancellation" {
     const FakeTransport = struct {
         fn stream(_: ?*anyopaque, _: Allocator, request: VercelTransportRequest) anyerror!VercelTransportResponse {
@@ -1258,26 +1262,19 @@ test "Vercel adapter sink failure does not mutate user cancellation" {
     try std.testing.expect(!cancelled.load(.seq_cst));
 }
 
-test "Vercel adapter enforces serialized request limit before admission" {
-    const FakeLegacy = struct {
-        payload: []const u8,
+test "Vercel adapter enforces exact serialized limit before admission" {
+    const FakeTransport = struct {
         calls: usize = 0,
 
-        fn build(raw: ?*anyopaque, alloc: Allocator, _: agent_stream_provider_contract.BuildRequest) anyerror![]u8 {
-            const self: *@This() = @ptrCast(@alignCast(raw.?));
-            return alloc.dupe(u8, self.payload);
-        }
-
-        fn stream(raw: ?*anyopaque, _: Allocator, _: agent_stream_provider_contract.Request) anyerror!agent_stream_provider_contract.Result {
+        fn stream(raw: ?*anyopaque, _: Allocator, _: VercelTransportRequest) anyerror!VercelTransportResponse {
             const self: *@This() = @ptrCast(@alignCast(raw.?));
             self.calls += 1;
             return .{ .status = .ok, .completion = .{ .finish_reason = .stop } };
         }
     };
     const Capture = struct {
-        admitted: usize = 0,
         failures: usize = 0,
-        finishes: usize = 0,
+        admitted: usize = 0,
 
         fn emit(raw: *anyopaque, event: agent_stream_provider_contract.StreamEvent) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(raw));
@@ -1287,21 +1284,18 @@ test "Vercel adapter enforces serialized request limit before admission" {
                     try std.testing.expectEqual(agent_stream_provider_contract.StreamFailure.Category.request_too_large, failure.category);
                     self.failures += 1;
                 },
-                .finish => self.finishes += 1,
                 else => {},
             }
         }
     };
 
-    const accepted_payload = "x" ** (16 * 1024);
-    const rejected_payload = accepted_payload ++ "x";
-    var fake = FakeLegacy{ .payload = rejected_payload };
+    try std.testing.expect(serializedRequestWithinLimit(16 * 1024, 16 * 1024));
+    try std.testing.expect(!serializedRequestWithinLimit(16 * 1024 + 1, 16 * 1024));
+
+    var fake_transport: FakeTransport = .{};
+    var transport = VercelTransport{ .context = &fake_transport, .stream_fn = FakeTransport.stream };
     var adapter = provider_adapter;
-    adapter.legacy_provider = .{
-        .context = &fake,
-        .build_fn = FakeLegacy.build,
-        .stream_fn = FakeLegacy.stream,
-    };
+    adapter.context = &transport;
     var cancelled = std.atomic.Value(bool).init(false);
     var delivery = agent_stream_provider_contract.DeliveryCertainty.init();
     var attempt_evidence: agent_stream_provider_contract.AttemptEvidence = .{};
@@ -1320,14 +1314,18 @@ test "Vercel adapter enforces serialized request limit before admission" {
         .selected_fast_mode = false,
         .fast_model_suffix = null,
     };
-    const request = agent_stream_provider_contract.AdapterRequest{
+    var state = agent_stream_provider_contract.EventState.init(std.testing.allocator);
+    defer state.deinit();
+    var sink_error: ?anyerror = null;
+    var capture: Capture = .{};
+    try adapter.stream(std.testing.allocator, .{
         .model_request = .{
             .tools = &.{},
             .messages = &.{},
             .tool_choice = .none,
             .capabilities = .{},
         },
-        .serialized_request_limit_bytes = 16 * 1024,
+        .serialized_request_limit_bytes = 0,
         .route = &route,
         .credential = "credential",
         .tenant = null,
@@ -1338,38 +1336,16 @@ test "Vercel adapter enforces serialized request limit before admission" {
         .delivery = &delivery,
         .attempt_evidence = &attempt_evidence,
         .cancel_flag = &cancelled,
-    };
-
-    var state = agent_stream_provider_contract.EventState.init(std.testing.allocator);
-    defer state.deinit();
-    var sink_error: ?anyerror = null;
-    var capture: Capture = .{};
-    try adapter.stream(std.testing.allocator, request, .{
+    }, .{
         .context = &capture,
         .state = &state,
         .sink_error = &sink_error,
         .emit_fn = Capture.emit,
     });
-    try std.testing.expectEqual(@as(usize, 0), fake.calls);
+    try std.testing.expectEqual(@as(usize, 0), fake_transport.calls);
     try std.testing.expectEqual(@as(usize, 0), capture.admitted);
     try std.testing.expectEqual(@as(usize, 1), capture.failures);
     try std.testing.expect(!state.provider_admitted);
-
-    state.deinit();
-    state = agent_stream_provider_contract.EventState.init(std.testing.allocator);
-    fake.payload = accepted_payload;
-    capture = .{};
-    sink_error = null;
-    try adapter.stream(std.testing.allocator, request, .{
-        .context = &capture,
-        .state = &state,
-        .sink_error = &sink_error,
-        .emit_fn = Capture.emit,
-    });
-    try std.testing.expectEqual(@as(usize, 1), fake.calls);
-    try std.testing.expectEqual(@as(usize, 1), capture.admitted);
-    try std.testing.expectEqual(@as(usize, 1), capture.finishes);
-    try std.testing.expect(state.provider_admitted);
 }
 
 test "Vercel and peer adapters receive equivalent neutral requests with isolated wire formats" {

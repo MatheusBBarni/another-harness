@@ -503,6 +503,7 @@ pub const FakeGateway = struct {
         const completion = self.completions[self.index];
         self.index += 1;
 
+        try events.emit(.provider_admitted);
         if (completion.pre_send_error) |err| {
             if (try emitNetworkFailure(request, err, events)) return;
             return err;

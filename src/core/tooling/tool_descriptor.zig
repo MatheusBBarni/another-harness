@@ -267,7 +267,7 @@ test "nullable properties preserve concrete constraints and add one null branch"
         .required = &.{"kind"},
         .additional_properties = false,
     };
-    const schema = FunctionSchema{
+    const schema = Descriptor{
         .name = "nullable",
         .description = "nullable",
         .input_schema = .{

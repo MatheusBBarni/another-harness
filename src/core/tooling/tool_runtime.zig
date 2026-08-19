@@ -8517,8 +8517,8 @@ const VisionAdapterFixture = struct {
         if (self.cancel_after_call == self.call_count) request.cancel_flag.store(true, .seq_cst);
         if (response_index >= self.responses.len) return error.UnexpectedVisionAdapterCall;
         const response = self.responses[response_index];
+        try events.emit(.provider_admitted);
         request.delivery.markPossiblySent();
-        request.attempt_evidence.provider_admitted = true;
         if (response.failure) |failure| {
             try events.emit(.{ .failure = failure });
             return;

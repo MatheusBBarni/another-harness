@@ -136,6 +136,7 @@ fn finishStream(
     _: stream_provider.AdapterRequest,
     events: stream_provider.EventSink,
 ) anyerror!void {
+    try events.emit(.provider_admitted);
     try events.emit(.{ .finish = .{ .reason = .stop } });
 }
 

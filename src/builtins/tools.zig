@@ -1020,6 +1020,9 @@ pub const terminal = ToolSpec{
     .decode = terminal_impl.decode,
     .validate = terminal_impl.validate,
     .call = terminal_impl.call,
+    .runtime_provider = .run_command,
+    .captured_command_action = "exec",
+    .captured_command_fn = terminal_impl.isCapturedCommand,
     .authorized_result_mapper = terminal_impl.mapAuthorizedResult,
     .reads_only_fn = terminal_impl.readsOnly,
     .irreversible_fn = terminal_impl.isIrreversible,
@@ -2210,7 +2213,7 @@ test "built-in subagent owns product metadata schema and callbacks" {
     defer std.testing.allocator.free(schema_json);
 
     try std.testing.expectEqualStrings("subagent", subagent.name);
-    try std.testing.expect(std.mem.find(u8, subagent.description, "ordinary Fx child sessions") != null);
+    try std.testing.expect(std.mem.find(u8, subagent.description, "ordinary fx child sessions") != null);
     try std.testing.expect(std.mem.find(u8, subagent.description, "Select exactly one command branch") != null);
     try std.testing.expect(std.mem.find(u8, subagent.description, "use inspect.wait instead of terminal.exec") != null);
     try std.testing.expect(std.mem.find(u8, schema_json, "\"command\":{\"type\":\"object\"") != null);
