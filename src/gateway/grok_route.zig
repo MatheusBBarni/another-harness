@@ -2,6 +2,7 @@ const std = @import("std");
 
 test {
     _ = @import("openai_sse.zig");
+    _ = @import("grok_billing.zig");
 }
 
 pub const chat_completions_url = "https://api.x.ai/v1/chat/completions";
