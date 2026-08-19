@@ -2779,8 +2779,8 @@ fn stubFetchForbiddenCredits(
 test "built-in credits provider names the team query only when valid" {
     const cases = [_]struct { team: ?[]const u8, want: []const u8 }{
         .{ .team = null, .want = "/coding-agent/v1/credits" },
-        .{ .team = "team_ut02N41HAM44llPMehBfFdqY", .want = "/coding-agent/v1/credits?teamId=team_ut02N41HAM44llPMehBfFdqY" },
-        .{ .team = "pranit-2381s-projects", .want = "/coding-agent/v1/credits?teamId=pranit-2381s-projects" },
+        .{ .team = "team_000000000000000000000000", .want = "/coding-agent/v1/credits?teamId=team_000000000000000000000000" },
+        .{ .team = "example-projects", .want = "/coding-agent/v1/credits?teamId=example-projects" },
         .{ .team = "team a/../b", .want = "/coding-agent/v1/credits" },
         .{ .team = "", .want = "/coding-agent/v1/credits" },
     };
