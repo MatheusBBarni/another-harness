@@ -2,6 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const debug_trace = @import("../shared/debug_trace.zig");
 const host = @import("../hosts/host.zig");
+const grok_oauth = @import("grok_oauth.zig");
+const grok_session = @import("grok_session.zig");
 const io_mod = @import("../shared/io.zig");
 const oauth = @import("oauth.zig");
 const oauth_session = @import("oauth_session.zig");
@@ -245,6 +247,11 @@ pub fn resolvePreferring(
         .refresh_if_needed => try loadFxLoginCredential(alloc, transport),
     };
     if (fx_login) |credential| return .{ .credential = credential };
+    const grok_login = switch (mode) {
+        .stored => try loadStoredGrokLoginCredential(alloc),
+        .refresh_if_needed => try loadGrokLoginCredential(alloc, transport),
+    };
+    if (grok_login) |credential| return .{ .credential = credential };
 
     if (secret_store.isDisabled()) return .{};
 
@@ -269,6 +276,10 @@ fn loadPreferredSource(
     mode: LoadMode,
     source: Source,
 ) !?Credential {
+    if (source == .grok_oauth) return switch (mode) {
+        .stored => loadStoredGrokLoginCredential(alloc),
+        .refresh_if_needed => loadGrokLoginCredential(alloc, transport),
+    };
     if (source != .fx_login) return loadSource(alloc, transport, secret_store, source);
     return switch (mode) {
         .stored => loadStoredFxLoginCredential(alloc),
@@ -287,7 +298,7 @@ pub fn loadSource(
         .ai_gateway_api_key => loadEnvCredential(alloc, "AI_GATEWAY_API_KEY", source),
         .fx_login => loadFxLoginCredential(alloc, transport),
         .stored_key => loadStoredKeyCredential(alloc, secret_store),
-        .grok_oauth => null,
+        .grok_oauth => loadGrokLoginCredential(alloc, transport),
     };
 }
 
@@ -299,7 +310,7 @@ pub fn sourceExists(
     return switch (source) {
         .vercel_oidc_token => nonEmptyEnvValue("VERCEL_OIDC_TOKEN") != null,
         .ai_gateway_api_key => nonEmptyEnvValue("AI_GATEWAY_API_KEY") != null,
-        .grok_oauth => false,
+        .grok_oauth => grokSessionExists(alloc),
         .fx_login => blk: {
             const loaded = oauth_session.load(alloc) catch |err| switch (err) {
                 error.OutOfMemory => return err,
@@ -377,6 +388,55 @@ fn loadStoredFxLoginCredential(alloc: std.mem.Allocator) !?Credential {
     var session = (try oauth_session.load(alloc)) orelse return null;
     defer session.deinit(alloc);
     return takeCredentialFromSession(&session, null);
+}
+
+fn grokSessionExists(alloc: std.mem.Allocator) bool {
+    const loaded = grok_session.load(alloc) catch return false;
+    var session = loaded orelse return false;
+    defer session.deinit(alloc);
+    return true;
+}
+
+fn loadStoredGrokLoginCredential(alloc: std.mem.Allocator) !?Credential {
+    var session = (try grok_session.load(alloc)) orelse return null;
+    defer session.deinit(alloc);
+    return takeCredentialFromGrokSession(&session, null);
+}
+
+fn loadGrokLoginCredential(
+    alloc: std.mem.Allocator,
+    transport: oauth_transport.Provider,
+) !?Credential {
+    var session = (try grok_session.load(alloc)) orelse return null;
+    defer session.deinit(alloc);
+    if (session.expired(io_mod.milliTimestamp())) {
+        var refreshed = grok_oauth.refreshAccessToken(alloc, transport, session.refresh_token) catch {
+            return null;
+        };
+        defer refreshed.deinit(alloc);
+        secret.zeroAndFree(alloc, session.access_token);
+        session.access_token = refreshed.access_token;
+        refreshed.access_token = &.{};
+        if (refreshed.refresh_token) |value| {
+            secret.zeroAndFree(alloc, session.refresh_token);
+            session.refresh_token = value;
+            refreshed.refresh_token = null;
+        }
+        session.expires_at_ms = try oauth.expiry_timestamp_ms(io_mod.milliTimestamp(), refreshed.expires_in);
+        grok_session.saveNewSession(alloc, session) catch {};
+        return takeCredentialFromGrokSession(&session, io_mod.milliTimestamp());
+    }
+    return takeCredentialFromGrokSession(&session, null);
+}
+
+fn takeCredentialFromGrokSession(session: *grok_session.Session, refreshed_at_ms: ?i64) Credential {
+    const token = session.access_token;
+    session.access_token = &.{};
+    return .{
+        .token = token,
+        .source = .grok_oauth,
+        .refresh_after_ms = credentialRefreshAfterMs(session.expires_at_ms, refreshed_at_ms),
+    };
 }
 
 pub fn refreshFxLoginCredential(

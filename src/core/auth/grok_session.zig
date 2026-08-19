@@ -28,9 +28,13 @@ pub const Session = struct {
         alloc.free(self.token_type);
         self.* = undefined;
     }
+
+    pub fn expired(self: Session, now_ms: i64) bool {
+        return oauth_session.refresh_deadline_ms(self.expires_at_ms) <= now_ms;
+    }
 };
 
-fn takeLoginSession(alloc: Allocator, token: *oauth.TokenSet, now_ms: i64) !Session {
+pub fn takeLoginSession(alloc: Allocator, token: *oauth.TokenSet, now_ms: i64) !Session {
     const refresh_token = token.refresh_token orelse return error.NoRefreshToken;
     const expires_at_ms = try oauth.expiry_timestamp_ms(now_ms, token.expires_in);
     const owned_issuer = try alloc.dupe(u8, grok_oauth.issuer);
@@ -54,7 +58,7 @@ fn takeLoginSession(alloc: Allocator, token: *oauth.TokenSet, now_ms: i64) !Sess
     return session;
 }
 
-fn stringify(alloc: Allocator, session: Session) ![]u8 {
+pub fn stringify(alloc: Allocator, session: Session) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
     const writer = &out.writer;
@@ -70,7 +74,7 @@ fn stringify(alloc: Allocator, session: Session) ![]u8 {
     return out.toOwnedSlice();
 }
 
-fn parse(alloc: Allocator, bytes: []const u8) !Session {
+pub fn parse(alloc: Allocator, bytes: []const u8) !Session {
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, bytes, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidAuthSession;
@@ -130,7 +134,11 @@ fn requiredInteger(object: std.json.ObjectMap, key: []const u8) !i64 {
 
 pub const grok_auth_file_name = "grok-auth.json";
 
-fn deleteSessionFiles(fx_dir: *std.Io.Dir) !void {
+pub fn deleteGrokAuthFile(fx_dir: *std.Io.Dir) !void {
+    try deleteIfPresent(fx_dir, io_mod.getIo(), grok_auth_file_name);
+}
+
+pub fn deleteSessionFiles(fx_dir: *std.Io.Dir) !void {
     const io = io_mod.getIo();
     try deleteIfPresent(fx_dir, io, profile_paths.auth_file_name);
     try deleteIfPresent(fx_dir, io, grok_auth_file_name);
@@ -141,6 +149,45 @@ fn deleteIfPresent(fx_dir: *std.Io.Dir, io: std.Io, name: []const u8) !void {
         error.FileNotFound => {},
         else => return err,
     };
+}
+
+const max_auth_file_bytes: usize = 64 * 1024;
+
+pub fn load(alloc: Allocator) !?Session {
+    const home = io_mod.getenv("HOME") orelse return null;
+    var home_dir = std.Io.Dir.openDirAbsolute(io_mod.getIo(), home, .{ .iterate = true }) catch return null;
+    defer home_dir.close(io_mod.getIo());
+    var fx_dir = home_dir.openDir(io_mod.getIo(), profile_paths.root_dir_name, .{
+        .iterate = true,
+        .follow_symlinks = false,
+    }) catch return null;
+    defer fx_dir.close(io_mod.getIo());
+    var file = fx_dir.openFile(io_mod.getIo(), grok_auth_file_name, .{
+        .mode = .read_only,
+        .allow_directory = false,
+        .follow_symlinks = false,
+        .resolve_beneath = true,
+    }) catch return null;
+    defer file.close(io_mod.getIo());
+    const bytes = io_mod.readFileToEnd(alloc, &file, max_auth_file_bytes) catch return null;
+    defer secret.zeroAndFree(alloc, bytes);
+    return parse(alloc, bytes) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => null,
+    };
+}
+
+pub fn saveNewSession(alloc: Allocator, session: Session) !void {
+    const home = io_mod.getenv("HOME") orelse return error.HomeNotSet;
+    var home_dir = io_mod.VerifiedDir{
+        .dir = try std.Io.Dir.openDirAbsolute(io_mod.getIo(), home, .{ .iterate = true }),
+    };
+    defer home_dir.close();
+    var fx_dir = try io_mod.openOrCreateVerifiedPrivateDir(&home_dir, profile_paths.root_dir_name);
+    defer fx_dir.close();
+    const text = try stringify(alloc, session);
+    defer secret.zeroAndFree(alloc, text);
+    try io_mod.durableReplaceVerified(alloc, &fx_dir, grok_auth_file_name, text);
 }
 
 test "grok token response becomes a session with auth.x.ai issuer" {

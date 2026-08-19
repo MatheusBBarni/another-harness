@@ -15,10 +15,18 @@ pub const client_id = "b1a00492-073a-47ea-816f-4c329264a828";
 pub const scope = "openid profile email offline_access grok-cli:access api:access";
 pub const referrer = "another-harness";
 pub const issuer = "https://auth.x.ai";
-const device_code_url = "https://auth.x.ai/oauth2/device/code";
-const token_url = "https://auth.x.ai/oauth2/token";
+pub const device_code_url = "https://auth.x.ai/oauth2/device/code";
+pub const token_url = "https://auth.x.ai/oauth2/token";
 
-fn requestDeviceAuthorization(
+pub fn tokenMetadata() oauth.Metadata {
+    return .{
+        .issuer = @constCast(issuer),
+        .device_authorization_endpoint = @constCast(device_code_url),
+        .token_endpoint = @constCast(token_url),
+    };
+}
+
+pub fn requestDeviceAuthorization(
     alloc: Allocator,
     transport: oauth_transport.Provider,
 ) !oauth.DeviceAuthorization {
@@ -41,7 +49,7 @@ fn requestDeviceAuthorization(
     return oauth.parseDeviceAuthorization(alloc, bytes);
 }
 
-fn refreshAccessToken(
+pub fn refreshAccessToken(
     alloc: Allocator,
     transport: oauth_transport.Provider,
     refresh_token: []const u8,

@@ -15,7 +15,7 @@ pub const LastLoginOwnership = struct {
     model: []const u8,
 };
 
-pub fn parseLoginProvider(rest: []const []const u8) error{InvalidLoginProvider}!LoginProvider {
+pub fn parseLoginProvider(rest: anytype) error{InvalidLoginProvider}!LoginProvider {
     if (rest.len == 0) return .picker;
     if (rest.len != 1) return error.InvalidLoginProvider;
     if (std.mem.eql(u8, rest[0], "grok")) return .grok;
