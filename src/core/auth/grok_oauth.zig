@@ -81,6 +81,22 @@ test "grok device authorization posts client id, grok scopes, and another-harnes
     try std.testing.expectEqualStrings("https://auth.x.ai/oauth/device", device.verification_uri);
 }
 
+test "grok refresh posts refresh_token grant to auth.x.ai" {
+    var probe = TransportProbe{
+        .expected_method = .post_form,
+        .expected_url = "https://auth.x.ai/oauth2/token",
+        .expected_payload = "client_id=b1a00492-073a-47ea-816f-4c329264a828&grant_type=refresh_token&refresh_token=old-refresh",
+        .response_body = "{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"expires_in\":3600,\"scope\":\"openid offline_access\",\"token_type\":\"Bearer\"}",
+    };
+
+    var tokens = try refreshAccessToken(std.testing.allocator, probe.provider(), "old-refresh");
+    defer tokens.deinit(std.testing.allocator);
+
+    try std.testing.expect(probe.matched);
+    try std.testing.expectEqualStrings("new-access", tokens.access_token);
+    try std.testing.expectEqualStrings("new-refresh", tokens.refresh_token.?);
+}
+
 const TransportProbe = struct {
     expected_method: oauth_transport.Method,
     expected_url: []const u8,
