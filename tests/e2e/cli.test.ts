@@ -265,6 +265,7 @@ describe("cli: help", () => {
       expect(r.stdout).not.toContain("-c, -r, --continue");
       expect(r.stdout).toContain("--resume [last|<id>]");
       expect(r.stdout).toContain("--resume-last");
+      expect(r.stdout).toContain("session resume [last|id]");
       expect(r.stdout).toContain("-v, --version");
       expect(r.stdout).not.toContain("Must appear before the command");
       expect(r.stdout).toContain("Examples:\n");
@@ -308,23 +309,26 @@ describe("cli: help", () => {
 Run one noninteractive request
 
 Usage:
-  fx ask [--auto|--yolo] [--image PATH] [--json] [--no-save] [--no-color] [--resume <last|id>|--resume-id <id>] [--continue-recovery] [--] <prompt>
+  fx ask [--auto|--yolo] [--image PATH] [--json] [--quiet] [--prompt-permissions] [--no-save] [--no-color] [--resume <last|id>|--resume-id <id>] [--continue-recovery] [--] <prompt>
 
 Options:
-  --auto               Automatically review unresolved permission requests
-  --yolo               Disable permission checks and command sandboxing
-  --image PATH         Attach an image file; repeat for multiple images
-  --json               Emit machine-readable JSON instead of text
-  --no-save            Do not save the session; incompatible with --resume and --resume-id
-  --no-color           Render TTY output without colors or hyperlinks
-  --resume <last|id>   Continue the last session or a session by id
-  --resume-id <id>     Continue a session by exact id
-  --continue-recovery  Resume the paused model response in the selected session
-  --                   Treat every following argument as prompt text
+  --auto                Automatically review unresolved permission requests
+  --yolo                Disable permission checks and command sandboxing
+  --image PATH          Attach an image file; repeat for multiple images
+  --json                Emit machine-readable JSON instead of text
+  --quiet               Suppress assistant output
+  --prompt-permissions  Prompt for Y/N permission approval when stdin is a TTY
+  --no-save             Do not save the session; incompatible with --resume and --resume-id
+  --no-color            Render TTY output without colors or hyperlinks
+  --resume <last|id>    Continue the last session or a session by id
+  --resume-id <id>      Continue a session by exact id
+  --continue-recovery   Resume the paused model response in the selected session
+  --                    Treat every following argument as prompt text
 
 The prompt may be passed as arguments or piped on stdin when no prompt args are given.
 TTY stdout uses the Minimal transcript presentation; redirected stdout emits raw assistant Markdown.
 Operational progress and diagnostics are written to stderr. JSON output keeps raw Markdown in \`output\`.
+With --prompt-permissions, JSON and quiet requests may prompt on stderr only when stdin is a TTY.
 `;
 
       for (const alias of ["--help", "-h"]) {
@@ -332,6 +336,26 @@ Operational progress and diagnostics are written to stderr. JSON output keeps ra
         expect(result.code).toBe(0);
         expect(result.stderr).toBe("");
         expect(result.stdout).toBe(expected);
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "fx session help documents inspect resume migrate and recover",
+    async () => {
+      for (const args of [
+        ["session", "--help"],
+        ["session", "resume", "--help"],
+      ]) {
+        const r = await runFx(args);
+        expect(r.code).toBe(0);
+        expect(r.stderr).toBe("");
+        expect(r.stdout).toContain("Inspect, resume, migrate, or recover saved sessions");
+        expect(r.stdout).toContain("session <last|id>|--id <id>");
+        expect(r.stdout).toContain("session resume [last|<id>]");
+        expect(r.stdout).toContain("session migrate <id>|--id <id>");
+        expect(r.stdout).toContain("session recover <id>|--id <id>");
       }
     },
     TIMEOUT,
@@ -3673,7 +3697,13 @@ describe("cli: interactive startup", () => {
   test(
     "interactive startup without TTY exits one",
     async () => {
-      const cases = [[], ["resume", "last"], ["--resume"]];
+      const cases = [
+        [],
+        ["resume", "last"],
+        ["--resume"],
+        ["session", "resume", "last"],
+        ["session", "resume", "--id", "session.v3"],
+      ];
 
       for (const args of cases) {
         const home = realpathSync(mkdtempSync(join(tmpdir(), "fx-e2e-no-tty-")));
@@ -4418,7 +4448,7 @@ describe("cli: error handling", () => {
             "fx ask: --no-save cannot be used with --resume or --resume-id",
           );
           expect(rejected.stderr).toContain(
-            "usage: fx ask [--auto|--yolo] [--image PATH] [--json] [--no-save]",
+            "usage: fx ask [--auto|--yolo] [--image PATH] [--json] [--quiet] [--prompt-permissions] [--no-save]",
           );
         }
         expect(gateway.requests).toHaveLength(0);

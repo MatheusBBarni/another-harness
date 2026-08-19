@@ -241,9 +241,13 @@ Security is permission-first.
 
 * `/permissions remember allow|deny <tool-name> <arguments-json>` confirms and stores an exact rule only for an active saved session; `/permissions` lists stable rule IDs and `/permissions revoke <rule-id>` removes one
 
-* unresolved sensitive calls in `auto` mode receive one exact automatic review using only the current root request and pending action; non-allow, unavailable, and invalid review results return a recoverable denial to the agent loop rather than opening human approval
+* routine parsed development commands and reversible new-file creation can execute without model review after configured and saved-session policy; unknown, destructive, hidden, credential-bearing, public, and overwrite effects remain on the review or approval path
 
-* after three permission-blocked response groups, fx either makes one final tools-disabled model request when step budget remains or emits a fixed local fallback when it does not
+* unresolved sensitive calls in `auto` mode receive one exact automatic review using bounded current, first, and recent proven root requests; historical permission feedback is excluded, and non-allow, unavailable, and invalid review results return a recoverable denial with an opaque action-bound approval request when capacity permits
+
+* the main agent may pass that exact request ID through `ask_user_question` to open the existing permission screen; generic question text cannot authorize an action, and the resulting once or always approval is revalidated and consumed only by the exact bound action
+
+* after three consecutive all-blocked response groups, the next unresolved sensitive action skips another automatic review and uses the existing human approval path; any completed successful tool resets that recovery count, and configured and saved-session rules remain authoritative
 
 * the sandbox backend is configured independently; yolo uses an effective backend of `none` without rewriting the saved sandbox setting
 

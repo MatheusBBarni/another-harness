@@ -4962,21 +4962,7 @@ test "local file mutations bypass review while external mutations use exact revi
         const prepared = authority.prepared orelse return error.TestExpectedEqual;
         try std.testing.expectEqual(@as(usize, 2), prepared.review.additions);
         try std.testing.expectEqual(@as(usize, 0), prepared.review.deletions);
-        if (index == 0) {
-            try std.testing.expectEqual(@as(usize, 0), reviewer.calls);
-        } else {
-            try std.testing.expectEqual(@as(usize, 1), reviewer.calls);
-            try std.testing.expectEqual(
-                std.meta.Tag(permission_auto_classifier.Action).file_mutation,
-                reviewer.action_tag.?,
-            );
-            try std.testing.expectEqualStrings("tool_requires_approval", reviewer.escalation_reason.?);
-            try std.testing.expectEqualStrings(target, reviewer.target_path.?);
-            try std.testing.expectEqualStrings(target, reviewer.file_display_path.?);
-            try std.testing.expectEqual(@as(usize, 2), reviewer.file_additions);
-            try std.testing.expectEqual(@as(usize, 0), reviewer.file_deletions);
-            try std.testing.expectEqual(@as(usize, 2), reviewer.file_review_rows);
-        }
+        try std.testing.expectEqual(@as(usize, 0), reviewer.calls);
         try std.testing.expect(rt.worker.pending_permission_request_shared == null);
         try std.testing.expect(!absolutePathExists(target));
     }
@@ -5684,6 +5670,15 @@ test "disabled automatic reviewer returns a recoverable denial without a human p
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const target = try std.fs.path.join(arena, &.{ external, "created.txt" });
+    {
+        var existing = try tmp.dir.createFile(
+            io_mod.getIo(),
+            "external/created.txt",
+            .{ .truncate = true },
+        );
+        defer existing.close(io_mod.getIo());
+        try existing.writeStreamingAll(io_mod.getIo(), "before");
+    }
     const args = try std.fmt.allocPrint(arena, "{{\"path\":\"{s}\",\"content\":\"hello\"}}", .{target});
 
     const outcome = try tool_admission.requestPermissionOutcome(rt.context().admissionInput(), arena, .{

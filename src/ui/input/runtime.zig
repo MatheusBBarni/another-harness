@@ -535,6 +535,7 @@ test "Fx terminal reply ownership survives takeover transition" {
     monitor.start();
 
     try std.testing.expect(monitor.takeQueryRequest(0) == null);
+    for ("\x1b[?997;1n") |byte| _ = monitor.feed(byte, 1);
     try std.testing.expectEqual(
         theme_monitor.QueryRequest.response_fence,
         monitor.takeQueryRequest(1000).?,
@@ -622,6 +623,7 @@ test "terminal reply ownership precedes active paste transport" {
     monitor.start();
 
     try std.testing.expect(monitor.takeQueryRequest(0) == null);
+    for ("\x1b[?997;1n") |byte| _ = monitor.feed(byte, 1);
     try std.testing.expectEqual(
         theme_monitor.QueryRequest.response_fence,
         monitor.takeQueryRequest(1000).?,

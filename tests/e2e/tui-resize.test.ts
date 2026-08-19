@@ -4055,7 +4055,7 @@ describe.skipIf(SKIP)("tui: resize", () => {
   );
 
   test(
-    "silent and notified terminal theme changes retint the retained transcript once",
+    "idle theme monitoring stays silent and notifications retint the transcript once",
     async () => {
       const root = mkdtempSync(join(tmpdir(), "fx-theme-reset-replay-"));
       const home = join(root, "home");
@@ -4114,6 +4114,36 @@ describe.skipIf(SKIP)("tui: resize", () => {
       let trace = readFileSync(tracePath, "utf8");
       let fenceRequests = countOccurrences(trace, "theme_query_requested kind=response_fence");
       let backgroundRequests = countOccurrences(trace, "theme_query_requested kind=background");
+      const stdoutBeforeIdle = Buffer.concat(
+        stdoutFrames(tapePath).map((frame) => frame.payload),
+      ).toString();
+      const rawFenceRequests = countOccurrences(stdoutBeforeIdle, "\x1b[c");
+      const rawBackgroundRequests = countOccurrences(
+        stdoutBeforeIdle,
+        "\x1b]11;?\x1b\\",
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 1_300));
+      trace = readFileSync(tracePath, "utf8");
+      expect(countOccurrences(trace, "theme_query_requested kind=response_fence")).toBe(
+        fenceRequests,
+      );
+      expect(countOccurrences(trace, "theme_query_requested kind=background")).toBe(
+        backgroundRequests,
+      );
+      const stdoutAfterIdle = Buffer.concat(
+        stdoutFrames(tapePath).map((frame) => frame.payload),
+      ).toString();
+      expect(countOccurrences(stdoutAfterIdle, "\x1b[c")).toBe(rawFenceRequests);
+      expect(countOccurrences(stdoutAfterIdle, "\x1b]11;?\x1b\\")).toBe(
+        rawBackgroundRequests,
+      );
+
+      sendRawTmuxBytes(
+        session,
+        "initial-theme-notification",
+        Buffer.from("\x1b[?997;2n"),
+      );
       await waitForTraceCount(
         tracePath,
         "theme_query_requested kind=response_fence",

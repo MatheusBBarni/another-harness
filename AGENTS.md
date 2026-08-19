@@ -142,6 +142,8 @@ Security is permission-first. All sensitive tool behavior must integrate with `s
 
 * `/permissions remember allow|deny <tool-name> <arguments-json>` confirms and stores an exact rule only for an active saved session; list and revoke those rules by their stable IDs
 
+* An `auto_denied` result may carry an opaque approval request ID. Only `ask_user_question` with that exact current-turn ID may enter the real permission screen; generic model or user text never authorizes the action, and execution still requires exact live revalidation
+
 Do not bypass the permission system for new tools.
 
 ## Zig-Specific Patterns
