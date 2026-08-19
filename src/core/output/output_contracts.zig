@@ -696,8 +696,14 @@ pub const SessionListSnapshot = struct {
             try out.writer.print("[sessions] {d} saved\n", .{self.sessions.len});
             for (self.sessions) |entry| {
                 try out.writer.print(
-                    " - {s} turns={d} language={s} updated_at_ms={d}\n",
-                    .{ entry.id, entry.history_len, entry.conversation_language.view(), entry.updated_at_ms },
+                    " - {s}\n   id={s} turns={d} language={s} updated_at_ms={d}\n",
+                    .{
+                        entry.title orelse session_display_metadata.fallback_title,
+                        entry.id,
+                        entry.history_len,
+                        entry.conversation_language.view(),
+                        entry.updated_at_ms,
+                    },
                 );
             }
         }
@@ -1992,7 +1998,7 @@ test "core session list snapshot text and json stay stable" {
     const text = try (SessionListSnapshot{ .sessions = &sessions }).renderText(std.testing.allocator);
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings(
-        "[sessions] 1 saved\n - abc turns=3 language=es updated_at_ms=2\n",
+        "[sessions] 1 saved\n - Session title\n   id=abc turns=3 language=es updated_at_ms=2\n",
         text,
     );
 
@@ -2010,7 +2016,7 @@ test "core session list snapshot text and json stay stable" {
     }).renderText(std.testing.allocator);
     defer std.testing.allocator.free(paged_text);
     try std.testing.expectEqualStrings(
-        "[sessions] 1 saved\n - abc turns=3 language=es updated_at_ms=2\n" ++
+        "[sessions] 1 saved\n - Session title\n   id=abc turns=3 language=es updated_at_ms=2\n" ++
             "[sessions] more saved sessions; continue with `fx sessions --cursor v1:2:abc`\n",
         paged_text,
     );
@@ -2025,6 +2031,30 @@ test "core session list snapshot text and json stay stable" {
         "{\"kind\":\"sessions\",\"count\":1,\"has_more\":true,\"next_cursor\":\"v1:2:abc\",\"sessions\":[{\"id\":\"abc\",\"title\":\"Session title\",\"preview\":\"Session title\\npreview line\",\"workspace_root\":\"/tmp/workspace\",\"origin_workspace_root\":\"/tmp/origin\",\"created_at_ms\":1,\"updated_at_ms\":2,\"history_len\":3,\"conversation_language\":\"es\"}]}",
         paged_json,
     );
+
+    const fallback_sessions = [_]session_store.SessionSummary{
+        .{
+            .id = @constCast("legacy"),
+            .created_at_ms = 1,
+            .updated_at_ms = 2,
+            .conversation_language = types.ConversationLanguage.default(),
+            .history_len = 0,
+        },
+    };
+    const fallback_text = try (SessionListSnapshot{ .sessions = &fallback_sessions }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(fallback_text);
+    try std.testing.expectEqualStrings(
+        "[sessions] 1 saved\n - Untitled session\n   id=legacy turns=0 language=und updated_at_ms=2\n",
+        fallback_text,
+    );
+
+    const long_title = "a" ** session_display_metadata.max_title_bytes;
+    var long_session = sessions[0];
+    long_session.title = @constCast(long_title);
+    const long_text = try (SessionListSnapshot{ .sessions = @as(*const [1]session_store.SessionSummary, &long_session) }).renderText(std.testing.allocator);
+    defer std.testing.allocator.free(long_text);
+    try std.testing.expect(std.mem.startsWith(u8, long_text, "[sessions] 1 saved\n - " ++ long_title ++ "\n"));
+    try std.testing.expect(std.mem.find(u8, long_text, "\n   id=abc turns=3") != null);
 
     const warning_text = try (SessionListSnapshot{
         .sessions = &sessions,

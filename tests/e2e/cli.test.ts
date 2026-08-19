@@ -2244,6 +2244,86 @@ describe("cli: sessions", () => {
   );
 
   test(
+    "fx sessions text shows named, unnamed, and renamed sessions",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "fx-e2e-session-names-"));
+      try {
+        const home = join(root, "home");
+        const workspace = join(root, "workspace");
+        const sessionsDir = join(home, ".fx", "sessions");
+        mkdirSync(sessionsDir, { recursive: true, mode: 0o700 });
+        mkdirSync(workspace);
+        chmodSync(join(home, ".fx"), 0o700);
+        chmodSync(sessionsDir, 0o700);
+        const workspaceRoot = realpathSync(workspace);
+        const named = {
+          id: "named-session",
+          workspace_root: workspaceRoot,
+          origin_workspace_root: workspaceRoot,
+          title: "Investigate cache misses",
+          preview: null,
+          display_metadata_present: true,
+          created_at_ms: 1,
+          updated_at_ms: 3,
+          conversation_language: "en",
+          history_len: 2,
+        };
+        const unnamed = {
+          ...named,
+          id: "unnamed-session",
+          title: null,
+          display_metadata_present: false,
+          updated_at_ms: 2,
+          history_len: 0,
+        };
+        const indexPath = join(sessionsDir, "index.json");
+        writeFileSync(
+          indexPath,
+          JSON.stringify({ schema_version: 3, sessions: [named, unnamed] }),
+          { mode: 0o600 },
+        );
+
+        const first = await runFx(["sessions"], {
+          cwd: workspaceRoot,
+          env: { HOME: home, ...NO_GATEWAY_AUTH },
+          timeoutMs: TIMEOUT,
+        });
+        expect(first.code).toBe(0);
+        expect(first.stderr).toBe("");
+        expect(first.stdout).toContain(
+          " - Investigate cache misses\n   id=named-session turns=2",
+        );
+        expect(first.stdout).toContain(
+          " - Untitled session\n   id=unnamed-session turns=0",
+        );
+
+        writeFileSync(
+          indexPath,
+          JSON.stringify({
+            schema_version: 3,
+            sessions: [{ ...named, title: "Investigate cache hits" }, unnamed],
+          }),
+          { mode: 0o600 },
+        );
+        const renamed = await runFx(["sessions"], {
+          cwd: workspaceRoot,
+          env: { HOME: home, ...NO_GATEWAY_AUTH },
+          timeoutMs: TIMEOUT,
+        });
+        expect(renamed.code).toBe(0);
+        expect(renamed.stderr).toBe("");
+        expect(renamed.stdout).toContain(
+          " - Investigate cache hits\n   id=named-session turns=2",
+        );
+        expect(renamed.stdout).not.toContain("Investigate cache misses");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
     "session listing pages a 9001-entry index without scanning session directories",
     async () => {
       const root = mkdtempSync(join(tmpdir(), "fx-e2e-session-pages-"));
