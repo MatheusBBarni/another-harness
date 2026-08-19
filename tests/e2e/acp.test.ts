@@ -4289,6 +4289,76 @@ describe("acp: model-independent", () => {
   );
 
   test(
+    "ACP routes the post-threshold action through session/request_permission",
+    async () => {
+      const cases = [
+        { suffix: "allow", optionId: "allow_once" as const, executes: true },
+        { suffix: "reject", optionId: "reject_once" as const, executes: false },
+      ];
+
+      for (const testCase of cases) {
+        const root = createIsolatedRoot(`fx-acp-auto-threshold-${testCase.suffix}-`);
+        const target = join(root.external, `threshold-${testCase.suffix}.txt`);
+        const fourthCallId = `${testCase.suffix}_threshold_call_4`;
+        const gateway = startFakeGateway([
+          ...Array.from({ length: 4 }, (_, index) => (body: string) => {
+            if (index > 0) expect(body).toContain("auto_denied");
+            if (index === 3) {
+              expect(body).not.toContain('"tools":[]');
+              expect(body).not.toContain('"toolChoice":{"type":"none"}');
+            }
+            return fileToolCall(
+              index === 3 ? fourthCallId : `${testCase.suffix}_threshold_call_${index + 1}`,
+              target,
+              `ACP_THRESHOLD_${testCase.suffix.toUpperCase()}`,
+            );
+          }),
+          finalText(`ACP threshold ${testCase.suffix} complete`),
+        ], { classifierDecision: "ask" });
+
+        try {
+          client = await AcpClient.create({
+            cwd: root.workspace,
+            env: fakeGatewayEnv(root, gateway),
+          });
+          client.setPermissionOption(testCase.optionId);
+          await startCodeSession(client);
+          const result = await runPrompt(
+            client,
+            `Write the ACP threshold ${testCase.suffix} fixture.`,
+            TIMEOUT,
+          );
+
+          const permissions = result.messages.filter(
+            (message: any) => message.method === "session/request_permission",
+          );
+          expect(permissions).toHaveLength(1);
+          expect(permissions[0]!.params.toolCall.toolCallId).toBe(fourthCallId);
+          expect(gateway.classifierRequests).toHaveLength(3);
+          expect(gateway.requests).toHaveLength(5);
+          expect(existsSync(target)).toBe(testCase.executes);
+          if (testCase.executes) {
+            expect(readFileSync(target, "utf8")).toBe("ACP_THRESHOLD_ALLOW");
+            expect(acpToolResultText(gateway.requests[4]!.body, fourthCallId)).not.toContain(
+              "tool_permission_denied",
+            );
+          } else {
+            expect(acpToolResultText(gateway.requests[4]!.body, fourthCallId)).toContain(
+              "user_denied",
+            );
+          }
+          expect(client.stderr).toBe("");
+        } finally {
+          await client?.close();
+          gateway.stop();
+          rmSync(root.root, { recursive: true, force: true });
+        }
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
     "terminal prompt response admits immediate session/list before worker exit",
     async () => {
       const root = createIsolatedRoot("fx-acp-terminal-list-");

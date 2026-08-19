@@ -243,7 +243,7 @@ Security is permission-first.
 
 * unresolved sensitive calls in `auto` mode receive one exact automatic review using only the current root request and pending action; non-allow, unavailable, and invalid review results return a recoverable denial to the agent loop rather than opening human approval
 
-* after three permission-blocked response groups, fx either makes one final tools-disabled model request when step budget remains or emits a fixed local fallback when it does not
+* after three response groups blocked by automatic review, the next unresolved sensitive action skips another automatic review and uses the existing human approval path; configured and saved-session rules remain authoritative
 
 * the sandbox backend is configured independently; yolo uses an effective backend of `none` without rewriting the saved sandbox setting
 

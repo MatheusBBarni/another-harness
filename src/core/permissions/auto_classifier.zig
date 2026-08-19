@@ -120,6 +120,11 @@ pub const ReviewOrigin = enum {
     subagent,
 };
 
+pub const AutoPermissionPhase = enum {
+    automatic_review,
+    human_approval,
+};
+
 /// Borrowed view of the successful model turn. Every referenced slice must
 /// remain valid until `Reviewer.review` returns.
 pub const ReviewTurnContext = struct {
@@ -130,6 +135,7 @@ pub const ReviewTurnContext = struct {
     /// Exact root-user request for the active turn. Historical messages are
     /// model context only and never permission-review authority.
     current_root_request: []const u8 = "",
+    auto_permission_phase: AutoPermissionPhase = .automatic_review,
 };
 
 pub const ReviewRequest = struct {

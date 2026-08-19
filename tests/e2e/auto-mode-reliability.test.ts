@@ -238,24 +238,23 @@ describe("lean auto mode reliability", () => {
   );
 
   test(
-    "three blocked responses end with one tools-disabled agent response",
+    "headless auto mode requires approval for the next action after three blocks",
     async () => {
       const root = createIsolatedRoot();
       const markers = Array.from(
-        { length: 3 },
+        { length: 4 },
         (_, index) => join(root.workspace, `blocked-action-${index + 1}-must-not-run`),
       );
       const gateway = startGateway(
         [
           ...markers.map((marker, index) => (body?: string) => {
-          if (index > 0) expect(body).toContain("auto_denied");
-          return commandCall(`touch ${JSON.stringify(marker)}`, `blocked_action_${index + 1}`);
+            if (index > 0) expect(body).toContain("auto_denied");
+            if (index === 3) {
+              expect(body).not.toContain('"tools":[]');
+              expect(body).not.toContain('"toolChoice":{"type":"none"}');
+            }
+            return commandCall(`touch ${JSON.stringify(marker)}`, `blocked_action_${index + 1}`);
           }),
-          (body?: string) => {
-            expect(body).toContain('"tools":[]');
-            expect(body).toContain('"toolChoice":{"type":"none"}');
-            return fakeGatewayFinalText("Which safe alternative should I use?");
-          },
         ],
         Array.from(
           { length: 3 },
@@ -272,9 +271,9 @@ describe("lean auto mode reliability", () => {
         },
       );
 
-      expect(result.code).toBe(0);
-      expect(result.stdout).not.toContain("NonInteractivePermissionRequired");
-      expect(result.stdout).toContain("Which safe alternative should I use?");
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("permission required");
+      expect(result.stderr).toContain("noninteractive_permission_prompt_unavailable");
       expect(gateway.requests).toHaveLength(4);
       expect(gateway.classifierRequests).toHaveLength(3);
       for (const marker of markers) expect(existsSync(marker)).toBe(false);
@@ -283,7 +282,7 @@ describe("lean auto mode reliability", () => {
   );
 
   test.skipIf(process.platform !== "darwin")(
-    "headless sandbox widening uses a tools-disabled response after three blocks",
+    "headless sandbox widening requires approval after three blocks",
     async () => {
       const root = createIsolatedRoot("/Users/Shared");
       const marker = join(root.workspace, "sandbox-widening-must-not-run");
@@ -298,14 +297,11 @@ describe("lean auto mode reliability", () => {
       );
       const gateway = startGateway(
         [
-          ...Array.from({ length: 3 }, (_, index) => (body?: string) => {
-          if (index > 0) expect(body).toContain("auto_denied");
-          return commandCall(command, `sandbox_widening_${index + 1}`);
+          ...Array.from({ length: 4 }, (_, index) => (body?: string) => {
+            if (index > 0) expect(body).toContain("auto_denied");
+            if (index === 3) expect(body).not.toContain('"tools":[]');
+            return commandCall(command, `sandbox_widening_${index + 1}`);
           }),
-          (body?: string) => {
-            expect(body).toContain('"tools":[]');
-            return fakeGatewayFinalText("Sandbox widening needs user direction.");
-          },
         ],
         [
           fakeGatewayPermissionDecision("ask", "sandbox_review_1"),
@@ -323,9 +319,9 @@ describe("lean auto mode reliability", () => {
         },
       );
 
-      expect(result.code).toBe(0);
-      expect(result.stdout).not.toContain("NonInteractivePermissionRequired");
-      expect(result.stdout).toContain("Sandbox widening needs user direction.");
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("permission required");
+      expect(result.stderr).toContain("noninteractive_permission_prompt_unavailable");
       expect(gateway.requests).toHaveLength(4);
       expect(gateway.classifierRequests).toHaveLength(3);
       for (const request of gateway.classifierRequests) {
