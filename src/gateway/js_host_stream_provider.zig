@@ -1,9 +1,11 @@
 const std = @import("std");
 const stream_provider = @import("../core/agent/stream_provider.zig");
+const io_mod = @import("../core/shared/io.zig");
 const builtin_gateway = @import("../builtins/gateway.zig");
 const gateway_client = @import("client.zig");
 
 const Allocator = std.mem.Allocator;
+const cooperative_pulse_interval_ms = 50;
 
 extern "fx" fn fx_http_stream_open(
     method_ptr: [*]const u8,
@@ -150,6 +152,7 @@ const HostStreamReader = struct {
     handle: i32 = -1,
     cancel_flag: *std.atomic.Value(bool) = undefined,
     cooperative_pulse: ?stream_provider.CooperativePulse = null,
+    last_cooperative_pulse: ?std.Io.Clock.Timestamp = null,
     aborted: bool = false,
     buffer: [16 * 1024]u8 = undefined,
     interface: std.Io.Reader = undefined,
@@ -164,6 +167,10 @@ const HostStreamReader = struct {
             .handle = handle,
             .cancel_flag = cancel_flag,
             .cooperative_pulse = cooperative_pulse,
+            .last_cooperative_pulse = if (cooperative_pulse != null)
+                std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake)
+            else
+                null,
         };
         self.interface = .{
             .vtable = &.{
@@ -194,15 +201,40 @@ const HostStreamReader = struct {
         return 0;
     }
 
+    fn pulseAt(self: *@This(), now: std.Io.Clock.Timestamp) !void {
+        if (self.cooperative_pulse == null) return;
+        self.last_cooperative_pulse = now;
+        try pulseCooperativeHost(self.cooperative_pulse);
+    }
+
+    fn pulseIfDueAt(self: *@This(), now: std.Io.Clock.Timestamp) !void {
+        if (self.cooperative_pulse == null) return;
+        const last_pulse = self.last_cooperative_pulse orelse return;
+        const elapsed_ms = last_pulse.durationTo(now).raw.toMilliseconds();
+        if (elapsed_ms < cooperative_pulse_interval_ms) return;
+        try self.pulseAt(now);
+    }
+
     fn readHost(self: *@This(), dest: []u8) std.Io.Reader.Error!usize {
         while (true) {
             if (self.cancel_flag.load(.seq_cst)) {
                 self.aborted = true;
                 return error.ReadFailed;
             }
+            if (self.cooperative_pulse != null) {
+                self.pulseIfDueAt(std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake)) catch
+                    return error.ReadFailed;
+            }
+            if (self.cancel_flag.load(.seq_cst)) {
+                self.aborted = true;
+                return error.ReadFailed;
+            }
             const count = fx_http_stream_next(self.handle, dest.ptr, dest.len);
             if (count == -3) {
-                pulseCooperativeHost(self.cooperative_pulse) catch return error.ReadFailed;
+                if (self.cooperative_pulse != null) {
+                    self.pulseAt(std.Io.Clock.Timestamp.now(io_mod.getIo(), .awake)) catch
+                        return error.ReadFailed;
+                }
                 continue;
             }
             if (count == -2) {
@@ -226,3 +258,37 @@ const HostStreamReader = struct {
         return count;
     }
 };
+
+test "JS host stream reader throttles cooperative pulses" {
+    const PulseTrace = struct {
+        calls: usize = 0,
+
+        fn run(raw: *anyopaque) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+        }
+    };
+    const awakeTimestamp = struct {
+        fn at(milliseconds: i64) std.Io.Clock.Timestamp {
+            return .{
+                .clock = .awake,
+                .raw = .fromNanoseconds(@as(i96, milliseconds) * std.time.ns_per_ms),
+            };
+        }
+    }.at;
+
+    var trace: PulseTrace = .{};
+    var reader: HostStreamReader = .{
+        .cooperative_pulse = .{ .ctx = &trace, .run = PulseTrace.run },
+        .last_cooperative_pulse = awakeTimestamp(100),
+    };
+
+    try reader.pulseIfDueAt(awakeTimestamp(149));
+    try std.testing.expectEqual(@as(usize, 0), trace.calls);
+    try reader.pulseIfDueAt(awakeTimestamp(150));
+    try std.testing.expectEqual(@as(usize, 1), trace.calls);
+    try reader.pulseIfDueAt(awakeTimestamp(199));
+    try std.testing.expectEqual(@as(usize, 1), trace.calls);
+    try reader.pulseIfDueAt(awakeTimestamp(200));
+    try std.testing.expectEqual(@as(usize, 2), trace.calls);
+}
