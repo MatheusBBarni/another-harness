@@ -2506,15 +2506,15 @@ test "change team search filters by name and slug without losing original indexe
     }, null);
     defer selection.deinit(alloc);
     runtime.openTeamPicker(alloc, &selection);
-    for ("EXAMPLE") |byte| try std.testing.expect(try runtime.appendTeamQueryByte(alloc, byte));
+    for ("PLAY") |byte| try std.testing.expect(try runtime.appendTeamQueryByte(alloc, byte));
 
     const name_match = runtime.pickerView();
-    try std.testing.expectEqualStrings("EXAMPLE", name_match.team_query);
+    try std.testing.expectEqualStrings("PLAY", name_match.team_query);
     try std.testing.expectEqual(@as(usize, 1), name_match.choiceCount());
     try std.testing.expect((Choice{ .team = 1 }).eql(name_match.choiceAt(0).?));
-    try std.testing.expectEqualStrings("Example Internal Team", name_match.choiceLabel(name_match.choiceAt(0).?));
+    try std.testing.expectEqualStrings("Internal Playground", name_match.choiceLabel(name_match.choiceAt(0).?));
 
-    for (0..7) |_| try std.testing.expect(runtime.deleteTeamQueryByte());
+    for (0..4) |_| try std.testing.expect(runtime.deleteTeamQueryByte());
     for ("zero-conf") |byte| try std.testing.expect(try runtime.appendTeamQueryByte(alloc, byte));
     const slug_match = runtime.pickerView();
     try std.testing.expectEqual(@as(usize, 1), slug_match.choiceCount());
