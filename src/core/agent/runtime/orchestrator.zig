@@ -2627,6 +2627,7 @@ fn processQueuedPromptLoop(
             else
                 .auto;
             const model_request = agent_stream_provider.ModelRequest{
+                .model = gateway_model,
                 .serialized_tools = if (final_permission_response)
                     "[]"
                 else

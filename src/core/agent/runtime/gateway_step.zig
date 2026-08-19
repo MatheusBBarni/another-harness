@@ -36,6 +36,8 @@ const CollectedTerminal = union(enum) {
 
 const AdapterEventCollector = struct {
     alloc: Allocator,
+    usage: ?*session_usage.Usage,
+    attempt_evidence: *AttemptEvidence,
     content_capture_limit: ?usize,
     callback_ctx: *anyopaque,
     on_content_chunk: agent_stream_provider.StreamCallback,
@@ -49,6 +51,7 @@ const AdapterEventCollector = struct {
     failure_detail: ?[]u8 = null,
     failure_diagnostic_summary: ?[]u8 = null,
     failure_request_shape: ?[]u8 = null,
+    usage_observation: ?session_usage.GatewayObservation = null,
     terminal: CollectedTerminal = .none,
 
     fn deinit(self: *AdapterEventCollector) void {
@@ -68,6 +71,10 @@ const AdapterEventCollector = struct {
     fn emit(raw: *anyopaque, event: agent_stream_provider.StreamEvent) anyerror!void {
         const self: *AdapterEventCollector = @ptrCast(@alignCast(raw));
         switch (event) {
+            .provider_admitted => {
+                self.usage_observation = try session_usage.GatewayObservation.begin(self.usage);
+                self.attempt_evidence.provider_admitted = true;
+            },
             .text_delta => |chunk| {
                 const retained = if (self.content_capture_limit) |limit|
                     chunk[0..@min(chunk.len, limit -| self.content.items.len)]
@@ -161,6 +168,12 @@ const AdapterEventCollector = struct {
         self.completion = .{};
         return completion;
     }
+
+    fn takeUsageObservation(self: *AdapterEventCollector) ?session_usage.GatewayObservation {
+        const observation = self.usage_observation;
+        self.usage_observation = null;
+        return observation;
+    }
 };
 
 /// Temporary G11 bridge from neutral terminal events to the unchanged agent
@@ -248,9 +261,10 @@ pub fn streamModelRequest(
 ) !StreamResult {
     if (cancel_flag.load(.seq_cst)) return error.Cancelled;
     const started_at_ms = io_mod.milliTimestamp();
-    const usage_observation = try session_usage.GatewayObservation.begin(usage);
     var collector = AdapterEventCollector{
         .alloc = alloc,
+        .usage = usage,
+        .attempt_evidence = attempt_evidence,
         .content_capture_limit = content_capture_limit,
         .callback_ctx = callback_ctx,
         .on_content_chunk = on_content_chunk,
@@ -262,7 +276,6 @@ pub fn streamModelRequest(
     var event_state = agent_stream_provider.EventState.init(alloc);
     defer event_state.deinit();
     var sink_error: ?anyerror = null;
-    attempt_evidence.provider_admitted = true;
     adapter.stream(alloc, .{
         .model_request = model_request,
         .credential = credential,
@@ -285,17 +298,21 @@ pub fn streamModelRequest(
         .emit_fn = AdapterEventCollector.emit,
     }) catch |err| {
         runtime_telemetry.recordGatewayCallMetric(model, started_at_ms, 0, 0, 0, 0, trace_ctx.turn_id, trace_ctx.step_id, trace_ctx.subagent_id, @errorName(err), "");
-        try usage_observation.fail(LegacyGatewayCompatibilityBridge.failedDeliveryOutcome(&collector, delivery));
+        if (collector.takeUsageObservation()) |observation| {
+            try observation.fail(LegacyGatewayCompatibilityBridge.failedDeliveryOutcome(&collector, delivery));
+        }
         return err;
     };
 
     const legacy = try LegacyGatewayCompatibilityBridge.fromCollector(&collector);
     if (legacy.cancelled) {
         runtime_telemetry.recordGatewayCallMetric(model, started_at_ms, 0, 0, 0, 0, trace_ctx.turn_id, trace_ctx.step_id, trace_ctx.subagent_id, "Cancelled", "");
-        try usage_observation.fail(if (delivery.load() == .possibly_sent)
-            .ambiguous_delivery
-        else
-            .unbilled);
+        if (collector.takeUsageObservation()) |observation| {
+            try observation.fail(if (delivery.load() == .possibly_sent)
+                .ambiguous_delivery
+            else
+                .unbilled);
+        }
         return error.Cancelled;
     }
 
@@ -311,13 +328,15 @@ pub fn streamModelRequest(
         legacy.failure_request_shape,
         trace_ctx,
     );
-    try usage_observation.complete(
-        usage_allocator,
-        legacy.status,
-        completion,
-        legacy.generation_origin,
-        tenant,
-    );
+    if (collector.takeUsageObservation()) |observation| {
+        try observation.complete(
+            usage_allocator,
+            legacy.status,
+            completion,
+            legacy.generation_origin,
+            tenant,
+        );
+    }
     if (legacy.reconcile_generation_usage) {
         if (usage) |ledger| ledger.startReconciliation(usage_allocator, credential);
     }
@@ -586,6 +605,7 @@ test "neutral adapter events materialize owned completion state" {
             _: agent_stream_provider.AdapterRequest,
             events: agent_stream_provider.EventSink,
         ) anyerror!void {
+            try events.emit(.provider_admitted);
             var generation = [_]u8{ 'g', 'e', 'n', '_', 's', 'a', 'f', 'e' };
             const local_call = types.ToolCall{
                 .id = "local_1",
@@ -631,6 +651,7 @@ test "neutral adapter events materialize owned completion state" {
         1,
         "https://example.invalid",
         .{
+            .model = "test/model",
             .serialized_tools = "[]",
             .messages = &.{},
             .tool_choice = .none,
@@ -683,13 +704,16 @@ test "non-http adapter failure drives legacy gateway compatibility bridge" {
         fn content(_: *anyopaque, _: []const u8) void {}
     };
 
+    const alloc = std.testing.allocator;
+    var usage = session_usage.Usage.initFresh();
+    defer usage.deinit(alloc);
     var cancel_flag = std.atomic.Value(bool).init(false);
     var delivery = DeliveryCertainty.init();
     var attempt_evidence: AttemptEvidence = .{};
     var callback_ctx: u8 = 0;
     const result = try streamModelRequest(
         .{ .stream_fn = Fake.stream },
-        std.testing.allocator,
+        alloc,
         "credential",
         null,
         null,
@@ -697,6 +721,7 @@ test "non-http adapter failure drives legacy gateway compatibility bridge" {
         1,
         "provider:endpoint",
         .{
+            .model = "test/model",
             .serialized_tools = "[]",
             .messages = &.{},
             .tool_choice = .none,
@@ -711,8 +736,8 @@ test "non-http adapter failure drives legacy gateway compatibility bridge" {
         null,
         null,
         &cancel_flag,
-        null,
-        std.testing.allocator,
+        &usage,
+        alloc,
         .{},
         null,
         .agent,
@@ -723,6 +748,89 @@ test "non-http adapter failure drives legacy gateway compatibility bridge" {
     try std.testing.expectEqual(std.http.Status.too_many_requests, result.status);
     try std.testing.expectEqualStrings("retry later", result.err_body.?);
     try std.testing.expectEqual(@as(?u64, 9), result.retry_after_seconds);
+    try std.testing.expect(!attempt_evidence.provider_admitted);
+    var snapshot = try usage.snapshot(alloc);
+    defer snapshot.deinit(alloc);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.next_sequence);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.settled_through_sequence);
+}
+
+test "usage reservation failure stops before adapter network effects" {
+    const Fake = struct {
+        network_effects: usize = 0,
+
+        fn stream(
+            adapter: *const agent_stream_provider.ProviderAdapter,
+            _: Allocator,
+            _: agent_stream_provider.AdapterRequest,
+            events: agent_stream_provider.EventSink,
+        ) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(adapter.context.?));
+            try events.emit(.provider_admitted);
+            self.network_effects += 1;
+            try events.emit(.{ .finish = .{ .reason = .stop } });
+        }
+    };
+    const Callbacks = struct {
+        fn content(_: *anyopaque, _: []const u8) void {}
+    };
+
+    const alloc = std.testing.allocator;
+    var usage = session_usage.Usage.initFresh();
+    defer usage.deinit(alloc);
+    var held: std.ArrayList(session_usage.GatewayObservation) = .empty;
+    defer held.deinit(alloc);
+    while (true) {
+        const observation = session_usage.GatewayObservation.begin(&usage) catch |err| {
+            try std.testing.expectEqual(error.UsageCapacityExceeded, err);
+            break;
+        };
+        try held.append(alloc, observation);
+    }
+
+    var fake: Fake = .{};
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    var delivery = DeliveryCertainty.init();
+    var attempt_evidence: AttemptEvidence = .{};
+    var callback_ctx: u8 = 0;
+    try std.testing.expectError(
+        error.UsageCapacityExceeded,
+        streamModelRequest(
+            .{ .context = &fake, .stream_fn = Fake.stream },
+            alloc,
+            "credential",
+            null,
+            null,
+            "test/model",
+            1,
+            "provider:endpoint",
+            .{
+                .model = "test/model",
+                .serialized_tools = "[]",
+                .messages = &.{},
+                .tool_choice = .none,
+                .capabilities = .{},
+            },
+            null,
+            &delivery,
+            &attempt_evidence,
+            &callback_ctx,
+            Callbacks.content,
+            null,
+            null,
+            null,
+            &cancel_flag,
+            &usage,
+            alloc,
+            .{},
+            null,
+            .agent,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fake.network_effects);
+    try std.testing.expect(!attempt_evidence.provider_admitted);
+    try std.testing.expectEqual(agent_stream_provider.DeliveryCertainty.State.definitely_unsent, delivery.load());
+    for (held.items) |observation| try observation.fail(.unbilled);
 }
 
 pub const VisionToolMode = agent_stream_provider.VisionMode;

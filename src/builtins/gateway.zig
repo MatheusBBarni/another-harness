@@ -207,6 +207,16 @@ fn streamVercelAdapter(
         request.model_request.messages.len,
         request.model_request.serialized_tools,
     );
+    if (request.serialized_request_limit_bytes) |limit| {
+        if (payload.len > limit) {
+            try events.emit(.{ .failure = .{
+                .category = .request_too_large,
+                .detail = "serialized provider request exceeds the configured limit",
+            } });
+            return;
+        }
+    }
+    try events.emit(.provider_admitted);
 
     var bridge = AdapterEventBridge{ .events = events };
     var result = stream_provider.stream(alloc, .{
@@ -347,6 +357,7 @@ test "Vercel adapter sink failure does not mutate user cancellation" {
     var sink_context: u8 = 0;
     try std.testing.expectError(error.TestSinkFailure, adapter.stream(std.testing.allocator, .{
         .model_request = .{
+            .model = "test/model",
             .serialized_tools = "[]",
             .messages = &.{},
             .tool_choice = .none,
@@ -370,6 +381,103 @@ test "Vercel adapter sink failure does not mutate user cancellation" {
     }));
     try std.testing.expectEqual(error.TestSinkFailure, sink_error.?);
     try std.testing.expect(!cancelled.load(.seq_cst));
+}
+
+test "Vercel adapter enforces serialized request limit before admission" {
+    const FakeLegacy = struct {
+        calls: usize = 0,
+
+        fn build(_: ?*anyopaque, alloc: Allocator, request: agent_stream_provider_contract.BuildRequest) anyerror![]u8 {
+            return alloc.dupe(u8, request.serialized_tools);
+        }
+
+        fn stream(raw: ?*anyopaque, _: Allocator, _: agent_stream_provider_contract.Request) anyerror!agent_stream_provider_contract.Result {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            return .{ .status = .ok, .completion = .{ .finish_reason = .stop } };
+        }
+    };
+    const Capture = struct {
+        admitted: usize = 0,
+        failures: usize = 0,
+        finishes: usize = 0,
+
+        fn emit(raw: *anyopaque, event: agent_stream_provider_contract.StreamEvent) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            switch (event) {
+                .provider_admitted => self.admitted += 1,
+                .failure => |failure| {
+                    try std.testing.expectEqual(agent_stream_provider_contract.StreamFailure.Category.request_too_large, failure.category);
+                    self.failures += 1;
+                },
+                .finish => self.finishes += 1,
+                else => {},
+            }
+        }
+    };
+
+    const accepted_payload = "x" ** (16 * 1024);
+    const rejected_payload = accepted_payload ++ "x";
+    var fake: FakeLegacy = .{};
+    var adapter = provider_adapter;
+    adapter.legacy_provider = .{
+        .context = &fake,
+        .build_fn = FakeLegacy.build,
+        .stream_fn = FakeLegacy.stream,
+    };
+    var cancelled = std.atomic.Value(bool).init(false);
+    var delivery = agent_stream_provider_contract.DeliveryCertainty.init();
+    var attempt_evidence: agent_stream_provider_contract.AttemptEvidence = .{};
+    var state = agent_stream_provider_contract.EventState.init(std.testing.allocator);
+    defer state.deinit();
+    var sink_error: ?anyerror = null;
+    var capture: Capture = .{};
+    var request = agent_stream_provider_contract.AdapterRequest{
+        .model_request = .{
+            .model = "test/model",
+            .serialized_tools = rejected_payload,
+            .messages = &.{},
+            .tool_choice = .none,
+            .capabilities = .{},
+        },
+        .serialized_request_limit_bytes = 16 * 1024,
+        .credential = "credential",
+        .tenant = null,
+        .model_id = "test/model",
+        .retry_count = 1,
+        .endpoint = "provider:endpoint",
+        .trace_ctx = .{},
+        .content_capture_limit = null,
+        .delivery = &delivery,
+        .attempt_evidence = &attempt_evidence,
+        .cancel_flag = &cancelled,
+    };
+    try adapter.stream(std.testing.allocator, request, .{
+        .context = &capture,
+        .state = &state,
+        .sink_error = &sink_error,
+        .emit_fn = Capture.emit,
+    });
+    try std.testing.expectEqual(@as(usize, 0), fake.calls);
+    try std.testing.expectEqual(@as(usize, 0), capture.admitted);
+    try std.testing.expectEqual(@as(usize, 1), capture.failures);
+    try std.testing.expect(!state.provider_admitted);
+
+    state.deinit();
+    state = agent_stream_provider_contract.EventState.init(std.testing.allocator);
+    capture = .{};
+    sink_error = null;
+    request.model_request.serialized_tools = accepted_payload;
+    try adapter.stream(std.testing.allocator, request, .{
+        .context = &capture,
+        .state = &state,
+        .sink_error = &sink_error,
+        .emit_fn = Capture.emit,
+    });
+    try std.testing.expectEqual(@as(usize, 1), fake.calls);
+    try std.testing.expectEqual(@as(usize, 1), capture.admitted);
+    try std.testing.expectEqual(@as(usize, 1), capture.finishes);
+    try std.testing.expect(state.provider_admitted);
 }
 
 pub fn buildAgentRequest(
@@ -554,7 +662,7 @@ test "agent request builder scopes the product user agent to GLM 5.2" {
             .serialized_tools = "[]",
             .messages = &messages,
             .tool_choice = .auto,
-            .provider_options = model_capabilities.resolveProviderOptions(case.model, .auto, false),
+            .capabilities = model_capabilities.capabilitiesForModel(case.model),
         });
         defer alloc.free(body);
 
@@ -598,6 +706,7 @@ test "required vision request contains only the registered vision schema" {
         .description = "registry-owned vision schema sentinel",
     };
     const body = try agent_stream_provider.build(std.testing.allocator, .{
+        .model = "zai/glm-5.2",
         .serialized_tools = "[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}]",
         .messages = &messages,
         .tool_choice = .none,

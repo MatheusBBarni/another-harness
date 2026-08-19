@@ -96,6 +96,7 @@ pub const ModelRequest = struct {
     /// Transitional encoded tool-schema bridge for the existing Vercel
     /// request builder. G8 removes provider-owned schemas from this field;
     /// G11 removes the bridge after every caller supplies neutral descriptors.
+    model: []const u8,
     serialized_tools: []const u8,
     messages: []const types.ChatMessage,
     tool_choice: types.ToolChoice,
@@ -303,6 +304,7 @@ pub const StreamFinish = struct {
 
 /// Payload slices are borrowed only for the duration of `EventSink.emit`.
 pub const StreamEvent = union(enum) {
+    provider_admitted,
     text_delta: []const u8,
     reasoning_delta: []const u8,
     tool_input_started: ToolInputStarted,
@@ -324,6 +326,8 @@ pub const StreamEvent = union(enum) {
 };
 
 pub const EventOrderError = error{
+    DuplicateProviderAdmission,
+    EventBeforeProviderAdmission,
     DuplicateTerminalEvent,
     EventAfterTerminal,
     InvalidGenerationReference,
@@ -342,6 +346,7 @@ const ProviderToolTransition = struct {
 /// Request-owned validator for the ordering laws shared by every adapter.
 pub const EventState = struct {
     alloc: Allocator,
+    provider_admitted: bool = false,
     terminal: bool = false,
     terminal_count: usize = 0,
     provider_tools_started: usize = 0,
@@ -361,6 +366,21 @@ pub const EventState = struct {
     pub fn accept(self: *EventState, event: StreamEvent) (EventOrderError || Allocator.Error)!void {
         if (self.terminal) {
             return if (event.isTerminal()) error.DuplicateTerminalEvent else error.EventAfterTerminal;
+        }
+
+        switch (event) {
+            .provider_admitted => {
+                if (self.provider_admitted) return error.DuplicateProviderAdmission;
+                self.provider_admitted = true;
+                return;
+            },
+            else => {},
+        }
+        if (!self.provider_admitted) {
+            switch (event) {
+                .failure, .cancelled => {},
+                else => return error.EventBeforeProviderAdmission,
+            }
         }
 
         switch (event) {
@@ -421,6 +441,7 @@ pub const EventSink = struct {
 /// bytes never enter `ModelRequest` or any emitted event.
 pub const AdapterRequest = struct {
     model_request: ModelRequest,
+    serialized_request_limit_bytes: ?usize = null,
     credential: []const u8,
     tenant: ?[]const u8,
     session_id: ?[]const u8 = null,
@@ -485,6 +506,7 @@ pub const unavailable_adapter = ProviderAdapter{
 test "stream event state enforces tool usage and terminal ordering" {
     var state = EventState.init(std.testing.allocator);
     defer state.deinit();
+    try state.accept(.provider_admitted);
     const local_call = types.ToolCall{
         .id = "local_1",
         .name = "read_file",
@@ -521,6 +543,7 @@ test "stream event state enforces tool usage and terminal ordering" {
 test "stream event state makes cancellation absorbing" {
     var state = EventState.init(std.testing.allocator);
     defer state.deinit();
+    try state.accept(.provider_admitted);
     try state.accept(.{ .reasoning_delta = "thinking" });
     try state.accept(.cancelled);
 
@@ -529,9 +552,27 @@ test "stream event state makes cancellation absorbing" {
     try std.testing.expectError(error.EventAfterTerminal, state.accept(.{ .usage = .{} }));
 }
 
+test "provider admission is ordered and preflight failure remains effect free" {
+    var state = EventState.init(std.testing.allocator);
+    defer state.deinit();
+
+    try std.testing.expectError(error.EventBeforeProviderAdmission, state.accept(.{ .text_delta = "early" }));
+    try state.accept(.provider_admitted);
+    try std.testing.expectError(error.DuplicateProviderAdmission, state.accept(.provider_admitted));
+    try state.accept(.{ .finish = .{ .reason = .stop } });
+    try std.testing.expectError(error.EventAfterTerminal, state.accept(.provider_admitted));
+
+    var failed = EventState.init(std.testing.allocator);
+    defer failed.deinit();
+    try failed.accept(.{ .failure = .{ .category = .request_too_large } });
+    try std.testing.expect(!failed.provider_admitted);
+    try std.testing.expect(failed.terminal);
+}
+
 test "stream event state rejects unsafe references and provider tool identities" {
     var state = EventState.init(std.testing.allocator);
     defer state.deinit();
+    try state.accept(.provider_admitted);
     try std.testing.expectError(
         error.InvalidGenerationReference,
         state.accept(.{ .finish = .{
@@ -608,6 +649,7 @@ test "provider adapter handles cancellation and missing terminal without exposin
     const adapter = ProviderAdapter{ .context = &fake, .stream_fn = Fake.stream };
     const request = AdapterRequest{
         .model_request = .{
+            .model = "test/model",
             .serialized_tools = "[]",
             .messages = &.{},
             .tool_choice = .none,
