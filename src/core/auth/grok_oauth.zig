@@ -1,8 +1,63 @@
 const std = @import("std");
 const oauth = @import("oauth.zig");
 const oauth_transport = @import("oauth_transport.zig");
+const secret = @import("secret.zig");
 
 const Allocator = std.mem.Allocator;
+
+const client_id = "b1a00492-073a-47ea-816f-4c329264a828";
+const scope = "openid profile email offline_access grok-cli:access api:access";
+const referrer = "another-harness";
+const device_code_url = "https://auth.x.ai/oauth2/device/code";
+
+fn requestDeviceAuthorization(
+    alloc: Allocator,
+    transport: oauth_transport.Provider,
+) !oauth.DeviceAuthorization {
+    var form: FormBody = .{};
+    var writer: std.Io.Writer.Allocating = .init(alloc);
+    defer writer.deinit();
+    try form.append(&writer.writer, "client_id", client_id);
+    try form.append(&writer.writer, "scope", scope);
+    try form.append(&writer.writer, "referrer", referrer);
+
+    var response = try transport.execute(alloc, .{
+        .method = .post_form,
+        .payload = writer.written(),
+        .url = device_code_url,
+    });
+    defer response.deinit(alloc);
+    if (response.disposition != .accepted) return oauth.OAuthError.OAuthRequestFailed;
+    const bytes = response.takeBody();
+    defer secret.zeroAndFree(alloc, bytes);
+    return oauth.parseDeviceAuthorization(alloc, bytes);
+}
+
+const FormBody = struct {
+    first: bool = true,
+
+    fn append(self: *FormBody, writer: *std.Io.Writer, key: []const u8, value: []const u8) !void {
+        if (!self.first) try writer.writeAll("&");
+        self.first = false;
+        try percentEncode(writer, key);
+        try writer.writeAll("=");
+        try percentEncode(writer, value);
+    }
+};
+
+fn percentEncode(writer: *std.Io.Writer, value: []const u8) !void {
+    const hex = "0123456789ABCDEF";
+    for (value) |byte| {
+        const safe = std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '_' or byte == '.' or byte == '~';
+        if (safe) {
+            try writer.writeByte(byte);
+        } else {
+            try writer.writeByte('%');
+            try writer.writeByte(hex[byte >> 4]);
+            try writer.writeByte(hex[byte & 0x0f]);
+        }
+    }
+}
 
 test "grok device authorization posts client id, grok scopes, and another-harness referrer" {
     var probe = TransportProbe{
