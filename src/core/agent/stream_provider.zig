@@ -103,6 +103,7 @@ pub const BuildRequest = struct {
     budget: ?BuildBudget = null,
     verified_images: ?[]const image_attachments.VerifiedSnapshot = null,
     response_format: ?StructuredResponseFormat = null,
+    openai_compat: bool = false,
 };
 
 pub const Request = struct {

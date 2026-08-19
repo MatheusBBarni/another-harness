@@ -104,6 +104,13 @@ pub fn refreshFxLoginToken(
     source: credentials.Source,
     mode: CredentialRefreshMode,
 ) !?[]u8 {
+    if (source == .grok_oauth) {
+        var credential = (try credentials.loadGrokLoginCredential(alloc, transport)) orelse return null;
+        defer credential.deinit(alloc);
+        const token = credential.token;
+        credential.token = &.{};
+        return token;
+    }
     if (source != .fx_login) return null;
 
     var credential = switch (mode) {

@@ -16,7 +16,7 @@ const PendingTool = struct {
     }
 };
 
-fn parseChatCompletionsSse(alloc: Allocator, sse: []const u8) !types.GatewayCompletion {
+pub fn parseChatCompletionsSse(alloc: Allocator, sse: []const u8) !types.GatewayCompletion {
     var content: std.ArrayList(u8) = .empty;
     errdefer content.deinit(alloc);
     var tools: std.ArrayList(PendingTool) = .empty;
@@ -117,7 +117,7 @@ fn finishTools(alloc: Allocator, pending: []PendingTool) ![]types.ToolCall {
     return calls;
 }
 
-fn freeCompletion(alloc: Allocator, completion: *types.GatewayCompletion) void {
+pub fn freeCompletion(alloc: Allocator, completion: *types.GatewayCompletion) void {
     if (completion.content) |content| alloc.free(@constCast(content));
     types.freeToolCallSlice(alloc, @constCast(completion.tool_calls));
     completion.* = .{};

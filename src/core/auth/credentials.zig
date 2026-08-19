@@ -403,7 +403,7 @@ fn loadStoredGrokLoginCredential(alloc: std.mem.Allocator) !?Credential {
     return takeCredentialFromGrokSession(&session, null);
 }
 
-fn loadGrokLoginCredential(
+pub fn loadGrokLoginCredential(
     alloc: std.mem.Allocator,
     transport: oauth_transport.Provider,
 ) !?Credential {
