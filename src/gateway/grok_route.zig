@@ -30,3 +30,14 @@ test "xai/grok-4.6 on grok creds hits chat completions without gateway headers" 
     try std.testing.expectEqualStrings("https://api.x.ai/v1/chat/completions", route.url);
     try std.testing.expect(!route.uses_gateway_headers);
 }
+
+test "xai/grok-4.5 uses responses; other grok ids stay on chat completions" {
+    const responses = forModel("xai/grok-4.5") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("grok-4.5", responses.api_model);
+    try std.testing.expectEqualStrings("https://api.x.ai/v1/responses", responses.url);
+
+    for ([_][]const u8{ "xai/grok-4.6", "xai/grok-4.3", "xai/grok-build-0.1" }) |model| {
+        const route = forModel(model) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings("https://api.x.ai/v1/chat/completions", route.url);
+    }
+}
