@@ -43,3 +43,12 @@ test "xai/grok-4.5 uses responses; other grok ids stay on chat completions" {
         try std.testing.expectEqualStrings("https://api.x.ai/v1/chat/completions", route.url);
     }
 }
+
+test "grok-active catalog is the four static ids" {
+    const ids = catalogIds();
+    try std.testing.expectEqual(@as(usize, 4), ids.len);
+    try std.testing.expectEqualStrings("xai/grok-4.6", ids[0]);
+    try std.testing.expectEqualStrings("xai/grok-4.5", ids[1]);
+    try std.testing.expectEqualStrings("xai/grok-4.3", ids[2]);
+    try std.testing.expectEqualStrings("xai/grok-build-0.1", ids[3]);
+}
