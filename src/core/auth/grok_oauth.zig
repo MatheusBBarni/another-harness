@@ -9,9 +9,10 @@ test {
     _ = @import("grok_session.zig");
 }
 
-const client_id = "b1a00492-073a-47ea-816f-4c329264a828";
-const scope = "openid profile email offline_access grok-cli:access api:access";
-const referrer = "another-harness";
+pub const client_id = "b1a00492-073a-47ea-816f-4c329264a828";
+pub const scope = "openid profile email offline_access grok-cli:access api:access";
+pub const referrer = "another-harness";
+pub const issuer = "https://auth.x.ai";
 const device_code_url = "https://auth.x.ai/oauth2/device/code";
 
 fn requestDeviceAuthorization(
