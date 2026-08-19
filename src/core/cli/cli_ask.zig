@@ -501,6 +501,7 @@ const AskContext = struct {
     raw_boundary_pending: bool = false,
     raw_trailing_newlines: u8 = 0,
     raw_has_output: bool = false,
+    command_output_line_open: bool = false,
     assistant_output: std.ArrayList(u8) = .empty,
     tool_call_records: std.ArrayList(ToolCallRecord) = .empty,
     tool_call_records_mutex: std.Io.Mutex = .init,
@@ -2813,7 +2814,12 @@ fn pushDiffBlock(raw_ctx: *anyopaque, payload: agent_runtime.DiffEntryPayload) !
     try ctx.writeStderr(payload.preview);
 }
 
-fn pushCommandOutputComplete(_: *anyopaque, _: ?types.ToolLifecycleId) !void {}
+fn pushCommandOutputComplete(raw_ctx: *anyopaque, _: ?types.ToolLifecycleId) !void {
+    const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
+    if (ctx.output_mode.isTerminal() or !ctx.command_output_line_open) return;
+    try ctx.writeStderr("\n");
+    ctx.command_output_line_open = false;
+}
 
 fn pushHttpError(raw_ctx: *anyopaque, status: std.http.Status, detail: []const u8, credential_source: ?types.CredentialSource) !void {
     const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
@@ -2842,6 +2848,7 @@ fn onCommandOutputChunk(raw_ctx: *anyopaque, _: ?types.ToolLifecycleId, _: comma
     const ctx: *AskContext = @ptrCast(@alignCast(raw_ctx));
     if (ctx.output_mode.isTerminal()) return;
     try ctx.writeStderr(chunk);
+    if (chunk.len > 0) ctx.command_output_line_open = chunk[chunk.len - 1] != '\n';
 }
 
 fn onMcpProgress(raw_ctx: *anyopaque, lifecycle_id: types.ToolLifecycleId, text: []const u8) void {
@@ -8903,6 +8910,34 @@ test "CLI tagged stream routes source output rendering and diagnostics by mode" 
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, rendered, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings(source_output, parsed.value.object.get("output").?.string);
+}
+
+test "CLI command output completion terminates only an open display line" {
+    const alloc = std.testing.allocator;
+    var stdout_capture: TestCapture = .{};
+    defer stdout_capture.deinit(alloc);
+    var stderr_capture: TestCapture = .{};
+    defer stderr_capture.deinit(alloc);
+    var ctx = AskContext.init(
+        alloc,
+        testConfig(),
+        testPromptRunDeps(&stdout_capture, &stderr_capture, testPresentKeyStartup),
+        "/tmp/workspace",
+    );
+    defer ctx.deinit();
+    ctx.output_mode = .json;
+
+    try onCommandOutputChunk(&ctx, null, .stdout, "no-final");
+    try pushCommandOutputComplete(&ctx, null);
+    try std.testing.expectEqualStrings("no-final\n", stderr_capture.bytes.items);
+
+    try onCommandOutputChunk(&ctx, null, .stdout, "with-final\n");
+    try pushCommandOutputComplete(&ctx, null);
+    try pushCommandOutputComplete(&ctx, null);
+    try std.testing.expectEqualStrings(
+        "no-final\nwith-final\n",
+        stderr_capture.bytes.items,
+    );
 }
 
 test "CLI nonterminal progress preserves distinct deferred labels without duplicates" {
