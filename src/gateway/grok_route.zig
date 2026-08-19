@@ -64,3 +64,11 @@ test "grok-active catalog is the four static ids" {
     try std.testing.expectEqualStrings("xai/grok-4.3", ids[2]);
     try std.testing.expectEqualStrings("xai/grok-build-0.1", ids[3]);
 }
+
+test "grok web search is server-side web_search" {
+    const enabled = serverSearchToolsJson(true);
+    try std.testing.expectEqualStrings("[{\"type\":\"web_search\"}]", enabled);
+    try std.testing.expect(std.mem.indexOf(u8, enabled, "perplexity") == null);
+    try std.testing.expect(std.mem.indexOf(u8, enabled, "parallel") == null);
+    try std.testing.expectEqualStrings("[]", serverSearchToolsJson(false));
+}
