@@ -1,7 +1,9 @@
 const std = @import("std");
 const grok_oauth = @import("grok_oauth.zig");
+const io_mod = @import("../shared/io.zig");
 const oauth = @import("oauth.zig");
 const oauth_session = @import("oauth_session.zig");
+const profile_paths = @import("../shared/profile_paths.zig");
 const secret = @import("secret.zig");
 
 const Allocator = std.mem.Allocator;
@@ -126,6 +128,21 @@ fn requiredInteger(object: std.json.ObjectMap, key: []const u8) !i64 {
     return value.integer;
 }
 
+pub const grok_auth_file_name = "grok-auth.json";
+
+fn deleteSessionFiles(fx_dir: *std.Io.Dir) !void {
+    const io = io_mod.getIo();
+    try deleteIfPresent(fx_dir, io, profile_paths.auth_file_name);
+    try deleteIfPresent(fx_dir, io, grok_auth_file_name);
+}
+
+fn deleteIfPresent(fx_dir: *std.Io.Dir, io: std.Io, name: []const u8) !void {
+    fx_dir.deleteFile(io, name) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+}
+
 test "grok token response becomes a session with auth.x.ai issuer" {
     var token = try oauth.parseTokenSet(
         std.testing.allocator,
@@ -160,30 +177,24 @@ test "logout deletes both session files even when one is missing" {
     defer tmp.cleanup();
     const io = std.testing.io;
 
-    var both = try tmp.dir.makeOpenPath(io, "both", .{});
-    defer both.close(io);
     {
-        var file = try both.createFile(io, "auth.json", .{});
+        var file = try tmp.dir.createFile(io, "auth.json", .{});
         file.close(io);
     }
     {
-        var file = try both.createFile(io, "grok-auth.json", .{});
+        var file = try tmp.dir.createFile(io, "grok-auth.json", .{});
         file.close(io);
     }
-    try deleteSessionFiles(&both);
-    try std.testing.expectError(error.FileNotFound, both.statFile(io, "auth.json", .{}));
-    try std.testing.expectError(error.FileNotFound, both.statFile(io, "grok-auth.json", .{}));
+    try deleteSessionFiles(&tmp.dir);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "auth.json", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "grok-auth.json", .{}));
 
-    var only_grok = try tmp.dir.makeOpenPath(io, "only-grok", .{});
-    defer only_grok.close(io);
     {
-        var file = try only_grok.createFile(io, "grok-auth.json", .{});
+        var file = try tmp.dir.createFile(io, "grok-auth.json", .{});
         file.close(io);
     }
-    try deleteSessionFiles(&only_grok);
-    try std.testing.expectError(error.FileNotFound, only_grok.statFile(io, "grok-auth.json", .{}));
+    try deleteSessionFiles(&tmp.dir);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "grok-auth.json", .{}));
 
-    var neither = try tmp.dir.makeOpenPath(io, "neither", .{});
-    defer neither.close(io);
-    try deleteSessionFiles(&neither);
+    try deleteSessionFiles(&tmp.dir);
 }
