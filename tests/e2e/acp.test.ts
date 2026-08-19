@@ -4198,8 +4198,9 @@ describe("acp: model-independent", () => {
       const blockedRoot = createIsolatedRoot("fx-acp-auto-file-check-");
       try {
         const acceptedTarget = join(acceptedRoot.external, "accepted.txt");
+        writeFileSync(acceptedTarget, "before");
         const acceptedPrompt =
-          `Use only the write_file tool to create ${acceptedTarget}.`;
+          `Use only the write_file tool to overwrite ${acceptedTarget}.`;
         const acceptedGateway = startFakeGateway([
           fileToolCall("write_external_accepted", acceptedTarget, "FX_ACP_AUTO_ACCEPTED"),
           finalText("ACP external write accepted"),
@@ -4244,8 +4245,9 @@ describe("acp: model-independent", () => {
         }
 
         const blockedTarget = join(blockedRoot.external, "blocked.txt");
+        writeFileSync(blockedTarget, "before");
         const blockedPrompt =
-          `Use only the write_file tool to create ${blockedTarget}.`;
+          `Use only the write_file tool to overwrite ${blockedTarget}.`;
         const blockedGateway = startFakeGateway([
           fileToolCall("write_external_blocked", blockedTarget, "FX_ACP_AUTO_BLOCKED"),
           finalText("ACP external write blocked"),
@@ -4271,7 +4273,7 @@ describe("acp: model-independent", () => {
             message.params.update.status === "failed"
           );
           expect(failedUpdateIndex).toBeGreaterThanOrEqual(0);
-          expect(existsSync(blockedTarget)).toBe(false);
+          expect(readFileSync(blockedTarget, "utf-8")).toBe("before");
           expect(blockedGateway.classifierRequests).toHaveLength(1);
           expect(blockedGateway.classifierRequests[0]!.body).toContain(
             blockedPrompt,
