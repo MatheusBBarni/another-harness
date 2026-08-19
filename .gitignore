@@ -26,10 +26,16 @@ benchmarks/baseline.json
 
 # Local agent/editor/tooling directories from this workspace
 .adal/
-.agents/
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/catching-up-upstream/
 .augment/
 .bob/
-.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/catching-up-upstream
 .codebuddy/
 .commandcode/
 .continue/
