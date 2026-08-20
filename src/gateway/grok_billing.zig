@@ -252,3 +252,10 @@ test "status line shows SG percent, reset, and optional RPM window" {
     try std.testing.expectEqualStrings("SG 12% · 2026-08-24T17:33:48.278Z · 8299/8300 RPM", with_rpm);
     try std.testing.expect(parseRequestWindow("nope", "8300") == null);
 }
+
+test "status line rpm-only fragment does not invent SG 0 percent" {
+    const window = parseRequestWindow("8299", "8300") orelse return error.TestUnexpectedResult;
+    const rpm_only = try renderStatusLineFragment(std.testing.allocator, null, window);
+    defer std.testing.allocator.free(rpm_only);
+    try std.testing.expectEqualStrings("8299/8300 RPM", rpm_only);
+}
