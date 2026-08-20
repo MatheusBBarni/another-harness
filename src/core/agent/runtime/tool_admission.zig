@@ -9,7 +9,6 @@ const debug_trace = @import("../../shared/debug_trace.zig");
 const file_mutation_contract = @import("../../tooling/file_mutation_contract.zig");
 const tooling_tool_admission = @import("../../tooling/tool_admission.zig");
 const tool_dispatch = @import("../../tooling/tool_dispatch.zig");
-const tool_result_errors = @import("../../tooling/tool_result_errors.zig");
 const test_builtin_tools = if (builtin.is_test)
     @import("../../../builtins/tools.zig")
 else
@@ -28,7 +27,6 @@ const TraceContext = debug_trace.TraceContext;
 const AgentRuntimeDeps = runtime_deps.AgentRuntimeDeps;
 const ToolExecutionResult = runtime_tool_contracts.ToolExecutionResult;
 
-const TerminalValidationDigest = [std.crypto.hash.sha2.Sha256.digest_length]u8;
 pub const PermissionActionId = [std.crypto.hash.sha2.Sha256.digest_length]u8;
 const max_turn_permission_denials: usize = 64;
 
@@ -268,174 +266,6 @@ fn normalizeRecoveryCommand(command: []const u8) []const u8 {
         }
     }
     return normalized;
-}
-
-const TerminalValidationDigestDecision = struct {
-    append_current: bool,
-    repeated: bool,
-};
-
-fn containsTerminalValidationDigest(
-    digests: []const TerminalValidationDigest,
-    wanted: TerminalValidationDigest,
-) bool {
-    for (digests) |digest| {
-        if (std.mem.eql(u8, digest[0..], wanted[0..])) return true;
-    }
-    return false;
-}
-
-fn terminalValidationDigestDecision(
-    previous: []const TerminalValidationDigest,
-    current: []const TerminalValidationDigest,
-    digest: TerminalValidationDigest,
-) TerminalValidationDigestDecision {
-    return .{
-        .append_current = !containsTerminalValidationDigest(current, digest),
-        .repeated = containsTerminalValidationDigest(previous, digest),
-    };
-}
-
-pub const repeated_terminal_validation_notice =
-    "Repeated terminal validation failures disabled the terminal tool for this turn. The invalid terminal calls were not executed and produced no terminal effect. Use grep, read, or other tools.";
-
-pub const terminal_disabled_for_turn_output =
-    "Terminal is disabled for the rest of this turn after repeated invalid action fields. Use grep, read, or other tools.";
-
-pub const TerminalValidationRetryState = struct {
-    previous: std.ArrayList(TerminalValidationDigest) = .empty,
-    current: std.ArrayList(TerminalValidationDigest) = .empty,
-    stop_after_batch: bool = false,
-    disabled: bool = false,
-
-    pub fn deinit(self: *TerminalValidationRetryState, alloc: Allocator) void {
-        self.previous.deinit(alloc);
-        self.current.deinit(alloc);
-        self.* = .{};
-    }
-
-    pub fn beginBatch(self: *TerminalValidationRetryState) void {
-        self.current.clearRetainingCapacity();
-        self.stop_after_batch = false;
-    }
-
-    pub fn isDisabled(self: *const TerminalValidationRetryState) bool {
-        return self.disabled;
-    }
-
-    pub fn disable(self: *TerminalValidationRetryState) void {
-        self.disabled = true;
-        self.stop_after_batch = false;
-    }
-
-    pub fn observe(
-        self: *TerminalValidationRetryState,
-        alloc: Allocator,
-        call: ToolCall,
-        model_output: []const u8,
-    ) Allocator.Error!void {
-        if (self.disabled) return;
-        if (!std.mem.eql(u8, call.name, "terminal")) return;
-        if (try tool_result_errors.inspectTerminalActionFieldCorrection(
-            alloc,
-            model_output,
-        ) == null) return;
-
-        var digest: TerminalValidationDigest = undefined;
-        std.crypto.hash.sha2.Sha256.hash(model_output, &digest, .{});
-        const decision = terminalValidationDigestDecision(
-            self.previous.items,
-            self.current.items,
-            digest,
-        );
-        if (decision.append_current) try self.current.append(alloc, digest);
-        self.stop_after_batch = self.stop_after_batch or decision.repeated;
-    }
-
-    pub fn finishBatch(self: *TerminalValidationRetryState) bool {
-        if (self.stop_after_batch) return true;
-        const previous = self.previous;
-        self.previous = self.current;
-        self.current = previous;
-        self.current.clearRetainingCapacity();
-        return false;
-    }
-};
-
-test "terminal validation retry state retains independent batch corrections" {
-    const alloc = std.testing.allocator;
-    const correction_s = try tool_result_errors.terminalActionFieldCorrectionJson(alloc, .{
-        .action = "start",
-        .invalid_fields = &.{"session_id"},
-        .missing_fields = &.{},
-        .allowed_fields = &.{ "action", "command" },
-        .conflicts = &.{},
-    });
-    defer alloc.free(correction_s);
-    const correction_t = try tool_result_errors.terminalActionFieldCorrectionJson(alloc, .{
-        .action = "read",
-        .invalid_fields = &.{"command"},
-        .missing_fields = &.{},
-        .allowed_fields = &.{ "action", "session_id", "cursor_segment" },
-        .conflicts = &.{},
-    });
-    defer alloc.free(correction_t);
-    const call: ToolCall = .{
-        .id = "terminal-call",
-        .name = "terminal",
-        .arguments_json = "{}",
-    };
-
-    var state: TerminalValidationRetryState = .{};
-    defer state.deinit(alloc);
-    state.beginBatch();
-    try state.observe(alloc, call, correction_s);
-    try state.observe(alloc, call, correction_t);
-    try state.observe(alloc, call, correction_s);
-    try std.testing.expectEqual(@as(usize, 2), state.current.items.len);
-    try std.testing.expect(!state.finishBatch());
-
-    state.beginBatch();
-    try state.observe(alloc, call, correction_t);
-    try state.observe(alloc, call, "ordinary valid result");
-    try state.observe(alloc, call, correction_s);
-    try std.testing.expectEqual(@as(usize, 2), state.current.items.len);
-    try std.testing.expect(state.finishBatch());
-}
-
-test "terminal validation retry state stops observing after disable" {
-    const alloc = std.testing.allocator;
-    const correction = try tool_result_errors.terminalActionFieldCorrectionJson(alloc, .{
-        .action = "start",
-        .invalid_fields = &.{"session_id"},
-        .missing_fields = &.{},
-        .allowed_fields = &.{ "action", "command" },
-        .conflicts = &.{},
-    });
-    defer alloc.free(correction);
-    const call: ToolCall = .{
-        .id = "terminal-call",
-        .name = "terminal",
-        .arguments_json = "{}",
-    };
-
-    var state: TerminalValidationRetryState = .{};
-    defer state.deinit(alloc);
-    state.beginBatch();
-    try state.observe(alloc, call, correction);
-    try std.testing.expect(!state.finishBatch());
-
-    state.beginBatch();
-    try state.observe(alloc, call, correction);
-    try std.testing.expect(state.finishBatch());
-    state.disable();
-    try std.testing.expect(state.isDisabled());
-    try std.testing.expect(!state.stop_after_batch);
-
-    state.beginBatch();
-    try state.observe(alloc, call, correction);
-    try std.testing.expectEqual(@as(usize, 0), state.current.items.len);
-    try std.testing.expect(!state.finishBatch());
 }
 
 test "turn permission recovery binds approval exactly and deduplicates static wrappers" {
@@ -1144,18 +974,6 @@ pub fn registeredToolValidationFailure(hooks: *const AgentRuntimeDeps, arena: Al
         .not_registered, .valid => null,
         .failure => |reason| .{ .model_output = reason, .status = .failure },
     };
-}
-
-pub fn terminalCallAdmissionFailure(
-    retry: *const TerminalValidationRetryState,
-    hooks: *const AgentRuntimeDeps,
-    arena: Allocator,
-    call: ToolCall,
-) !?ToolExecutionResult {
-    if (retry.isDisabled() and std.mem.eql(u8, call.name, "terminal")) {
-        return .{ .model_output = terminal_disabled_for_turn_output, .status = .failure };
-    }
-    return registeredToolValidationFailure(hooks, arena, call);
 }
 
 pub fn toolAvailabilityFailure(hooks: *const AgentRuntimeDeps, arena: Allocator, call: ToolCall) !?ToolExecutionResult {

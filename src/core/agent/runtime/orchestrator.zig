@@ -60,8 +60,6 @@ const AgentRuntimeDeps = runtime_deps.AgentRuntimeDeps;
 const CredentialRefreshMode = runtime_deps.CredentialRefreshMode;
 
 const http_error_detail_max_bytes: usize = 4096;
-const repeated_terminal_validation_notice =
-    runtime_tool_admission.repeated_terminal_validation_notice;
 const Config = runtime_config.Config;
 const LifecycleContext = runtime_lifecycle.LifecycleContext;
 const PreparedToolCall = runtime_lifecycle.PreparedToolCall;
@@ -130,7 +128,6 @@ fn rejectPermissionForLiveAuthority(
 
 const PreparationClassifierContext = struct {
     deps: *const AgentRuntimeDeps,
-    terminal_validation_retry: *runtime_tool_admission.TerminalValidationRetryState,
 };
 
 fn preparationExecutionStatus(status: runtime_tool_contracts.ToolExecutionStatus) tool_preparation.ToolStatus {
@@ -150,8 +147,7 @@ fn prepareValidationTerminal(
     call: ToolCall,
 ) anyerror!?tool_preparation.CallbackTerminal {
     const ctx: *PreparationClassifierContext = @ptrCast(@alignCast(raw_ctx.?));
-    const execution = try runtime_tool_admission.terminalCallAdmissionFailure(
-        ctx.terminal_validation_retry,
+    const execution = try runtime_tool_admission.registeredToolValidationFailure(
         ctx.deps,
         alloc,
         call,
@@ -2498,8 +2494,6 @@ fn processQueuedPromptLoop(
     defer turn_file_mutation_denials.deinit(arena);
     var turn_permission_recovery: runtime_tool_admission.TurnPermissionRecovery = .{};
     defer turn_permission_recovery.deinit(arena);
-    var terminal_validation_retry: runtime_tool_admission.TerminalValidationRetryState = .{};
-    defer terminal_validation_retry.deinit(arena);
     var completed_tool_names = completed_tool_names_ptr.*;
     defer completed_tool_names_ptr.* = completed_tool_names;
     var context_delivery_state: context_contract.DeliveryState = if (deps.context_enabled)
@@ -4415,7 +4409,6 @@ fn processQueuedPromptLoop(
         defer preparation_batch.deinit(arena, arena);
         var classifier_ctx: PreparationClassifierContext = .{
             .deps = deps,
-            .terminal_validation_retry = &terminal_validation_retry,
         };
         if (deps.context_enabled) {
             for (prepared_tool_calls, 0..) |prepared_call, i| {
@@ -4641,7 +4634,6 @@ fn processQueuedPromptLoop(
         }
 
         var step_batch = runtime_tool_batch.StepBatchState{};
-        terminal_validation_retry.beginBatch();
         var settled_vision_ids: std.ArrayList(usize) = .empty;
         defer mem_utils.deinitList(arena, &settled_vision_ids);
         var parallel_skip_until: usize = 0;
@@ -4754,12 +4746,7 @@ fn processQueuedPromptLoop(
                             },
                         }
                     }
-                    if (try runtime_tool_admission.terminalCallAdmissionFailure(
-                        &terminal_validation_retry,
-                        deps,
-                        arena,
-                        parallel_call,
-                    )) |failure| {
+                    if (try runtime_tool_admission.registeredToolValidationFailure(deps, arena, parallel_call)) |failure| {
                         precomputed_results[group_index] = failure;
                         continue;
                     }
@@ -5253,13 +5240,6 @@ fn processQueuedPromptLoop(
                                 );
                             },
                             .validation_failure, .availability_failure => {
-                                if (terminal.kind == .validation_failure) {
-                                    try terminal_validation_retry.observe(
-                                        arena,
-                                        tool_call,
-                                        model_output,
-                                    );
-                                }
                                 const execution: ToolExecutionResult = .{
                                     .status = .failure,
                                     .model_output = safe_output,
@@ -5496,17 +5476,7 @@ fn processQueuedPromptLoop(
             else
                 true;
             if (requires_legacy_classification) {
-                if (try runtime_tool_admission.terminalCallAdmissionFailure(
-                    &terminal_validation_retry,
-                    deps,
-                    arena,
-                    tool_call,
-                )) |execution| {
-                    try terminal_validation_retry.observe(
-                        arena,
-                        tool_call,
-                        execution.model_output,
-                    );
+                if (try runtime_tool_admission.registeredToolValidationFailure(deps, arena, tool_call)) |execution| {
                     const prepared = try runtime_execution_memory.prepareToolModelOutput(arena, config, tool_call, execution.model_output);
                     const safe_tool_output = prepared.model_output;
                     _ = try stream_ctx.provisional_statuses.finishExecutedCall(
@@ -7218,18 +7188,6 @@ fn processQueuedPromptLoop(
             &within_turn_suffix,
             &step_batch,
         );
-        if (terminal_validation_retry.finishBatch()) {
-            try deps.push_system_notice(
-                deps.ctx,
-                repeated_terminal_validation_notice,
-            );
-            try within_turn_suffix.append(arena, .{
-                .role = .system,
-                .content = repeated_terminal_validation_notice,
-            });
-            terminal_validation_retry.disable();
-            continue;
-        }
         if (terminal_provider_completion) {
             const raw_final = completion.content.?;
             const final_text = try runtime_assistant_stream.normalizeAssistantTextForDisplay(arena, raw_final);

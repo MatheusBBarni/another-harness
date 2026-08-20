@@ -5144,7 +5144,7 @@ test "processQueuedPrompt returns ordinary results for repeated calls" {
     try expectBodyNotContains(&gateway, 3, "Repeated identical tool call blocked");
 }
 
-test "processQueuedPrompt disables terminal after repeated distinct corrections and continues the turn" {
+test "processQueuedPrompt continues after repeated distinct terminal corrections" {
     const alloc = std.testing.allocator;
     const correction_s = try tool_result_errors.terminalActionFieldCorrectionJson(alloc, .{
         .action = "start",
@@ -5174,7 +5174,7 @@ test "processQueuedPrompt disables terminal after repeated distinct corrections 
     const completions = [_]FakeCompletion{
         .{ .tool_calls = &first_calls },
         .{ .tool_calls = &second_calls },
-        .{ .content = "Switched to other tools after terminal was disabled." },
+        .{ .content = "Continued after the invalid terminal calls." },
     };
     var gateway = FakeGateway.init(alloc, &completions);
     defer gateway.deinit();
@@ -5187,7 +5187,6 @@ test "processQueuedPrompt disables terminal after repeated distinct corrections 
     try runFakePrompt(&gateway, &deps, fixture.config(), fixture.job());
 
     try std.testing.expectEqual(@as(usize, 3), gateway.request_bodies.items.len);
-    try expectBodyContains(&gateway, 2, "disabled the terminal tool");
     try std.testing.expectEqual(@as(usize, 4), deps.rejected_names.items.len);
     try std.testing.expectEqual(@as(usize, 0), deps.permission_names.items.len);
     try std.testing.expectEqual(@as(usize, 0), deps.executed_names.items.len);
@@ -5198,10 +5197,7 @@ test "processQueuedPrompt disables terminal after repeated distinct corrections 
         try std.testing.expectEqual(@as(usize, 2), step.tool_calls.len);
         try std.testing.expectEqual(@as(usize, 2), step.tool_results.len);
     }
-    try std.testing.expectEqual(@as(usize, 1), deps.system_notices.items.len);
-    try std.testing.expect(
-        std.mem.find(u8, deps.system_notices.items[0], "no terminal effect") != null,
-    );
+    try std.testing.expectEqual(@as(usize, 0), deps.system_notices.items.len);
 }
 
 test "processQueuedPrompt retains a terminal correction across valid neighboring calls" {
@@ -5226,7 +5222,7 @@ test "processQueuedPrompt retains a terminal correction across valid neighboring
     const completions = [_]FakeCompletion{
         .{ .tool_calls = &first_calls },
         .{ .tool_calls = &second_calls },
-        .{ .content = "Continued after terminal was disabled." },
+        .{ .content = "Continued after the invalid terminal calls." },
     };
     var gateway = FakeGateway.init(alloc, &completions);
     defer gateway.deinit();
@@ -5238,7 +5234,6 @@ test "processQueuedPrompt retains a terminal correction across valid neighboring
     try runFakePrompt(&gateway, &deps, fixture.config(), fixture.job());
 
     try std.testing.expectEqual(@as(usize, 3), gateway.request_bodies.items.len);
-    try expectBodyContains(&gateway, 2, "disabled the terminal tool");
     try std.testing.expectEqual(@as(usize, 2), deps.rejected_names.items.len);
     try std.testing.expectEqual(@as(usize, 2), deps.permission_names.items.len);
     try std.testing.expectEqual(@as(usize, 2), deps.executed_names.items.len);
@@ -5251,7 +5246,7 @@ test "processQueuedPrompt retains a terminal correction across valid neighboring
     }
 }
 
-test "processQueuedPrompt rejects later terminal calls after validation disable" {
+test "processQueuedPrompt still executes a valid terminal call after repeated field corrections" {
     const alloc = std.testing.allocator;
     const correction = try tool_result_errors.terminalActionFieldCorrectionJson(alloc, .{
         .action = "start",
@@ -5275,7 +5270,7 @@ test "processQueuedPrompt rejects later terminal calls after validation disable"
         .{ .tool_calls = &first_calls },
         .{ .tool_calls = &second_calls },
         .{ .tool_calls = &third_calls },
-        .{ .content = "Used other tools after terminal was disabled." },
+        .{ .content = "Ran the command after fixing the terminal arguments." },
     };
     var gateway = FakeGateway.init(alloc, &completions);
     defer gateway.deinit();
@@ -5287,12 +5282,11 @@ test "processQueuedPrompt rejects later terminal calls after validation disable"
     try runFakePrompt(&gateway, &deps, fixture.config(), fixture.job());
 
     try std.testing.expectEqual(@as(usize, 4), gateway.request_bodies.items.len);
-    try expectBodyContains(&gateway, 2, "disabled the terminal tool");
-    try expectBodyContains(&gateway, 3, runtime_tool_admission.terminal_disabled_for_turn_output);
-    try std.testing.expectEqual(@as(usize, 3), deps.rejected_names.items.len);
-    try std.testing.expectEqual(@as(usize, 0), deps.permission_names.items.len);
-    try std.testing.expectEqual(@as(usize, 0), deps.executed_names.items.len);
-    try std.testing.expectEqual(@as(usize, 1), deps.system_notices.items.len);
+    try std.testing.expectEqual(@as(usize, 2), deps.rejected_names.items.len);
+    try std.testing.expectEqual(@as(usize, 1), deps.permission_names.items.len);
+    try std.testing.expectEqual(@as(usize, 1), deps.executed_names.items.len);
+    try std.testing.expectEqualStrings("terminal_exec", deps.executed_call_ids.items[0]);
+    try std.testing.expectEqual(@as(usize, 0), deps.system_notices.items.len);
     const execution = deps.history_turns.items[0].assistant.execution;
     try std.testing.expectEqual(@as(usize, 3), execution.tool_steps.len);
 }
