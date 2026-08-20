@@ -18,7 +18,7 @@ pub const Snapshot = struct {
     }
 };
 
-fn parseBilling(alloc: Allocator, json: []const u8) !Snapshot {
+pub fn parseBilling(alloc: Allocator, json: []const u8) !Snapshot {
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidGrokBilling;
@@ -92,7 +92,7 @@ fn normalizeResetAt(alloc: Allocator, text: []const u8) ![]u8 {
     return std.fmt.allocPrint(alloc, "{s}.{s}Z", .{ text[0..19], millis });
 }
 
-fn periodLabel(period: Period) []const u8 {
+pub fn periodLabel(period: Period) []const u8 {
     return switch (period) {
         .weekly => "weekly",
         .monthly => "monthly",
@@ -100,7 +100,7 @@ fn periodLabel(period: Period) []const u8 {
     };
 }
 
-fn formatPrepaidDollars(alloc: Allocator, cents: i64) ![]u8 {
+pub fn formatPrepaidDollars(alloc: Allocator, cents: i64) ![]u8 {
     const abs: u64 = @intCast(if (cents < 0) -cents else cents);
     const dollars = abs / 100;
     const remainder = abs % 100;
@@ -110,7 +110,7 @@ fn formatPrepaidDollars(alloc: Allocator, cents: i64) ![]u8 {
     return std.fmt.allocPrint(alloc, "${d}.{d:0>2}", .{ dollars, remainder });
 }
 
-fn renderCreditsText(alloc: Allocator, snapshot: Snapshot) ![]u8 {
+pub fn renderCreditsText(alloc: Allocator, snapshot: Snapshot) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
     try out.writer.print("[credits] plan={s}\n", .{snapshot.plan});

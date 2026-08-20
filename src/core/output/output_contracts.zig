@@ -1329,11 +1329,20 @@ pub const BackgroundDetailSnapshot = struct {
 };
 
 pub const CreditsSnapshot = struct {
+    pub const Origin = enum { gateway, grok };
+
+    origin: Origin = .gateway,
     balance: ?[]const u8 = null,
     used: ?[]const u8 = null,
     plan: ?[]const u8 = null,
     raw_json: ?[]const u8 = null,
     err_message: ?[]const u8 = null,
+    percent: ?u8 = null,
+    period: ?[]const u8 = null,
+    reset_at: ?[]const u8 = null,
+    prepaid_cents: ?i64 = null,
+    rpm_remaining: ?u64 = null,
+    rpm_limit: ?u64 = null,
 
     /// Frees provider-owned fields. `raw_json` remains borrowed presentation
     /// input and is not released here.
@@ -1342,6 +1351,8 @@ pub const CreditsSnapshot = struct {
         if (self.used) |value| alloc.free(value);
         if (self.plan) |value| alloc.free(value);
         if (self.err_message) |value| alloc.free(value);
+        if (self.period) |value| alloc.free(value);
+        if (self.reset_at) |value| alloc.free(value);
         self.* = undefined;
     }
 
@@ -1358,6 +1369,19 @@ pub const CreditsSnapshot = struct {
 
         if (self.err_message) |msg| {
             try out.writer.print("[credits] error: {s}\n", .{msg});
+            return try out.toOwnedSlice();
+        }
+
+        if (self.origin == .grok) {
+            if (self.plan) |p| {
+                try out.writer.print("[credits] plan={s}\n", .{p});
+            }
+            if (self.used) |u| {
+                try out.writer.print("[credits] used={s}\n", .{u});
+            }
+            if (self.balance) |b| {
+                try out.writer.print("[credits] balance={s}\n", .{b});
+            }
             return try out.toOwnedSlice();
         }
 
@@ -1431,6 +1455,17 @@ pub const CreditsSnapshot = struct {
             try out.writer.writeAll("\":");
             if (pair[1]) |val| {
                 try std.json.Stringify.value(val, .{}, &out.writer);
+            } else {
+                try out.writer.writeAll("null");
+            }
+        }
+
+        if (self.origin == .grok) {
+            try out.writer.writeAll(",\"origin\":");
+            try std.json.Stringify.value(@tagName(self.origin), .{}, &out.writer);
+            try out.writer.writeAll(",\"percent\":");
+            if (self.percent) |value| {
+                try out.writer.print("{d}", .{value});
             } else {
                 try out.writer.writeAll("null");
             }

@@ -606,7 +606,10 @@ fn fetchCreditsWithFetch(
             };
             return .{ .err_message = message };
         }
-        return .{};
+        if (result.status != .ok) {
+            return .{};
+        }
+        return grokCreditsSnapshotFromBody(alloc, result.body);
     }
 
     var team_path: ?[]u8 = null;
@@ -641,6 +644,47 @@ fn fetchCreditsWithFetch(
     return creditsSnapshotFromJsonValue(alloc, parsed.value) catch {
         return creditsErrorSnapshot(alloc, "invalid JSON response from gateway");
     };
+}
+
+fn grokBillingErrorSnapshot(alloc: Allocator) output_contracts.CreditsSnapshot {
+    return creditsErrorSnapshot(alloc, "failed to fetch grok billing");
+}
+
+fn grokCreditsSnapshotFromBody(alloc: Allocator, body: []const u8) output_contracts.CreditsSnapshot {
+    var billing = grok_billing.parseBilling(alloc, body) catch {
+        return grokBillingErrorSnapshot(alloc);
+    };
+    defer billing.deinit(alloc);
+    return grokCreditsSnapshot(alloc, billing) catch {
+        return grokBillingErrorSnapshot(alloc);
+    };
+}
+
+fn grokCreditsSnapshot(
+    alloc: Allocator,
+    billing: grok_billing.Snapshot,
+) !output_contracts.CreditsSnapshot {
+    var snapshot = output_contracts.CreditsSnapshot{
+        .origin = .grok,
+        .percent = billing.percent,
+        .prepaid_cents = billing.prepaid_cents,
+    };
+    errdefer snapshot.deinit(alloc);
+
+    snapshot.plan = try alloc.dupe(u8, billing.plan);
+    snapshot.used = try std.fmt.allocPrint(
+        alloc,
+        "{d}% {s}",
+        .{ billing.percent, grok_billing.periodLabel(billing.period) },
+    );
+    snapshot.period = try alloc.dupe(u8, grok_billing.periodLabel(billing.period));
+    if (billing.reset_at) |reset_at| {
+        snapshot.reset_at = try alloc.dupe(u8, reset_at);
+    }
+    if (billing.prepaid_cents) |cents| {
+        snapshot.balance = try grok_billing.formatPrepaidDollars(alloc, cents);
+    }
+    return snapshot;
 }
 
 fn creditsSnapshotFromJsonValue(
