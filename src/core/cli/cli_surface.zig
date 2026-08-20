@@ -1269,6 +1269,7 @@ fn runNonInteractiveWithDeps(
             var snapshot = cfg.gateway_provider.credits.fetch(alloc, .{
                 .credential = startup.apiKey(),
                 .tenant = startup.gatewayTeam(),
+                .model = startup.selected_model,
             });
             defer snapshot.deinit(alloc);
             const text = try snapshot.render(alloc, opts.format);

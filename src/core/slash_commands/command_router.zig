@@ -1,8 +1,10 @@
 const std = @import("std");
 const command_specs = @import("command_specs.zig");
+const output_contracts = @import("../output/output_contracts.zig");
 
 const SlashKind = command_specs.SlashKind;
 const SlashRegistry = command_specs.SlashRegistry;
+const CreditsView = output_contracts.CreditsView;
 
 pub const ParsedCommand = union(enum) {
     quit,
@@ -38,7 +40,7 @@ pub const ParsedCommand = union(enum) {
     compact,
     settings: []const u8,
     alias: []const u8,
-    credits,
+    credits: CreditsView,
     paste,
     fast,
     appearance: []const u8,
@@ -84,7 +86,7 @@ pub const CommandHandlers = struct {
     compact_history: *const fn (ctx: *anyopaque) anyerror!void,
     handle_settings: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
     handle_alias: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
-    show_credits: *const fn (ctx: *anyopaque) anyerror!void,
+    show_credits: *const fn (ctx: *anyopaque, view: CreditsView) anyerror!void,
     paste_clipboard: *const fn (ctx: *anyopaque) anyerror!void,
     toggle_fast: *const fn (ctx: *anyopaque) anyerror!void,
     handle_appearance: *const fn (ctx: *anyopaque, rest: []const u8) anyerror!void,
@@ -101,7 +103,11 @@ fn command_payload(cmd: []const u8, prefix: []const u8) []const u8 {
     return std.mem.trim(u8, cmd[prefix.len..], " \t");
 }
 
-fn parsedCommand(kind: SlashKind, payload: []const u8) ParsedCommand {
+fn creditsViewForMatchedToken(token: []const u8) CreditsView {
+    return if (std.mem.eql(u8, token, "/xai-usage")) .xai_usage else .credits;
+}
+
+fn parsedCommand(kind: SlashKind, payload: []const u8, matched_token: []const u8) ParsedCommand {
     return switch (kind) {
         .quit => .quit,
         .clear_screen => .clear_screen,
@@ -136,7 +142,7 @@ fn parsedCommand(kind: SlashKind, payload: []const u8) ParsedCommand {
         .compact => .compact,
         .settings => .{ .settings = payload },
         .alias => .{ .alias = payload },
-        .credits => .credits,
+        .credits => .{ .credits = creditsViewForMatchedToken(matched_token) },
         .paste => .paste,
         .fast => .fast,
         .appearance => .{ .appearance = payload },
@@ -152,10 +158,11 @@ pub fn parse(registry: SlashRegistry, cmd: []const u8) ParsedCommand {
     for (registry.commands) |spec| {
         if (spec.accepts_payload) {
             if (command_specs.matchedSlashPrefix(registry, cmd, spec.kind)) |prefix| {
-                return parsedCommand(spec.kind, command_payload(cmd, prefix));
+                return parsedCommand(spec.kind, command_payload(cmd, prefix), prefix);
             }
-        } else if (command_specs.matchesSlashExact(registry, cmd, spec.kind)) {
-            return parsedCommand(spec.kind, "");
+        } else if (registry.matchExact(cmd)) |matched| {
+            if (matched.command.kind != spec.kind) continue;
+            return parsedCommand(spec.kind, "", matched.token);
         }
     }
     return .unknown;
@@ -196,7 +203,7 @@ pub fn route(registry: SlashRegistry, handlers: *const CommandHandlers, cmd: []c
         .compact => try handlers.compact_history(handlers.ctx),
         .settings => |rest| try handlers.handle_settings(handlers.ctx, rest),
         .alias => |rest| try handlers.handle_alias(handlers.ctx, rest),
-        .credits => try handlers.show_credits(handlers.ctx),
+        .credits => |view| try handlers.show_credits(handlers.ctx, view),
         .paste => try handlers.paste_clipboard(handlers.ctx),
         .fast => try handlers.toggle_fast(handlers.ctx),
         .appearance => |rest| try handlers.handle_appearance(handlers.ctx, rest),
@@ -322,8 +329,18 @@ test "parse recognizes exact no-payload commands" {
     try std.testing.expectEqual(ParsedCommand.feedback, parse(testSlashRegistry(), "/feedback"));
     try std.testing.expectEqual(ParsedCommand.trace, parse(testSlashRegistry(), "/trace"));
     try std.testing.expectEqual(ParsedCommand.compact, parse(testSlashRegistry(), "/compact"));
-    try std.testing.expectEqual(ParsedCommand.credits, parse(testSlashRegistry(), "/credits"));
-    try std.testing.expectEqual(ParsedCommand.credits, parse(testSlashRegistry(), "/balance"));
+    switch (parse(testSlashRegistry(), "/credits")) {
+        .credits => |view| try std.testing.expectEqual(CreditsView.credits, view),
+        else => return error.TestExpectedEqual,
+    }
+    switch (parse(testSlashRegistry(), "/balance")) {
+        .credits => |view| try std.testing.expectEqual(CreditsView.credits, view),
+        else => return error.TestExpectedEqual,
+    }
+    switch (parse(testSlashRegistry(), "/xai-usage")) {
+        .credits => |view| try std.testing.expectEqual(CreditsView.xai_usage, view),
+        else => return error.TestExpectedEqual,
+    }
     try std.testing.expectEqual(ParsedCommand.paste, parse(testSlashRegistry(), "/paste"));
     try std.testing.expectEqual(ParsedCommand.fast, parse(testSlashRegistry(), "/fast"));
     try std.testing.expectEqual(ParsedCommand.version, parse(testSlashRegistry(), "/version"));
@@ -485,6 +502,12 @@ fn unexpectedPayload(ctx: *anyopaque, value: []const u8) anyerror!void {
     return error.UnexpectedCallback;
 }
 
+fn unexpectedCreditsView(ctx: *anyopaque, view: CreditsView) anyerror!void {
+    _ = ctx;
+    _ = view;
+    return error.UnexpectedCallback;
+}
+
 fn recordCopy(ctx: *anyopaque) anyerror!void {
     testContext(ctx).called = "copy";
 }
@@ -578,7 +601,7 @@ fn testHandlers(ctx: *TestContext) CommandHandlers {
         .compact_history = unexpectedNoPayload,
         .handle_settings = unexpectedPayload,
         .handle_alias = unexpectedPayload,
-        .show_credits = unexpectedNoPayload,
+        .show_credits = unexpectedCreditsView,
         .paste_clipboard = unexpectedNoPayload,
         .toggle_fast = unexpectedNoPayload,
         .handle_appearance = unexpectedPayload,

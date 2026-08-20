@@ -1597,14 +1597,24 @@ pub fn Handlers(comptime App: type) type {
             }, true);
         }
 
-        fn commandShowCredits(ctx: *anyopaque) !void {
+        fn commandShowCredits(ctx: *anyopaque, view: output_contracts.CreditsView) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
+            const selected_model: []const u8 = if (comptime @hasField(App, "selected_model")) blk: {
+                const Field = @TypeOf(app.selected_model);
+                break :blk if (comptime Field == []const u8 or Field == []u8)
+                    app.selected_model
+                else if (comptime @hasField(Field, "items"))
+                    app.selected_model.items
+                else
+                    "";
+            } else "";
             var snapshot = app.creditsProvider().fetch(app.alloc, .{
                 .credential = app.auth.apiKey(),
                 .tenant = app.auth.gatewayTeam(),
+                .model = selected_model,
             });
             defer snapshot.deinit(app.alloc);
-            const text = snapshot.renderInteractiveBody(app.alloc) catch {
+            const text = snapshot.renderForView(app.alloc, view) catch {
                 try app.writeDomainNotice(.{
                     .topic = "credits",
                     .tone = .@"error",
@@ -4342,13 +4352,13 @@ test "credits command renders through the composed provider" {
     var app = CreditsCommandFakeApp{ .alloc = std.testing.allocator };
     defer app.deinit();
 
-    try Handlers(CreditsCommandFakeApp).commandShowCredits(@ptrCast(&app));
+    try Handlers(CreditsCommandFakeApp).commandShowCredits(@ptrCast(&app), .credits);
 
     try std.testing.expectEqual(@as(usize, 1), app.calls);
     try std.testing.expect(app.saw_expected_input);
     try std.testing.expectEqualStrings("credits", app.notice_topic.?);
     try std.testing.expectEqual(types.NoticeTone.neutral, app.notice_tone.?);
-    try std.testing.expectEqualStrings("balance=10", app.notice_body.items);
+    try std.testing.expectEqualStrings("[credits] balance=10\n", app.notice_body.items);
 }
 
 test "credits command lookup includes selected model and matches cli renderer" {
