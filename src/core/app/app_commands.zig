@@ -7,6 +7,7 @@ const auth_runtime = @import("../auth/auth_runtime.zig");
 const credentials = @import("../auth/credentials.zig");
 const background_commands = @import("../background/background_commands.zig");
 const gateway_provider = @import("../gateway/gateway_provider.zig");
+const grok_billing = @import("../../gateway/grok_billing.zig");
 const host = @import("../hosts/host.zig");
 const change_tracker_mod = @import("../workspace/change_tracker.zig");
 const command_router = @import("../slash_commands/command_router.zig");
@@ -1628,6 +1629,16 @@ pub fn Handlers(comptime App: type) type {
                 .tone = if (snapshot.err_message == null) .neutral else .@"error",
                 .body = text,
             }, true);
+            if (snapshot.err_message == null and snapshot.origin == .grok) {
+                if (comptime @hasField(App, "grok_usage_cache")) {
+                    if (snapshot.percent) |percent| {
+                        app.grok_usage_cache.rememberBilling(app.alloc, percent, snapshot.reset_at) catch {};
+                    }
+                }
+                if (comptime @hasField(App, "shell")) {
+                    app.shell.render_requests.request(.footer);
+                }
+            }
         }
 
         fn commandPasteClipboard(ctx: *anyopaque) !void {
@@ -3591,14 +3602,19 @@ const CreditsCommandFakeApp = struct {
     alloc: std.mem.Allocator,
     auth: FakeAuth = .{},
     selected_model: []const u8 = "xai/grok-4.6",
+    origin: output_contracts.CreditsSnapshot.Origin = .gateway,
+    percent: ?u8 = null,
+    reset_at: ?[]const u8 = null,
     calls: usize = 0,
     saw_expected_input: bool = false,
     saw_selected_model: bool = false,
     notice_body: std.ArrayList(u8) = .empty,
     notice_topic: ?[]const u8 = null,
     notice_tone: ?types.NoticeTone = null,
+    grok_usage_cache: grok_billing.UsageCache = .{},
 
     fn deinit(self: *CreditsCommandFakeApp) void {
+        self.grok_usage_cache.deinit(self.alloc);
         self.notice_body.deinit(self.alloc);
     }
 
@@ -3620,7 +3636,15 @@ const CreditsCommandFakeApp = struct {
             std.mem.eql(u8, input.credential orelse "", "credential") and
             std.mem.eql(u8, input.tenant orelse "", "tenant");
         self.saw_selected_model = std.mem.eql(u8, input.model, self.selected_model);
-        return .{ .balance = alloc.dupe(u8, "10") catch null };
+        var snapshot = output_contracts.CreditsSnapshot{
+            .origin = self.origin,
+            .percent = self.percent,
+            .balance = alloc.dupe(u8, "10") catch null,
+        };
+        if (self.reset_at) |value| {
+            snapshot.reset_at = alloc.dupe(u8, value) catch null;
+        }
+        return snapshot;
     }
 
     noinline fn writeDomainNotice(
@@ -4372,6 +4396,24 @@ test "credits command lookup includes selected model and matches cli renderer" {
     try std.testing.expect(app.saw_selected_model);
     try std.testing.expectEqualStrings("credits", app.notice_topic.?);
     try std.testing.expectEqualStrings("[credits] balance=10\n", app.notice_body.items);
+}
+
+test "credits command refreshes SuperGrok cache on grok success" {
+    var app = CreditsCommandFakeApp{
+        .alloc = std.testing.allocator,
+        .origin = .grok,
+        .percent = 12,
+        .reset_at = "2026-08-24T17:33:48.278Z",
+    };
+    defer app.deinit();
+
+    try Handlers(CreditsCommandFakeApp).commandShowCredits(@ptrCast(&app), .credits);
+
+    try std.testing.expectEqual(@as(?u8, 12), app.grok_usage_cache.percent);
+    try std.testing.expectEqualStrings(
+        "SG 12% · 2026-08-24T17:33:48.278Z",
+        app.grok_usage_cache.fragmentSlice().?,
+    );
 }
 
 test "app_commands routes clear through carry-forward session reset" {

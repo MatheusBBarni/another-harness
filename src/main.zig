@@ -49,6 +49,7 @@ const command_specs = @import("core/slash_commands/command_specs.zig");
 const builtin_context = @import("builtins/context.zig");
 const builtin_devbox = @import("builtins/devbox.zig");
 const builtin_gateway = @import("builtins/gateway.zig");
+const grok_billing = @import("gateway/grok_billing.zig");
 const gateway_provider = @import("core/gateway/gateway_provider.zig");
 const generation_usage_provider = @import("core/session/generation_usage_provider.zig");
 const agent_stream_provider = @import("core/agent/stream_provider.zig");
@@ -543,6 +544,7 @@ const App = struct {
     statusline_sandbox: bool = false,
     statusline_context: bool = false,
     statusline_session: bool = false,
+    grok_usage_cache: grok_billing.UsageCache = .{},
     /// Resolved display title for the active session. App owns these bytes;
     /// empty means no title has been derived or restored yet.
     session_title: std.ArrayList(u8) = .empty,
@@ -825,6 +827,7 @@ const App = struct {
         self.pacer.deinit(self.alloc);
         self.selected_model.deinit(self.alloc);
         self.session_title.deinit(self.alloc);
+        self.grok_usage_cache.deinit(self.alloc);
         SessionAppRuntime.deinitPersistence(self);
         if (self.requested_resume) |*target| {
             target.deinit(self.alloc);

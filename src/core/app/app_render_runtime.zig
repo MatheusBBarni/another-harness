@@ -59,6 +59,9 @@ const command_output_runtime = @import("../../ui/transcript/command_output_runti
 const resume_projection = @import("../../ui/transcript/resume_projection.zig");
 const transcript_runtime = @import("../../ui/transcript/runtime.zig");
 const ui_render = @import("../../ui/render.zig");
+const grok_billing = @import("../../gateway/grok_billing.zig");
+const grok_route = @import("../../gateway/grok_route.zig");
+const grok_stream = @import("../../gateway/grok_stream.zig");
 const assistant_pacer = @import("../../ui/assistant/pacer.zig");
 
 fn set_transcript_assistant_tail_writable(
@@ -1245,6 +1248,15 @@ pub fn Runtime(comptime App: type) type {
             if (comptime @hasField(App, "statusline_session")) {
                 if (app.statusline_session) {
                     items.session_title = app_session_runtime.Runtime(App).cachedSessionTitle(app);
+                }
+            }
+            if (comptime @hasField(App, "grok_usage_cache")) {
+                if (grok_route.forModel(visible_model) != null) {
+                    if (grok_stream.lastRequestWindow()) |window| {
+                        app.grok_usage_cache.rpm = window;
+                    }
+                    app.grok_usage_cache.rebuildFragment(app.alloc) catch {};
+                    items.grok_fragment = app.grok_usage_cache.fragmentSlice();
                 }
             }
             return items;
@@ -4542,6 +4554,7 @@ const CoordinatorTestApp = struct {
     statusline_sandbox: bool = false,
     statusline_context: bool = false,
     total_input_tokens: u64 = 0,
+    grok_usage_cache: grok_billing.UsageCache = .{},
     gateway_metadata_model: ?[]const u8 = null,
     gateway_metadata: model_capabilities.GatewayMetadata = .{},
     permission_state: app_permission_runtime.State = .{},
@@ -4560,6 +4573,7 @@ const CoordinatorTestApp = struct {
         self.question_prompt.deinit(self.alloc);
         self.subagents.deinit(self.alloc);
         self.selected_model.deinit(self.alloc);
+        self.grok_usage_cache.deinit(self.alloc);
         self.workspace_identity.deinit(self.alloc);
         self.pending_images.deinit(self.alloc);
         self.model_cache.deinit();
@@ -4730,6 +4744,23 @@ test "core.app_render_runtime projects an inline slash completion suffix after t
     try std.testing.expectEqualStrings("/help", ctx.slash_registry.commands[0].command);
     try std.testing.expectEqualStrings("lp", ctx.inline_completion_suffix);
     try std.testing.expectEqualStrings("explain /he", ctx.input.edit_state.input.items);
+}
+
+test "core.app_render_runtime appends SuperGrok fragment only for xai models" {
+    const alloc = std.testing.allocator;
+    var app = CoordinatorTestApp{
+        .alloc = alloc,
+        .shell = .{},
+    };
+    defer app.deinit();
+    grok_stream.testingClearLastRequestWindow();
+    try app.grok_usage_cache.rememberBilling(alloc, 12, "2026-08-24T17:33:48.278Z");
+
+    const grok_status = Runtime(CoordinatorTestApp).buildStatuslineItems(&app, "xai/grok-4.6");
+    try std.testing.expectEqualStrings("SG 12% · 2026-08-24T17:33:48.278Z", grok_status.grok_fragment.?);
+
+    const other_status = Runtime(CoordinatorTestApp).buildStatuslineItems(&app, "openai/gpt-5");
+    try std.testing.expect(other_status.grok_fragment == null);
 }
 
 test "core.app_render_runtime projects Opus 4.8 one million token context to footer" {

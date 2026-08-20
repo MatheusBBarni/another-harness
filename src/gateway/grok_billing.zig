@@ -154,7 +154,7 @@ pub const RequestWindow = struct {
     limit: u64,
 };
 
-fn parseRequestWindow(remaining_text: ?[]const u8, limit_text: ?[]const u8) ?RequestWindow {
+pub fn parseRequestWindow(remaining_text: ?[]const u8, limit_text: ?[]const u8) ?RequestWindow {
     const remaining = parseCount(remaining_text orelse return null) orelse return null;
     const limit = parseCount(limit_text orelse return null) orelse return null;
     return .{ .remaining = remaining, .limit = limit };
@@ -165,18 +165,70 @@ fn parseCount(text: []const u8) ?u64 {
     return std.fmt.parseInt(u64, text, 10) catch null;
 }
 
-fn renderStatusLineFragment(alloc: Allocator, snapshot: Snapshot, window: ?RequestWindow) ![]u8 {
+pub fn renderStatusLineFragment(alloc: Allocator, snapshot: ?Snapshot, window: ?RequestWindow) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(alloc);
     errdefer out.deinit();
-    try out.writer.print("SG {d}%", .{snapshot.percent});
-    if (snapshot.reset_at) |reset_at| {
-        try out.writer.print(" · {s}", .{reset_at});
-    }
-    if (window) |rpm| {
-        try out.writer.print(" · {d}/{d} RPM", .{ rpm.remaining, rpm.limit });
+    if (snapshot) |usage| {
+        try out.writer.print("SG {d}%", .{usage.percent});
+        if (usage.reset_at) |reset_at| {
+            try out.writer.print(" · {s}", .{reset_at});
+        }
+        if (window) |rpm| {
+            try out.writer.print(" · {d}/{d} RPM", .{ rpm.remaining, rpm.limit });
+        }
+    } else if (window) |rpm| {
+        try out.writer.print("{d}/{d} RPM", .{ rpm.remaining, rpm.limit });
     }
     return out.toOwnedSlice();
 }
+
+/// Process-local SuperGrok footer cache. Owned by App, never session.json.
+pub const UsageCache = struct {
+    percent: ?u8 = null,
+    reset_at: std.ArrayList(u8) = .empty,
+    rpm: ?RequestWindow = null,
+    fragment: std.ArrayList(u8) = .empty,
+
+    pub fn deinit(self: *UsageCache, alloc: Allocator) void {
+        self.reset_at.deinit(alloc);
+        self.fragment.deinit(alloc);
+        self.* = .{};
+    }
+
+    pub fn rememberBilling(self: *UsageCache, alloc: Allocator, percent: u8, reset_at: ?[]const u8) !void {
+        self.percent = percent;
+        self.reset_at.clearRetainingCapacity();
+        if (reset_at) |value| {
+            try self.reset_at.appendSlice(alloc, value);
+        }
+        try self.rebuildFragment(alloc);
+    }
+
+    pub fn rememberRpm(self: *UsageCache, alloc: Allocator, window: RequestWindow) !void {
+        self.rpm = window;
+        try self.rebuildFragment(alloc);
+    }
+
+    pub fn rebuildFragment(self: *UsageCache, alloc: Allocator) !void {
+        self.fragment.clearRetainingCapacity();
+        var plan: [0]u8 = .{};
+        const snapshot: ?Snapshot = if (self.percent) |percent| .{
+            .plan = &plan,
+            .percent = percent,
+            .period = .unknown,
+            .reset_at = if (self.reset_at.items.len > 0) self.reset_at.items else null,
+        } else null;
+        if (snapshot == null and self.rpm == null) return;
+        const rendered = try renderStatusLineFragment(alloc, snapshot, self.rpm);
+        defer alloc.free(rendered);
+        try self.fragment.appendSlice(alloc, rendered);
+    }
+
+    pub fn fragmentSlice(self: *const UsageCache) ?[]const u8 {
+        if (self.fragment.items.len == 0) return null;
+        return self.fragment.items;
+    }
+};
 
 fn parsePrepaidCents(config: std.json.ObjectMap) ?i64 {
     const prepaid = config.get("prepaidBalance") orelse config.get("prepaid_balance") orelse return null;
@@ -258,4 +310,22 @@ test "status line rpm-only fragment does not invent SG 0 percent" {
     const rpm_only = try renderStatusLineFragment(std.testing.allocator, null, window);
     defer std.testing.allocator.free(rpm_only);
     try std.testing.expectEqualStrings("8299/8300 RPM", rpm_only);
+}
+
+test "status line treats billing percent 0 as real SuperGrok zero" {
+    const json =
+        \\{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","end":"2026-08-24T17:33:48.278812+00:00"},"creditUsagePercent":0},"subscription_tier":"SuperGrok"}
+    ;
+    var snapshot = try parseBilling(std.testing.allocator, json);
+    defer snapshot.deinit(std.testing.allocator);
+    const zero = try renderStatusLineFragment(std.testing.allocator, snapshot, null);
+    defer std.testing.allocator.free(zero);
+    try std.testing.expectEqualStrings("SG 0% · 2026-08-24T17:33:48.278Z", zero);
+}
+
+test "usage cache rpm-only fragment does not invent SG 0 percent" {
+    var cache = UsageCache{};
+    defer cache.deinit(std.testing.allocator);
+    try cache.rememberRpm(std.testing.allocator, .{ .remaining = 8299, .limit = 8300 });
+    try std.testing.expectEqualStrings("8299/8300 RPM", cache.fragmentSlice().?);
 }

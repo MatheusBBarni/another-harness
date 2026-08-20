@@ -185,6 +185,7 @@ pub const StatuslineItems = struct {
     context_used: u64 = 0,
     context_total: ?u32 = null,
     session_title: ?[]const u8 = null,
+    grok_fragment: ?[]const u8 = null,
 };
 
 /// Cell budget for the session title segment. The title is capped at 8 words
@@ -430,6 +431,9 @@ pub fn buildHintLine(
             var ctx_buf: [32]u8 = undefined;
             appendStatusSegment(out, &end, std.fmt.bufPrint(&ctx_buf, "Context: {d}k", .{used_k}) catch "");
         }
+    }
+    if (statusline.grok_fragment) |fragment| {
+        appendStatusSegment(out, &end, fragment);
     }
     appendWorkspaceIdentity(out, &end, status_limit, statusline);
 
@@ -939,6 +943,20 @@ test "buildHintLine clips an overlong session title on a character boundary" {
     const title = line["ask · gpt-5 · ".len..];
     try std.testing.expect(std.unicode.utf8ValidateSlice(title));
     try std.testing.expectEqual(@as(usize, 32), display_width.visibleWidth(title));
+}
+
+test "buildHintLine appends SuperGrok fragment after context" {
+    var buf: [128]u8 = undefined;
+    const with_billing = buildHintLine(false, false, true, "xai/grok-4.6", .ask, 0, null, false, false, .auto, false, .{
+        .grok_fragment = "SG 12% · 2026-08-24T17:33:48.278Z",
+    }, 80, &buf);
+    try std.testing.expectEqualStrings("ask · grok-4.6 · SG 12% · 2026-08-24T17:33:48.278Z", with_billing);
+
+    const rpm_only = buildHintLine(false, false, true, "xai/grok-4.6", .ask, 0, null, false, false, .auto, false, .{
+        .grok_fragment = "8299/8300 RPM",
+    }, 80, &buf);
+    try std.testing.expectEqualStrings("ask · grok-4.6 · 8299/8300 RPM", rpm_only);
+    try std.testing.expect(std.mem.indexOf(u8, rpm_only, "SG 0%") == null);
 }
 
 test "buildHintLine omits the session segment when no title is cached" {
