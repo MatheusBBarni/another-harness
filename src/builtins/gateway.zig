@@ -35,6 +35,7 @@ const sort_utils = @import("../core/shared/sort_utils.zig");
 
 const Allocator = std.mem.Allocator;
 const FetchGatewayGetResultFn = *const fn (Allocator, ?[]const u8, []const u8) anyerror!gateway_client.GetResult;
+const FetchGrokBillingFn = *const fn (Allocator, GrokBillingRequest) anyerror!gateway_client.GetResult;
 
 const Request = web_search_contract.ProviderRequest;
 const Response = web_search_contract.ProviderResponse;
@@ -44,6 +45,9 @@ pub const default_model = "zai/glm-5.2";
 pub const default_chat_url = "https://ai-gateway.vercel.sh/v3/ai/language-model";
 pub const models_path = "/coding-agent/v1/models";
 const credits_path = "/coding-agent/v1/credits";
+const grok_billing_credits_url = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
+const grok_client_mode = "cli";
+const grok_client_version = "1.0.4";
 pub const retry_count: usize = 3;
 pub const chat_url_env = "FX_GATEWAY_CHAT_URL";
 pub const default_model_catalog_base_url = "https://ai-gateway.vercel.sh";
@@ -490,6 +494,13 @@ fn streamAgentCompletion(
     };
 }
 
+const GrokBillingRequest = struct {
+    url: []const u8 = grok_billing_credits_url,
+    access_token: []const u8,
+    client_mode: []const u8,
+    client_version: []const u8,
+};
+
 fn fetchCredits(
     _: ?*anyopaque,
     alloc: Allocator,
@@ -497,9 +508,70 @@ fn fetchCredits(
 ) output_contracts.CreditsSnapshot {
     return fetchCreditsWithFetch(
         alloc,
-        input.credential,
-        input.tenant,
+        input,
         gateway_client.fetchGatewayGetResult,
+        fetchGrokBillingResult,
+    );
+}
+
+fn fetchGrokBillingResult(
+    alloc: Allocator,
+    request: GrokBillingRequest,
+) anyerror!gateway_client.GetResult {
+    var client: std.http.Client = .{ .allocator = alloc, .io = io_mod.getIo() };
+    defer client.deinit();
+
+    const auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.access_token});
+    defer secret.zeroAndFree(alloc, auth_header);
+
+    const extra_headers = [_]std.http.Header{
+        .{ .name = "x-grok-client-mode", .value = request.client_mode },
+        .{ .name = "x-grok-client-version", .value = request.client_version },
+    };
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+
+    const result = try client.fetch(.{
+        .location = .{ .url = request.url },
+        .method = .GET,
+        .headers = .{
+            .authorization = .{ .override = auth_header },
+            .user_agent = .{ .override = "fx-grok" },
+            .accept_encoding = .omit,
+        },
+        .extra_headers = &extra_headers,
+        .response_writer = &out.writer,
+    });
+
+    return .{
+        .status = result.status,
+        .body = try out.toOwnedSlice(),
+    };
+}
+
+fn unusedGrokBillingFetch(
+    _: Allocator,
+    _: GrokBillingRequest,
+) anyerror!gateway_client.GetResult {
+    return error.UnexpectedGrokBillingFetch;
+}
+
+fn fetchCreditsWithGatewayFetch(
+    alloc: Allocator,
+    api_key: ?[]const u8,
+    gateway_team: ?[]const u8,
+    fetch_fn: FetchGatewayGetResultFn,
+) output_contracts.CreditsSnapshot {
+    return fetchCreditsWithFetch(
+        alloc,
+        .{
+            .credential = api_key,
+            .tenant = gateway_team,
+            .model = "",
+        },
+        fetch_fn,
+        unusedGrokBillingFetch,
     );
 }
 
@@ -510,13 +582,25 @@ fn fetchCredits(
 /// team here, so the query value is added for logins only.
 fn fetchCreditsWithFetch(
     alloc: Allocator,
-    api_key: ?[]const u8,
-    gateway_team: ?[]const u8,
-    fetch_fn: FetchGatewayGetResultFn,
+    input: gateway_provider.CreditsLookupInput,
+    gateway_fetch: FetchGatewayGetResultFn,
+    grok_fetch: FetchGrokBillingFn,
 ) output_contracts.CreditsSnapshot {
+    if (grok_route.forModel(input.model) != null) {
+        var result = grok_fetch(alloc, .{
+            .access_token = input.credential orelse "",
+            .client_mode = grok_client_mode,
+            .client_version = grok_client_version,
+        }) catch {
+            return .{};
+        };
+        defer result.deinit(alloc);
+        return .{};
+    }
+
     var team_path: ?[]u8 = null;
     defer if (team_path) |path| alloc.free(path);
-    if (gateway_team) |team| {
+    if (input.tenant) |team| {
         if (shared_types.validGatewayTeam(team)) {
             team_path = std.fmt.allocPrint(alloc, "{s}?teamId={s}", .{ credits_path, team }) catch {
                 return creditsErrorSnapshot(alloc, "failed to fetch credits from gateway");
@@ -526,7 +610,7 @@ fn fetchCreditsWithFetch(
         }
     }
 
-    var result = fetch_fn(alloc, api_key, team_path orelse credits_path) catch {
+    var result = gateway_fetch(alloc, input.credential, team_path orelse credits_path) catch {
         return creditsErrorSnapshot(alloc, "failed to fetch credits from gateway");
     };
     defer result.deinit(alloc);
@@ -1747,7 +1831,7 @@ test "built-in credits provider names the team query only when valid" {
     };
     for (cases) |case| {
         captured_credits_path_len = 0;
-        var snapshot = fetchCreditsWithFetch(
+        var snapshot = fetchCreditsWithGatewayFetch(
             std.testing.allocator,
             null,
             case.team,
@@ -1762,7 +1846,7 @@ test "built-in credits provider names the team query only when valid" {
 }
 
 test "built-in credits provider maps fetch failure" {
-    var snapshot = fetchCreditsWithFetch(
+    var snapshot = fetchCreditsWithGatewayFetch(
         std.testing.allocator,
         null,
         null,
@@ -1780,7 +1864,7 @@ test "built-in credits provider maps fetch failure" {
 }
 
 test "built-in credits provider maps Gateway HTTP denial" {
-    var snapshot = fetchCreditsWithFetch(
+    var snapshot = fetchCreditsWithGatewayFetch(
         std.testing.allocator,
         null,
         null,
@@ -1798,7 +1882,7 @@ test "built-in credits provider maps Gateway HTTP denial" {
 }
 
 test "built-in credits provider rejects malformed JSON" {
-    var snapshot = fetchCreditsWithFetch(
+    var snapshot = fetchCreditsWithGatewayFetch(
         std.testing.allocator,
         null,
         null,
@@ -1828,7 +1912,7 @@ test "built-in credits provider rejects non-object JSON" {
 }
 
 test "built-in credits provider returns owned string fields" {
-    var snapshot = fetchCreditsWithFetch(
+    var snapshot = fetchCreditsWithGatewayFetch(
         std.testing.allocator,
         null,
         null,
