@@ -3580,8 +3580,10 @@ const CreditsCommandFakeApp = struct {
 
     alloc: std.mem.Allocator,
     auth: FakeAuth = .{},
+    selected_model: []const u8 = "xai/grok-4.6",
     calls: usize = 0,
     saw_expected_input: bool = false,
+    saw_selected_model: bool = false,
     notice_body: std.ArrayList(u8) = .empty,
     notice_topic: ?[]const u8 = null,
     notice_tone: ?types.NoticeTone = null,
@@ -3607,6 +3609,7 @@ const CreditsCommandFakeApp = struct {
         self.saw_expected_input =
             std.mem.eql(u8, input.credential orelse "", "credential") and
             std.mem.eql(u8, input.tenant orelse "", "tenant");
+        self.saw_selected_model = std.mem.eql(u8, input.model, self.selected_model);
         return .{ .balance = alloc.dupe(u8, "10") catch null };
     }
 
@@ -4346,6 +4349,19 @@ test "credits command renders through the composed provider" {
     try std.testing.expectEqualStrings("credits", app.notice_topic.?);
     try std.testing.expectEqual(types.NoticeTone.neutral, app.notice_tone.?);
     try std.testing.expectEqualStrings("balance=10", app.notice_body.items);
+}
+
+test "credits command lookup includes selected model and matches cli renderer" {
+    var app = CreditsCommandFakeApp{ .alloc = std.testing.allocator };
+    defer app.deinit();
+
+    try Handlers(CreditsCommandFakeApp).commandShowCredits(@ptrCast(&app), .credits);
+
+    try std.testing.expectEqual(@as(usize, 1), app.calls);
+    try std.testing.expect(app.saw_expected_input);
+    try std.testing.expect(app.saw_selected_model);
+    try std.testing.expectEqualStrings("credits", app.notice_topic.?);
+    try std.testing.expectEqualStrings("[credits] balance=10\n", app.notice_body.items);
 }
 
 test "app_commands routes clear through carry-forward session reset" {
