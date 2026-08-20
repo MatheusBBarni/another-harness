@@ -1328,6 +1328,8 @@ pub const BackgroundDetailSnapshot = struct {
     }
 };
 
+pub const CreditsView = enum { credits, xai_usage };
+
 pub const CreditsSnapshot = struct {
     pub const Origin = enum { gateway, grok };
 
@@ -1361,6 +1363,37 @@ pub const CreditsSnapshot = struct {
             .text => self.renderText(alloc),
             .json => self.renderJson(alloc),
         };
+    }
+
+    pub fn renderForView(self: CreditsSnapshot, alloc: Allocator, view: CreditsView) ![]u8 {
+        if (view == .xai_usage and self.origin == .grok and self.err_message == null) {
+            return self.renderXaiUsageText(alloc);
+        }
+        return self.renderText(alloc);
+    }
+
+    fn renderXaiUsageText(self: CreditsSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        const plan = self.plan orelse "SuperGrok";
+        const percent = self.percent orelse 0;
+        const period = self.period orelse "current period";
+        try out.writer.print("{s} {d}% {s}", .{ plan, percent, period });
+        if (self.reset_at) |reset_at| {
+            try out.writer.print(" · resets {s}", .{reset_at});
+        }
+        if (self.prepaid_cents) |cents| {
+            const abs: u64 = @intCast(if (cents < 0) -cents else cents);
+            const dollars = abs / 100;
+            const remainder = abs % 100;
+            if (cents < 0) {
+                try out.writer.print(" · prepaid -${d}.{d:0>2}", .{ dollars, remainder });
+            } else {
+                try out.writer.print(" · prepaid ${d}.{d:0>2}", .{ dollars, remainder });
+            }
+        }
+        return try out.toOwnedSlice();
     }
 
     pub fn renderText(self: CreditsSnapshot, alloc: Allocator) ![]u8 {
