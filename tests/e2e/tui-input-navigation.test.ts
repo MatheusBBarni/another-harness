@@ -69,7 +69,7 @@ async function startFx(
   mkdirSync(join(testHome, ".fx"), { recursive: true });
   writeFileSync(
     join(testHome, ".fx", "settings.json"),
-    JSON.stringify({ maxxing_mode: "legacy" }),
+    JSON.stringify({ maxxing_mode: "legacy", sandbox: "none" }),
   );
   if (withGateway) {
     gateway = startFakeGateway(

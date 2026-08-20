@@ -261,10 +261,16 @@ const FormState = struct {
     paste_rejection: ?FormValidationFailure = null,
     attempt: MutationAttempt = .{},
 
+    noinline fn init() FormState {
+        var result: FormState = .{ .editors = undefined };
+        for (&result.editors) |*editor| editor.* = .{};
+        return result;
+    }
+
     fn deinit(self: *FormState, alloc: Allocator) void {
         self.clear(alloc);
         for (&self.editors) |*editor| editor.deinit(alloc);
-        self.* = .{};
+        self.* = undefined;
     }
 
     fn clear(self: *FormState, alloc: Allocator) void {
@@ -738,7 +744,7 @@ pub const ChildRouteState = struct {
         self.clear(alloc);
         self.pages.deinit(alloc);
         self.editor.deinit(alloc);
-        self.* = .{};
+        self.* = undefined;
     }
 
     fn clear(self: *ChildRouteState, alloc: Allocator) void {
@@ -872,6 +878,12 @@ pub const Runtime = struct {
     physical_surface: PhysicalSurface = .manager,
     count_projection: usize = 0,
 
+    pub noinline fn init() Runtime {
+        var result: Runtime = .{ .form = undefined };
+        result.form = FormState.init();
+        return result;
+    }
+
     pub fn deinit(self: *Runtime, alloc: Allocator) void {
         self.clearProjection(alloc);
         self.clearTerminalProjection(alloc);
@@ -886,7 +898,7 @@ pub const Runtime = struct {
         self.attach.deinit(alloc);
         self.lifecycle_attempt.deinit(alloc);
         if (self.main_approval_card) |*card| card.deinit(alloc);
-        self.* = .{};
+        self.* = undefined;
     }
 
     pub fn resetForOpen(self: *Runtime, alloc: Allocator) void {
@@ -3872,6 +3884,16 @@ pub const Runtime = struct {
         self.terminal_scroll = @min(self.terminal_scroll, max_scroll);
     }
 };
+
+test "repeated editor defaults are initialized through one runtime path" {
+    const runtime = Runtime.init();
+    try std.testing.expect(runtime.loading);
+    try std.testing.expect(runtime.preserve_page_anchor);
+    try std.testing.expectEqual(FormKind.none, runtime.form.kind);
+    for (runtime.form.editors) |editor| {
+        try std.testing.expect(editor.slash_menu_categories);
+    }
+}
 
 pub fn paint(
     alloc: Allocator,

@@ -5,10 +5,12 @@ const identity = @import("../../core/terminal/identity.zig");
 const operation = @import("../../core/terminal/operation.zig");
 const store = @import("../../core/terminal/store.zig");
 const debug_trace = @import("../../core/shared/debug_trace.zig");
+const sort_utils = @import("../../core/shared/sort_utils.zig");
 const command_environment = @import("../../core/execution/command_environment.zig");
 const io_mod = @import("../../core/shared/io.zig");
 const pathing = @import("../../core/workspace/pathing.zig");
 const tool_dispatch = @import("../../core/tooling/tool_dispatch.zig");
+const tool_args = @import("../../core/tooling/tool_args.zig");
 const tool_result_errors = @import("../../core/tooling/tool_result_errors.zig");
 const workspace_access = @import("../../core/workspace/workspace_access.zig");
 const shell_resolver = @import("../../core/terminal/shell_resolver.zig");
@@ -251,10 +253,22 @@ fn fieldNameLessThan(_: void, left: []const u8, right: []const u8) bool {
     return std.mem.order(u8, left, right) == .lt;
 }
 
+/// The advertised schema requires every public field and tells the model to
+/// send null for the ones the selected action does not use. Models routinely
+/// serialize that null as the literal text "null", so the decoder treats it as
+/// the absence it was meant to express.
+fn isNullPlaceholder(value: std.json.Value) bool {
+    return switch (value) {
+        .null => true,
+        .string => |text| tool_args.isNullPlaceholderText(text),
+        else => false,
+    };
+}
+
 fn elideKnownNullFields(object: *std.json.ObjectMap) void {
     for (public_field_names[1..]) |field_name| {
         const value = object.get(field_name) orelse continue;
-        if (value != .null) continue;
+        if (!isNullPlaceholder(value)) continue;
         _ = object.orderedRemove(field_name);
     }
 }
@@ -296,7 +310,7 @@ fn actionFieldCorrection(
         if (isPublicField(entry.key_ptr.*)) continue;
         scratch.invalid_fields.appendAssumeCapacity(entry.key_ptr.*);
     }
-    std.mem.sort(
+    sort_utils.sort(
         []const u8,
         scratch.invalid_fields.items[unknown_start..],
         {},
@@ -1168,7 +1182,12 @@ fn resultFromCompletion(
         session_id,
         switch (completion.kind) {
             .cancelled => .cancelled,
-            .unavailable => .protocol_incompatible,
+            .unavailable => if (completion.is_missing_capability(
+                contracts.protocol_capability_complete_process_tree_signals,
+            ))
+                .unsupported_host
+            else
+                .protocol_incompatible,
             .disconnected => .session_lost,
             .response => .protocol_incompatible,
         },
@@ -1382,6 +1401,105 @@ test "terminal decoder elides known null placeholders but structures unknown nul
             const invalid_fields = correction.get("invalid_fields").?.array.items;
             try std.testing.expectEqual(@as(usize, 1), invalid_fields.len);
             try std.testing.expectEqualStrings("unknown", invalid_fields[0].string);
+        },
+        .input => |input| {
+            input.deinit(alloc);
+            return error.TestUnexpectedResult;
+        },
+    }
+}
+
+test "terminal decoder elides textual null placeholders like real nulls" {
+    const alloc = std.testing.allocator;
+    const exec_call = try decode(
+        .{ .allocator = alloc },
+        "{\"action\":\"exec\",\"command\":\"echo ONE\",\"cwd\":\".\",\"profile\":\"NULL\"," ++
+            "\"session_id\":\"null\",\"task_id\":\"null\",\"workspace_root\":\" null \"," ++
+            "\"shell\":null,\"backend\":\"null\",\"return_when\":\"null\",\"lease\":\"null\"}",
+    );
+    switch (exec_call) {
+        .failure => |message| {
+            defer alloc.free(message);
+            return error.TestUnexpectedResult;
+        },
+        .input => |input| {
+            defer input.deinit(alloc);
+            const value = input.as(OwnedInput).parsed.value;
+            try std.testing.expectEqual(Action.exec, value.action);
+            try std.testing.expectEqualStrings("echo ONE", value.command.?);
+            try std.testing.expectEqualStrings(".", value.cwd.?);
+            try std.testing.expect(value.profile == null);
+            try std.testing.expect(value.session_id == null);
+            try std.testing.expect(value.task_id == null);
+            try std.testing.expect(value.workspace_root == null);
+            try std.testing.expectEqual(contracts.WriteLeaseIntent.use, value.lease);
+        },
+    }
+
+    const start_call = try decode(
+        .{ .allocator = alloc },
+        "{\"action\":\"start\",\"shell\":\"null\",\"initial_monitors\":\"null\",\"write\":\"null\"}",
+    );
+    switch (start_call) {
+        .failure => |message| {
+            defer alloc.free(message);
+            return error.TestUnexpectedResult;
+        },
+        .input => |input| {
+            defer input.deinit(alloc);
+            const value = input.as(OwnedInput).parsed.value;
+            try std.testing.expectEqual(Action.start, value.action);
+            try std.testing.expect(value.shell == null);
+            try std.testing.expect(value.write == null);
+            try std.testing.expectEqual(@as(usize, 0), value.initial_monitors.len);
+        },
+    }
+}
+
+test "terminal decoder keeps command text that merely contains a null placeholder" {
+    const alloc = std.testing.allocator;
+    const accepted = try decode(
+        .{ .allocator = alloc },
+        "{\"action\":\"exec\",\"command\":\"echo null\"}",
+    );
+    switch (accepted) {
+        .failure => |message| {
+            defer alloc.free(message);
+            return error.TestUnexpectedResult;
+        },
+        .input => |input| {
+            defer input.deinit(alloc);
+            try std.testing.expectEqualStrings(
+                "echo null",
+                input.as(OwnedInput).parsed.value.command.?,
+            );
+        },
+    }
+}
+
+test "terminal decoder reports a textual null placeholder on a required field as missing" {
+    const alloc = std.testing.allocator;
+    const rejected = try decode(
+        .{ .allocator = alloc },
+        "{\"action\":\"exec\",\"command\":\"null\"}",
+    );
+    switch (rejected) {
+        .failure => |message| {
+            defer alloc.free(message);
+            var parsed = try std.json.parseFromSlice(std.json.Value, alloc, message, .{});
+            defer parsed.deinit();
+            const correction = parsed.value.object.get("error").?.object;
+            try std.testing.expectEqualStrings(
+                "invalid_action_fields",
+                correction.get("code").?.string,
+            );
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                correction.get("invalid_fields").?.array.items.len,
+            );
+            const missing_fields = correction.get("missing_fields").?.array.items;
+            try std.testing.expectEqual(@as(usize, 1), missing_fields.len);
+            try std.testing.expectEqualStrings("command", missing_fields[0].string);
         },
         .input => |input| {
             input.deinit(alloc);
@@ -1906,6 +2024,47 @@ test "terminal result mapper adds detail only for workspace path failures" {
             try std.testing.expectEqualStrings(expected, mapped.status_detail.?);
         } else {
             try std.testing.expect(mapped.status_detail == null);
+        }
+    }
+}
+
+test "terminal completion maps only complete signal capability misses to unsupported host" {
+    const alloc = std.testing.allocator;
+    const cases = [_]struct {
+        completion: client.Completion,
+        expected: []const u8,
+    }{
+        .{
+            .completion = .{
+                .kind = .unavailable,
+                .correlation_id = .{ .value = 1 },
+                .missing_capabilities = contracts.protocol_capability_complete_process_tree_signals,
+            },
+            .expected = "{\"failure\":{\"action\":\"start\",\"code\":\"unsupported_host\",\"session_id\":null,\"retryable\":false}}",
+        },
+        .{
+            .completion = .{
+                .kind = .unavailable,
+                .correlation_id = .{ .value = 2 },
+            },
+            .expected = "{\"failure\":{\"action\":\"start\",\"code\":\"protocol_incompatible\",\"session_id\":null,\"retryable\":false}}",
+        },
+    };
+
+    for (cases) |case| {
+        const result = try resultFromCompletion(
+            alloc,
+            .start,
+            null,
+            case.completion,
+        );
+        defer result.deinit(alloc);
+        switch (result) {
+            .failure => |body| try std.testing.expectEqualStrings(
+                case.expected,
+                body,
+            ),
+            .success => return error.TestUnexpectedResult,
         }
     }
 }

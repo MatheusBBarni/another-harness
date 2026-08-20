@@ -2682,7 +2682,7 @@ describe("effect-aware command permissions", () => {
   );
 
   test.skipIf(!tmuxAvailable())(
-    "TUI auto mode reuses one invalid review before human escalation",
+    "TUI auto mode reuses one invalid review and finishes without human escalation",
     async () => {
       const root = createIsolatedRoot();
       const marker = join(root.workspace, "classifier-fallback-approved.txt");
@@ -2695,9 +2695,8 @@ describe("effect-aware command permissions", () => {
           (body) => {
             expect(body).not.toContain('"tools":[]');
             expect(body).not.toContain('"toolChoice":{"type":"none"}');
-            return toolCall(command, {}, "human_approval_4");
+            return toolCall(command, {}, "invalid_review_4");
           },
-          finalText("post-threshold approval complete"),
         ],
         {
           classifierResponses: [finalText("accept")],
@@ -2722,22 +2721,24 @@ describe("effect-aware command permissions", () => {
       });
       await activeSession.waitForComposer(TIMEOUT);
       await activeSession.sendText("Run the reviewer fallback fixture.");
-      const pane = await activeSession.waitForText(COMMAND_APPROVAL_PROMPT, TIMEOUT);
+      const pane = await activeSession.waitForText(
+        "I couldn't continue because the required actions were blocked by automatic safety checks.",
+        TIMEOUT,
+      );
 
-      expect(pane).toContain("classifier-fallback-approved.txt");
+      expect(pane).not.toContain(COMMAND_APPROVAL_PROMPT);
       expect(existsSync(marker)).toBe(false);
       expect(gateway.requests).toHaveLength(4);
       expect(gateway.classifierRequests).toHaveLength(1);
-      await activeSession.sendKeys("1");
-      await activeSession.sendKeys("Enter");
-      await activeSession.waitForText("post-threshold approval complete", TIMEOUT);
-
-      expect(existsSync(marker)).toBe(true);
-      expect(gateway.requests).toHaveLength(5);
-      expect(gateway.classifierRequests).toHaveLength(1);
       const trace = readFileSync(tracePath, "utf8");
       expect(trace.match(/denial_reason=auto_denied/g)).toHaveLength(1);
+      expect(trace).toContain("event=automatic_recovery_exhausted");
       expect(readFileSync(stderrPath, "utf8")).toBe("");
+
+      await activeSession.sendText("/quit");
+      expect(await activeSession.waitForSessionEnd()).toBe(true);
+      await activeSession.kill();
+      activeSession = null;
     },
     TIMEOUT,
   );
@@ -5156,7 +5157,7 @@ describe("effect-aware command permissions", () => {
   );
 
   test.skipIf(!tmuxAvailable())(
-    "interactive fx routes a child's post-threshold action to parent approval",
+    "interactive fx lets a child finish automatic recovery without parent approval",
     async () => {
       const root = createIsolatedRoot();
       const stderrPath = join(root.root, "interactive-child-auto-approval-stderr.log");
@@ -5179,10 +5180,7 @@ describe("effect-aware command permissions", () => {
               command: `/usr/bin/touch ${shellQuote(markerPath)}`,
             }, `child_auto_command_${childRequestCount}`);
           }
-          expect(toolResultText(body, "child_auto_command_4")).not.toContain(
-            "tool_permission_denied",
-          );
-          return finalText("INTERACTIVE_AUTO_APPROVAL_CHILD_COMPLETE");
+          throw new Error(`Unexpected fifth child recovery request: ${body}`);
         }
         if (body.includes(`\"toolCallId\":\"${rootCreateCallId}\"`) &&
             body.includes('"type":"tool-result"')) {
@@ -5226,27 +5224,27 @@ describe("effect-aware command permissions", () => {
       });
       await activeSession.waitForComposer(TIMEOUT);
       await activeSession.sendText(rootPrompt);
-      const approvalPane = await activeSession.waitForText(COMMAND_APPROVAL_PROMPT, TIMEOUT);
-
-      expect(approvalPane).toContain(
-        "Subagent interactive-auto-approval-child needs permission",
-      );
-      expect(approvalPane).toContain("/usr/bin/touch");
+      await activeSession.waitForText("INTERACTIVE_AUTO_APPROVAL_PARENT_CREATED", TIMEOUT);
       expect(childId).not.toBe("");
-      expect(subagentState(root, childId)).toBe("awaiting_approval");
-      expect(existsSync(markerPath)).toBe(false);
-      expect(gateway.classifierRequests).toHaveLength(1);
-      await activeSession.sendKeys("1");
-      await activeSession.sendKeys("Enter");
 
       const deadline = Date.now() + TIMEOUT;
       while (subagentState(root, childId) !== "completed" && Date.now() < deadline) {
         await Bun.sleep(20);
       }
       expect(subagentState(root, childId)).toBe("completed");
-      expect(childRequestCount).toBe(5);
+      expect(childRequestCount).toBe(4);
       expect(gateway.classifierRequests).toHaveLength(1);
-      expect(existsSync(markerPath)).toBe(true);
+      expect(existsSync(markerPath)).toBe(false);
+      const scrollback = await activeSession.captureFullScrollback();
+      expect(scrollback).not.toContain(COMMAND_APPROVAL_PROMPT);
+      expect(scrollback).not.toContain(
+        "Subagent interactive-auto-approval-child needs permission",
+      );
+      const stored = JSON.parse(readFileSync(
+        join(root.home, ".fx", "sessions", childId, "subagent", "communication.json"),
+        "utf8",
+      )) as { ledger: { approvals: Array<Record<string, unknown>> } };
+      expect(stored.ledger.approvals).toHaveLength(0);
 
       await activeSession.sendText("/quit");
       expect(await activeSession.waitForSessionEnd(5_000)).toBe(true);

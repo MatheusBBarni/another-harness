@@ -17,7 +17,7 @@ fn buildTerminalSpec() tool_dispatch.Tool {
         .description = terminal_description,
         .input_schema = .{
             .properties = &.{
-                .{ .name = "action", .json_type = .string, .enum_values = &.{"exec"} },
+                .{ .name = "action", .json_type = .string, .shape = &.{ .enum_values = &.{"exec"} } },
                 .{
                     .name = "command",
                     .json_type = .string,

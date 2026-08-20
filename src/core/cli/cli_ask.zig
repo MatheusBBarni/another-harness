@@ -63,7 +63,7 @@ const test_builtin_gateway = if (std_builtin.is_test)
     @import("../../builtins/gateway.zig")
 else
     struct {};
-const test_builtin_tools = @import("../../builtins/tools.zig");
+const builtin_tools = @import("../../builtins/tools.zig");
 const tool_advertisement = @import("../tooling/tool_advertisement.zig");
 const tool_admission = @import("../tooling/tool_admission.zig");
 const tool_args = @import("../tooling/tool_args.zig");
@@ -436,6 +436,56 @@ const RunOptions = struct {
     continue_recovery: bool = false,
     deps: RunDeps,
 };
+
+fn buildAskGatewayToolProjection(
+    alloc: Allocator,
+    registry: mode_registry.Registry,
+    tool_set: tool_set_contract.ToolSet,
+    mode_id: []const u8,
+    options: tool_advertisement.Options,
+    has_child_capability: bool,
+) !tool_advertisement.EffectiveToolProjection {
+    if (has_child_capability) {
+        return registry.buildGatewayToolProjection(
+            alloc,
+            tool_set,
+            mode_id,
+            options,
+        );
+    }
+
+    const terminal_index = for (tool_set.registry.tools, 0..) |tool, index| {
+        if (tool.executor_kind == .terminal and
+            std.mem.eql(u8, tool.name, "terminal"))
+        {
+            break index;
+        }
+    } else {
+        return registry.buildGatewayToolProjection(
+            alloc,
+            tool_set,
+            mode_id,
+            options,
+        );
+    };
+
+    const projected_tools = try alloc.dupe(
+        tool_dispatch.Tool,
+        tool_set.registry.tools,
+    );
+    defer alloc.free(projected_tools);
+    projected_tools[terminal_index] = builtin_tools.terminalExecOnlySpec();
+    return registry.buildGatewayToolProjection(
+        alloc,
+        .{
+            .registry = .{ .tools = projected_tools },
+            .order = tool_set.order,
+            .read_only_tool_names = tool_set.read_only_tool_names,
+        },
+        mode_id,
+        options,
+    );
+}
 
 const StdinSource = union(enum) {
     real,
@@ -1504,12 +1554,16 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
             return error.McpRequiredServerUnavailable;
         }
     }
-    var tool_projection = try ctx.cfg.mode_registry.buildGatewayToolProjection(alloc, options.deps.tool_set, ctx.mode_id, .{
+    const session_child_capability = if (ctx.writable) |*writable|
+        writable.childCapability() catch null
+    else
+        null;
+    var tool_projection = try buildAskGatewayToolProjection(alloc, ctx.cfg.mode_registry, options.deps.tool_set, ctx.mode_id, .{
         .permission_mode = ctx.permission_mode,
         .permission_rules = ctx.permission_rules,
         .mcp_runtime = ctx.mcp,
         .subagent_available = ctx.subagent_host != null,
-    });
+    }, session_child_capability != null);
     defer tool_projection.deinit(alloc);
 
     const skills_view = skill_runtime.Runtime{
@@ -1603,10 +1657,7 @@ fn runPromptInternal(alloc: Allocator, prompt: []const u8, permission_override: 
         else
             false,
         .context_limits = ctx.context_limits,
-        .session_child_capability = if (ctx.writable) |*writable|
-            writable.childCapability() catch null
-        else
-            null,
+        .session_child_capability = session_child_capability,
     }, job) catch |err| switch (err) {
         error.NonInteractivePermissionRequired => {
             const assistant_output = try alloc.dupe(u8, ctx.assistant_output.items);
@@ -3841,18 +3892,30 @@ fn testProcessQueuedPromptChecksTimeout(deps: *const agent_runtime.AgentRuntimeD
     try testPushAssistantText(deps, "assistant text");
 }
 
-fn testProcessQueuedPromptChecksRealTools(deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, _: agent_runtime.LifecycleContext, cfg: agent_runtime.Config, _: worker_runtime.QueuedPrompt) !void {
+fn testProcessQueuedPromptChecksExecOnlyTerminal(deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, _: agent_runtime.LifecycleContext, cfg: agent_runtime.Config, _: worker_runtime.QueuedPrompt) !void {
     try std.testing.expect(semantic_presentation == null);
+    try std.testing.expect(cfg.session_child_capability == null);
     const ctx: *AskContext = @ptrCast(@alignCast(deps.ctx));
     try std.testing.expectEqualStrings("inspect", ctx.mode_id);
-    try std.testing.expect(!std.mem.eql(u8, cfg.gateway_tools_json, "[]"));
     try std.testing.expect(std.mem.find(u8, cfg.gateway_tools_json, "\"name\":\"read_file\"") != null);
     try std.testing.expect(std.mem.find(u8, cfg.gateway_tools_json, "\"name\":\"terminal\"") != null);
     try std.testing.expect(std.mem.find(u8, cfg.gateway_tools_json, "\"name\":\"run_command\"") == null);
     try std.testing.expect(std.mem.find(u8, cfg.gateway_tools_json, "\"name\":\"web_search\"") == null);
     try std.testing.expect(std.mem.find(u8, cfg.gateway_tools_json, "gateway.perplexity_search") != null);
-    try std.testing.expectEqualStrings(test_builtin_tools.web_search.description, cfg.custom_tool_guidance);
+    try std.testing.expect(std.mem.find(u8, cfg.gateway_tools_json, "Run one captured command and return its result.") != null);
+    try std.testing.expect(std.mem.find(u8, cfg.gateway_tools_json, "Use start for commands") == null);
+    try std.testing.expectEqualStrings(builtin_tools.web_search.description, cfg.custom_tool_guidance);
     try std.testing.expectEqualStrings("test model overlay", cfg.model_prompt_overlay.?);
+    const runtime_terminal = deps.tool_registry.lookup("terminal") orelse
+        return error.TestExpectedEqual;
+    try std.testing.expect(std.mem.find(u8, runtime_terminal.description, "Use start") != null);
+    try testPushAssistantText(deps, "assistant text");
+}
+
+fn testProcessQueuedPromptChecksFullTerminal(deps: *const agent_runtime.AgentRuntimeDeps, semantic_presentation: ?agent_runtime.SemanticPresentationSink, _: agent_runtime.LifecycleContext, cfg: agent_runtime.Config, _: worker_runtime.QueuedPrompt) !void {
+    try std.testing.expect(semantic_presentation == null);
+    try std.testing.expect(cfg.session_child_capability != null);
+    try std.testing.expect(std.mem.find(u8, cfg.gateway_tools_json, "Use start for commands") != null);
     try testPushAssistantText(deps, "assistant text");
 }
 
@@ -4247,7 +4310,7 @@ fn testPromptRunDeps(stdout_capture: *TestCapture, stderr_capture: *TestCapture,
         .initialize_session_stores = testSkipSessionStores,
         .load_skills = testLoadNoSkills,
         .context_registry = test_no_context_registry,
-        .tool_set = test_builtin_tools.advertisement_set,
+        .tool_set = builtin_tools.advertisement_set,
         .load_mcp_runtime = testNoMcpRuntime,
         .process_queued_prompt = testProcessQueuedPrompt,
     };
@@ -4335,18 +4398,18 @@ test "CLI lifecycle action preserves dynamic MCP availability boundaries" {
     const advertised = [_][]const u8{"mcp_lookup"};
     var fixture = Fixture{};
 
-    const missing = dynamicMcpToolAvailable(test_builtin_tools.registry, "mcp_lookup", &advertised, @ptrCast(&fixture), Fixture.hasTool, .unrestricted);
+    const missing = dynamicMcpToolAvailable(builtin_tools.registry, "mcp_lookup", &advertised, @ptrCast(&fixture), Fixture.hasTool, .unrestricted);
     try std.testing.expect(!missing);
     try std.testing.expectEqual(@as(usize, 1), fixture.calls);
     const missing_label = try tool_presentation.formatPlainAction(alloc, .{
-        .tool_registry = test_builtin_tools.registry,
+        .tool_registry = builtin_tools.registry,
         .call = .{ .id = "missing", .name = "mcp_lookup", .arguments_json = "{}" },
         .is_available_dynamic_mcp_tool = missing,
     });
     defer alloc.free(missing_label);
     try std.testing.expectEqualStrings("Working: mcp_lookup", missing_label);
 
-    const builtin = dynamicMcpToolAvailable(test_builtin_tools.registry, "terminal", &.{"terminal"}, @ptrCast(&fixture), Fixture.hasTool, .unrestricted);
+    const builtin = dynamicMcpToolAvailable(builtin_tools.registry, "terminal", &.{"terminal"}, @ptrCast(&fixture), Fixture.hasTool, .unrestricted);
     try std.testing.expect(!builtin);
     try std.testing.expectEqual(@as(usize, 1), fixture.calls);
 }
@@ -6590,7 +6653,7 @@ test "CLI ask auto mode requires review when only one copy or rename target is c
     }
 }
 
-test "runWithDeps builds real gateway tools after startup" {
+test "runWithDeps projects exec-only terminal when saved setup has no capability" {
     const alloc = std.testing.allocator;
     var stdout_capture: TestCapture = .{};
     defer stdout_capture.deinit(alloc);
@@ -6601,7 +6664,7 @@ test "runWithDeps builds real gateway tools after startup" {
         alloc,
         &.{"hello"},
         testConfig(),
-        testPromptRunDepsWithProcess(&stdout_capture, &stderr_capture, testProcessQueuedPromptChecksRealTools),
+        testPromptRunDepsWithProcess(&stdout_capture, &stderr_capture, testProcessQueuedPromptChecksExecOnlyTerminal),
     );
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
@@ -6610,7 +6673,7 @@ test "runWithDeps builds real gateway tools after startup" {
 
 test "runWithDeps uses the supplied tool set for advertisement and runtime" {
     const alloc = std.testing.allocator;
-    const tools = [_]tool_dispatch.Tool{test_builtin_tools.read_file};
+    const tools = [_]tool_dispatch.Tool{builtin_tools.read_file};
     const names = [_][]const u8{"read_file"};
     const tool_set: tool_set_contract.ToolSet = .{
         .registry = .{ .tools = tools[0..] },
@@ -6673,7 +6736,7 @@ test "runWithDeps honors no-save by skipping ask session stores" {
     defer stderr_capture.deinit(alloc);
 
     test_initialize_session_store_calls = 0;
-    var deps = testPromptRunDepsWithProcess(&stdout_capture, &stderr_capture, testProcessQueuedPrompt);
+    var deps = testPromptRunDepsWithProcess(&stdout_capture, &stderr_capture, testProcessQueuedPromptChecksExecOnlyTerminal);
     deps.initialize_session_stores = testCountSessionStores;
 
     const exit_code = try runWithDeps(
@@ -6685,6 +6748,52 @@ test "runWithDeps honors no-save by skipping ask session stores" {
 
     try std.testing.expectEqual(@as(u8, 0), exit_code);
     try std.testing.expectEqual(@as(usize, 0), test_initialize_session_store_calls);
+}
+
+test "runWithDeps retains full terminal projection with saved capability" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), "home");
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home);
+    const test_home = try TestAskHome.install(alloc, home);
+    defer test_home.deinit();
+
+    var stdout_capture: TestCapture = .{};
+    defer stdout_capture.deinit(alloc);
+    var stderr_capture: TestCapture = .{};
+    defer stderr_capture.deinit(alloc);
+    var deps = testPromptRunDeps(
+        &stdout_capture,
+        &stderr_capture,
+        testPresentKeySavedStartup,
+    );
+    deps.initialize_session_stores = initializeSessionStoresDefault;
+    deps.process_queued_prompt = testProcessQueuedPromptChecksFullTerminal;
+
+    const exit_code = try runWithDeps(alloc, &.{"hello"}, testConfig(), deps);
+
+    try std.testing.expectEqual(@as(u8, 0), exit_code);
+    try std.testing.expectEqualStrings("assistant text", stdout_capture.bytes.items);
+}
+
+test "exec-only terminal projection propagates view allocation failure" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        buildAskGatewayToolProjection(
+            failing.allocator(),
+            test_mode_registry,
+            builtin_tools.advertisement_set,
+            "inspect",
+            .{},
+            false,
+        ),
+    );
 }
 
 const TestAskHome = struct {
@@ -8265,7 +8374,7 @@ test "fx ask JSON permission-denied capture is best effort under allocation fail
         testConfig(),
         .{
             .context_registry = test_no_context_registry,
-            .tool_set = test_builtin_tools.advertisement_set,
+            .tool_set = builtin_tools.advertisement_set,
             .load_mcp_runtime = testNoMcpRuntime,
         },
         "/tmp/workspace",
@@ -8447,7 +8556,7 @@ test "fx ask JSON captures parallel tool results without corrupting records" {
 fn checkAskJsonCaptureAllocationFailures(alloc: Allocator) !void {
     var ctx = AskContext.init(alloc, testConfig(), .{
         .context_registry = test_no_context_registry,
-        .tool_set = test_builtin_tools.advertisement_set,
+        .tool_set = builtin_tools.advertisement_set,
         .load_mcp_runtime = testNoMcpRuntime,
     }, "/tmp/workspace");
     defer ctx.deinit();
@@ -8534,7 +8643,7 @@ test "fx ask JSON clips ask_user_question text at a UTF-8 boundary" {
 
     var ctx = AskContext.init(alloc, testConfig(), .{
         .context_registry = test_no_context_registry,
-        .tool_set = test_builtin_tools.advertisement_set,
+        .tool_set = builtin_tools.advertisement_set,
         .load_mcp_runtime = testNoMcpRuntime,
     }, "/tmp/workspace");
     defer ctx.deinit();

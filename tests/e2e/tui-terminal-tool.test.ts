@@ -1474,7 +1474,62 @@ test.skipIf(!tmuxAvailable())(
 );
 
 test.skipIf(!tmuxAvailable())(
-  "terminal repeated unknown correction keeps the turn going",
+  "terminal exec treats textual null placeholders as absent fields",
+  async () => {
+    const fixture = createFixture("fx-tui-terminal-null-placeholder-");
+    const marker = join(fixture.workspace, "null-placeholder-ran");
+    const gateway = startFakeGateway([
+      fakeGatewayToolCall("terminal_null_placeholder_exec", "terminal", {
+        action: "exec",
+        command: `printf NULL_PLACEHOLDER_OK > ${JSON.stringify(marker)}`,
+        cwd: "null",
+        profile: "null",
+        session_id: "null",
+        shell: "null",
+        backend: "null",
+        return_when: "null",
+        wait_ceiling_ms: "null",
+        dimensions: "null",
+        initial_monitors: "null",
+        cursor_segment: "null",
+        cursor_offset: "null",
+        after_event_id: "null",
+        acknowledge_event_id: "null",
+        max_events: "null",
+        write: "null",
+        lease: "null",
+        monitor: "null",
+        task_id: "NULL",
+        workspace_root: " null ",
+        rows: "null",
+        columns: "null",
+        signal: "null",
+        close_policy: "null",
+      }),
+      (body) => {
+        const result = toolResultText(body, "terminal_null_placeholder_exec");
+        expect(result).not.toContain("invalid_action_fields");
+        expect(readFileSync(marker, "utf8")).toBe("NULL_PLACEHOLDER_OK");
+        return fakeGatewayFinalText("Terminal null placeholders verified");
+      },
+    ]);
+    gateways.push(gateway);
+    const active = await launch(fixture, gateway);
+
+    await active.sendText("Run the fixture command exactly once.");
+    await active.waitForText("Terminal null placeholders verified", TIMEOUT);
+    expect(gateway.requests).toHaveLength(2);
+
+    const scrollback = await active.captureFullScrollback();
+    expect(countOccurrences(scrollback, "Ran printf NULL_PLACEHOLDER_OK")).toBe(1);
+    expect(scrollback).not.toContain("invalid field");
+    expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");
+  },
+  TIMEOUT,
+);
+
+test.skipIf(!tmuxAvailable())(
+  "terminal repeated unknown correction with a valid neighbor stops without request three",
   async () => {
     const fixture = createFixture("fx-tui-terminal-correction-loop-");
     const firstBatch = [
@@ -1523,18 +1578,20 @@ test.skipIf(!tmuxAvailable())(
           .toBeDefined();
         return fakeTerminalToolBatch(secondBatch);
       },
-      () => fakeGatewayFinalText("Continued after the invalid terminal calls."),
+      () => {
+        throw new Error("terminal correction loop issued request three");
+      },
     ]);
     gateways.push(gateway);
     const active = await launch(fixture, gateway);
 
     await active.sendText("Exercise repeated terminal validation corrections.");
     const pane = await active.waitForText(
-      "Continued after the invalid terminal calls.",
+      "Repeated terminal validation failures stopped the tool loop",
       TIMEOUT,
     );
-    expect(pane).not.toContain("stopped the tool loop");
-    expect(gateway.requests).toHaveLength(3);
+    expect(pane).toContain("no terminal effect");
+    expect(gateway.requests).toHaveLength(2);
     expect(terminalRecords(fixture.home)).toEqual([]);
     const trace = readFileSync(fixture.tracePath, "utf8");
     expect(trace).not.toContain("event=permission_requested");

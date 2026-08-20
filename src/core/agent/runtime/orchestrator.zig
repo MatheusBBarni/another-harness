@@ -2075,9 +2075,16 @@ fn currentRootRequest(
         "";
 }
 
-const max_automatic_denial_response_groups: usize = 3;
+const AutomaticRecoveryDisposition = enum {
+    continue_auto_review,
+    finish_with_normal_blocker,
+};
 
-fn automaticPermissionPhase(messages: []const ChatMessage) permission_auto_classifier.AutoPermissionPhase {
+const max_automatic_denial_response_groups: usize = 4;
+const automatic_permission_recovery_fallback =
+    "I couldn't continue because the required actions were blocked by automatic safety checks. I need a different approach or explicit direction from you.";
+
+fn automatic_recovery_disposition(messages: []const ChatMessage) AutomaticRecoveryDisposition {
     var blocked_groups: usize = 0;
     var index: usize = 0;
     while (index < messages.len) : (index += 1) {
@@ -2112,9 +2119,9 @@ fn automaticPermissionPhase(messages: []const ChatMessage) permission_auto_class
         index = group_end -| 1;
     }
     return if (blocked_groups >= max_automatic_denial_response_groups)
-        .human_approval
+        .finish_with_normal_blocker
     else
-        .automatic_review;
+        .continue_auto_review;
 }
 
 fn responseGroupComplete(
@@ -2149,8 +2156,18 @@ test "automatic recovery counts completed response groups and resets after succe
     @memcpy(three_then_current[4..6], &blocked_group);
     three_then_current[6] = .{ .role = .assistant, .tool_calls = &.{.{ .id = "current", .name = "run_command", .arguments_json = "{}" }} };
     try std.testing.expectEqual(
-        permission_auto_classifier.AutoPermissionPhase.human_approval,
-        automaticPermissionPhase(&three_then_current),
+        AutomaticRecoveryDisposition.continue_auto_review,
+        automatic_recovery_disposition(&three_then_current),
+    );
+
+    var four_blocked: [8]ChatMessage = undefined;
+    @memcpy(four_blocked[0..2], &blocked_group);
+    @memcpy(four_blocked[2..4], &blocked_group);
+    @memcpy(four_blocked[4..6], &blocked_group);
+    @memcpy(four_blocked[6..8], &blocked_group);
+    try std.testing.expectEqual(
+        AutomaticRecoveryDisposition.finish_with_normal_blocker,
+        automatic_recovery_disposition(&four_blocked),
     );
 
     const success = ChatMessage{
@@ -2166,8 +2183,8 @@ test "automatic recovery counts completed response groups and resets after succe
     reset[8] = blocked_group[0];
     reset[9] = blocked_group[1];
     try std.testing.expectEqual(
-        permission_auto_classifier.AutoPermissionPhase.automatic_review,
-        automaticPermissionPhase(&reset),
+        AutomaticRecoveryDisposition.continue_auto_review,
+        automatic_recovery_disposition(&reset),
     );
 }
 
@@ -2189,8 +2206,8 @@ test "automatic recovery resets after non automatic permission denials" {
         };
 
         try std.testing.expectEqual(
-            permission_auto_classifier.AutoPermissionPhase.automatic_review,
-            automaticPermissionPhase(&messages),
+            AutomaticRecoveryDisposition.continue_auto_review,
+            automatic_recovery_disposition(&messages),
         );
     }
 }
@@ -2208,8 +2225,8 @@ test "parallel automatic denials count as one response group" {
         .{ .role = .assistant, .tool_calls = &calls },
     };
     try std.testing.expectEqual(
-        permission_auto_classifier.AutoPermissionPhase.automatic_review,
-        automaticPermissionPhase(&messages),
+        AutomaticRecoveryDisposition.continue_auto_review,
+        automatic_recovery_disposition(&messages),
     );
 }
 
@@ -2237,16 +2254,16 @@ test "a mixed parallel response group resets recovery regardless result order" {
     success_first[9] = current;
     denial_first[9] = current;
     try std.testing.expectEqual(
-        permission_auto_classifier.AutoPermissionPhase.automatic_review,
-        automaticPermissionPhase(&success_first),
+        AutomaticRecoveryDisposition.continue_auto_review,
+        automatic_recovery_disposition(&success_first),
     );
     try std.testing.expectEqual(
-        permission_auto_classifier.AutoPermissionPhase.automatic_review,
-        automaticPermissionPhase(&denial_first),
+        AutomaticRecoveryDisposition.continue_auto_review,
+        automatic_recovery_disposition(&denial_first),
     );
 }
 
-test "automatic permission phase depends only on completed response groups" {
+test "automatic recovery disposition depends only on completed response groups" {
     const denied = "{\"error\":{\"type\":\"tool_permission_denied\",\"reason\":\"auto_denied\"}}";
     const messages = [_]ChatMessage{
         .{ .role = .assistant, .tool_calls = &.{.{ .id = "one", .name = "run_command", .arguments_json = "{}" }} },
@@ -2258,20 +2275,31 @@ test "automatic permission phase depends only on completed response groups" {
     };
 
     try std.testing.expectEqual(
-        permission_auto_classifier.AutoPermissionPhase.automatic_review,
-        automaticPermissionPhase(&.{}),
+        AutomaticRecoveryDisposition.continue_auto_review,
+        automatic_recovery_disposition(&.{}),
     );
     try std.testing.expectEqual(
-        permission_auto_classifier.AutoPermissionPhase.automatic_review,
-        automaticPermissionPhase(messages[0..2]),
+        AutomaticRecoveryDisposition.continue_auto_review,
+        automatic_recovery_disposition(messages[0..2]),
     );
     try std.testing.expectEqual(
-        permission_auto_classifier.AutoPermissionPhase.automatic_review,
-        automaticPermissionPhase(messages[0..4]),
+        AutomaticRecoveryDisposition.continue_auto_review,
+        automatic_recovery_disposition(messages[0..4]),
     );
     try std.testing.expectEqual(
-        permission_auto_classifier.AutoPermissionPhase.human_approval,
-        automaticPermissionPhase(&messages),
+        AutomaticRecoveryDisposition.continue_auto_review,
+        automatic_recovery_disposition(&messages),
+    );
+
+    var with_unrelated_prefix: [10]ChatMessage = undefined;
+    with_unrelated_prefix[0] = .{ .role = .user, .content = "unrelated earlier request" };
+    with_unrelated_prefix[1] = .{ .role = .assistant, .content = "unrelated earlier response" };
+    @memcpy(with_unrelated_prefix[2..8], &messages);
+    with_unrelated_prefix[8] = .{ .role = .assistant, .tool_calls = &.{.{ .id = "four", .name = "run_command", .arguments_json = "{}" }} };
+    with_unrelated_prefix[9] = .{ .role = .tool, .content = denied, .tool_call_id = "four", .tool_result_status = .failure };
+    try std.testing.expectEqual(
+        AutomaticRecoveryDisposition.finish_with_normal_blocker,
+        automatic_recovery_disposition(&with_unrelated_prefix),
     );
 }
 
@@ -2292,8 +2320,8 @@ test "incomplete parallel response groups do not advance automatic recovery" {
     };
 
     try std.testing.expectEqual(
-        permission_auto_classifier.AutoPermissionPhase.automatic_review,
-        automaticPermissionPhase(&messages),
+        AutomaticRecoveryDisposition.continue_auto_review,
+        automatic_recovery_disposition(&messages),
     );
 }
 
@@ -2603,7 +2631,6 @@ fn processQueuedPromptLoop(
     var restore_recovery_source = job.recovery_checkpoint != null;
     var step: usize = 0;
     while (agent_steps.allowsStep(config.agent_step_limit, step)) : (step += 1) {
-        const auto_permission_phase = automaticPermissionPhase(within_turn_suffix.items);
         current_step_index = step + 1;
         const step_ctx: TraceContext = .{ .turn_id = turn_id, .step_id = debug_trace.nextStepId(), .subagent_id = config.subagent_id };
         const presentation_group_id = runtime_tool_presentation.presentationGroupForStep(
@@ -2618,6 +2645,22 @@ fn processQueuedPromptLoop(
             finish_trace.finish("interrupted");
             return;
         }
+        if (automatic_recovery_disposition(within_turn_suffix.items) == .finish_with_normal_blocker) {
+            try finish_automatic_permission_recovery(
+                deps,
+                finalization,
+                arena,
+                job,
+                within_turn_suffix.items,
+                &summary_accumulator,
+                stop_state,
+                &finish_trace,
+                step_ctx,
+            );
+            return;
+        }
+        const auto_permission_phase: permission_auto_classifier.AutoPermissionPhase =
+            .automatic_review;
         _ = overlay_arena_state.reset(.retain_capacity);
         const overlay_arena = overlay_arena_state.allocator();
         var ephemeral_overlay: std.ArrayList(ChatMessage) = .empty;
@@ -7347,6 +7390,39 @@ fn processQueuedPromptLoop(
         }
     }
 
+    if (automatic_recovery_disposition(within_turn_suffix.items) == .finish_with_normal_blocker) {
+        if (config.cancel_flag.load(.seq_cst)) {
+            runtime_telemetry.traceCancelObserved(last_step_ctx, false);
+            try runtime_interruption.persistInterruptedTurnOnce(
+                deps,
+                finalization,
+                job,
+                null,
+                null,
+                completed_tool_names.items,
+                &interrupted_persisted,
+                last_step_ctx,
+                within_turn_suffix.items,
+                stop_state.retained_candidate,
+                &stop_state.terminal_materializing,
+            );
+            finish_trace.finish("interrupted");
+            return;
+        }
+        try finish_automatic_permission_recovery(
+            deps,
+            finalization,
+            arena,
+            job,
+            within_turn_suffix.items,
+            &summary_accumulator,
+            stop_state,
+            &finish_trace,
+            last_step_ctx,
+        );
+        return;
+    }
+
     runtime_telemetry.traceStepLimitReached(.{
         .ctx = last_step_ctx,
         .step_index = current_step_index,
@@ -7367,6 +7443,55 @@ fn processQueuedPromptLoop(
         &finish_trace,
         config.step_limit_notice,
         "step_limit",
+    );
+}
+
+fn finish_automatic_permission_recovery(
+    deps: *const AgentRuntimeDeps,
+    finalization: *TurnFinalizationGuard,
+    arena: Allocator,
+    job: QueuedPrompt,
+    current_turn_messages: []const ChatMessage,
+    summary_accumulator: *runtime_telemetry.TurnSummaryAccumulator,
+    stop_state: *CommonStopState,
+    finish_trace: *PromptFinishTrace,
+    trace_ctx: TraceContext,
+) !void {
+    debug_trace.eventf(
+        "permission",
+        "automatic_recovery_exhausted",
+        trace_ctx,
+        "blocked_response_groups={d}",
+        .{max_automatic_denial_response_groups},
+    );
+    try deps.push_text(
+        deps.ctx,
+        .{ .assistant_source = automatic_permission_recovery_fallback },
+    );
+    try deps.push_text(
+        deps.ctx,
+        .{ .assistant_rendered = automatic_permission_recovery_fallback },
+    );
+    try deps.push_text(deps.ctx, .{ .assistant_rendered = "\n" });
+
+    const assistant_text = try hooks.prompt.joinVisibleSegments(
+        arena,
+        stop_state.retained_candidate,
+        automatic_permission_recovery_fallback,
+    );
+    stop_state.terminal_materializing = stop_state.retained_candidate != null;
+    try finishCommonAssistantTerminal(
+        deps,
+        finalization,
+        arena,
+        job,
+        current_turn_messages,
+        summary_accumulator,
+        assistant_text,
+        .completed,
+        null,
+        finish_trace,
+        "automatic_permission_recovery",
     );
 }
 

@@ -757,9 +757,13 @@ const protocolFixtureDefinitions = {
     range: { minimum: 3, current: 4 },
     capabilities: 3,
   },
-  current_checkpoint: {
+  signal_limited: {
     range: { minimum: 4, current: 5 },
     capabilities: 15,
+  },
+  current_checkpoint: {
+    range: { minimum: 4, current: 5 },
+    capabilities: 31,
   },
 } as const;
 
@@ -914,7 +918,7 @@ class FrameClient {
 async function handshake(
   socketPath: string,
   clientRange: Range,
-  capabilities = 15,
+  capabilities = 31,
   helloRevision = clientRange.current,
 ): Promise<{
   client: FrameClient;
@@ -4605,7 +4609,7 @@ test.each([
 
 test("poll path escapes preserve exact failures only for capable peers", async () => {
   for (const testCase of [
-    { capabilities: 15, expectedCode: "path_outside_workspace" },
+    { capabilities: 31, expectedCode: "path_outside_workspace" },
     { capabilities: 7, expectedCode: "invalid_request" },
   ]) {
     const home = makeHome();
@@ -9830,6 +9834,110 @@ test("private client replaces an endpoint only after dead identity and free-lock
   hostPids.pop();
 });
 
+test("current client rejects same revision host without complete signal capability before start", async () => {
+  const home = makeHome();
+  const paths = hostPaths(home);
+  const fixture = protocolFixtureDefinitions.signal_limited;
+  const host = startHostWithAdvertisedProtocol(
+    home,
+    700,
+    protocolFixtureEnv(fixture),
+  );
+  await waitFor(() => existsSync(paths.socket) && existsSync(paths.identity));
+  const identityBefore = readFileSync(paths.identity, "utf8");
+
+  const rejected = await runClientFixture(home, 700, {
+    FX_TERMINAL_CAPABILITY_FIXTURE: "start",
+  });
+  expect(rejected).toEqual({
+    exitCode: 0,
+    stdout: '{"kind":"unavailable","correlation":1,"missing_capabilities":16}\n',
+    stderr: "",
+  });
+  expect(host.exitCode).toBeNull();
+  expect(readFileSync(paths.identity, "utf8")).toBe(identityBefore);
+  const terminalState = join(
+    home,
+    ".fx",
+    "sessions",
+    TERMINAL_OWNER_SESSION,
+    "terminal",
+    "state",
+  );
+  expect(
+    existsSync(terminalState)
+      ? readdirSync(terminalState).filter((name) => name.startsWith("record-"))
+      : [],
+  ).toEqual([]);
+
+  expect(await waitForExit(host)).toBe(0);
+});
+
+test("current client permits graceful close and rejects force close on signal limited host", async () => {
+  const home = makeHome();
+  const paths = hostPaths(home);
+  const fixture = protocolFixtureDefinitions.signal_limited;
+  const host = startHostWithAdvertisedProtocol(
+    home,
+    1_500,
+    protocolFixtureEnv(fixture),
+  );
+  await waitFor(() => existsSync(paths.socket) && existsSync(paths.identity));
+  const identityBefore = readFileSync(paths.identity, "utf8");
+  const previousClient = await handshake(
+    paths.socket,
+    fixture.range,
+    fixture.capabilities,
+    fixture.range.current,
+  );
+  const started = success(await requestAction(
+    previousClient.client,
+    previousClient.revision!,
+    451,
+    "start",
+    {
+      cwd: home,
+      command: "printf 'authority-reload-ready\\n'; sleep 30",
+      shell: { executable: { path: TERMINAL_FIXTURE_SHELL, clean_start: true } },
+      backend: "native",
+      return_when: { match: "authority-reload-ready" },
+      wait_ceiling_ms: 5_000,
+      dimensions: { rows: 24, columns: 80 },
+      initial_monitors: [],
+    },
+  ), "start");
+  const sessionId = (started.session as { session_id: string }).session_id;
+  previousClient.client.close();
+
+  const forceRejected = await runClientFixture(home, 1_500, {
+    FX_TERMINAL_CAPABILITY_FIXTURE: "force_close",
+    FX_TERMINAL_AUTHORITY_FIXTURE_COMPAT: "1",
+    FX_TERMINAL_AUTHORITY_SESSION_ID: sessionId,
+  });
+  expect(forceRejected).toEqual({
+    exitCode: 0,
+    stdout: '{"kind":"unavailable","correlation":1,"missing_capabilities":16}\n',
+    stderr: "",
+  });
+  expect(durableTerminalRecordFor(home, sessionId)).toMatchObject({
+    lifecycle: "running",
+  });
+  expect(readFileSync(paths.identity, "utf8")).toBe(identityBefore);
+
+  const gracefulClosed = await runClientFixture(home, 1_500, {
+    FX_TERMINAL_AUTHORITY_FIXTURE: "reload",
+    FX_TERMINAL_AUTHORITY_FIXTURE_COMPAT: "1",
+    FX_TERMINAL_AUTHORITY_SESSION_ID: sessionId,
+  });
+  expect(gracefulClosed).toEqual({
+    exitCode: 0,
+    stdout: '{"read":true,"inspect":true,"closed":true}\n',
+    stderr: "",
+  });
+  expect(readFileSync(paths.identity, "utf8")).toBe(identityBefore);
+  expect(await waitForExit(host)).toBe(0);
+});
+
 test("protocol fixtures advertise exact evidence and interoperate in both directions", async () => {
   const advertised: Record<string, unknown> = {};
   for (const [name, fixture] of Object.entries(protocolFixtureDefinitions)) {
@@ -9859,7 +9967,7 @@ test("protocol fixtures advertise exact evidence and interoperate in both direct
 
   const directionEvidence: Array<Record<string, unknown>> = [];
   {
-    const direction = "current client to previous contract host";
+    const direction = "current client safe action to previous contract host";
     const previous = protocolFixtureDefinitions.previous;
     const home = makeHome();
     const paths = hostPaths(home);
@@ -9870,41 +9978,10 @@ test("protocol fixtures advertise exact evidence and interoperate in both direct
     );
     await waitFor(() => existsSync(paths.socket) && existsSync(paths.identity));
     const hostIdentity = readFileSync(paths.identity, "utf8");
-    const started = await runClientFixture(home, 300, {
-      FX_TERMINAL_AUTHORITY_FIXTURE: "start",
-      FX_TERMINAL_AUTHORITY_FIXTURE_COMPAT: "1",
-    });
-    expect(started, direction).toMatchObject({
+    const inspected = await runClientFixture(home, 300);
+    expect(inspected, direction).toEqual({
       exitCode: 0,
-      stderr: "",
-    });
-    const startValue = JSON.parse(started.stdout) as {
-      session_id: string;
-      generation: number;
-      minted: boolean;
-    };
-    expect(startValue, direction).toEqual({
-      session_id: expect.any(String),
-      generation: 1,
-      minted: true,
-    });
-    let reloaded = await runClientFixture(home, 300, {
-      FX_TERMINAL_AUTHORITY_FIXTURE: "reload",
-      FX_TERMINAL_AUTHORITY_SESSION_ID: startValue.session_id,
-    });
-    if (
-      reloaded.exitCode !== 0 && reloaded.stdout === "" &&
-      reloaded.stderr === ""
-    ) {
-      console.error(`Retrying ${direction} reload fixture`);
-      reloaded = await runClientFixture(home, 300, {
-        FX_TERMINAL_AUTHORITY_FIXTURE: "reload",
-        FX_TERMINAL_AUTHORITY_SESSION_ID: startValue.session_id,
-      });
-    }
-    expect(reloaded, direction).toEqual({
-      exitCode: 0,
-      stdout: '{"read":true,"inspect":true,"closed":true}\n',
+      stdout: '{"kind":"response","correlation":1,"code":"authority_denied"}\n',
       stderr: "",
     });
     expect(readFileSync(paths.identity, "utf8"), direction).toBe(hostIdentity);
@@ -9913,7 +9990,7 @@ test("protocol fixtures advertise exact evidence and interoperate in both direct
       direction,
       client: "active_FX_BIN",
       host: "previous_contract",
-      result: "passed",
+      result: "safe_request_passed",
     });
   }
 
