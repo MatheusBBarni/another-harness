@@ -1444,6 +1444,23 @@ pub const CreditsSnapshot = struct {
         defer out.deinit();
 
         if (self.err_message) |msg| return alloc.dupe(u8, msg);
+        if (self.origin == .grok) {
+            var wrote_grok = false;
+            if (self.plan) |plan| {
+                try out.writer.print("plan={s}", .{plan});
+                wrote_grok = true;
+            }
+            if (self.used) |used| {
+                if (wrote_grok) try out.writer.writeByte('\n');
+                try out.writer.print("used={s}", .{used});
+                wrote_grok = true;
+            }
+            if (self.balance) |balance| {
+                if (wrote_grok) try out.writer.writeByte('\n');
+                try out.writer.print("balance={s}", .{balance});
+            }
+            return try out.toOwnedSlice();
+        }
         var wrote_field = false;
         if (self.balance) |balance| {
             try out.writer.print("balance={s}", .{balance});
@@ -2729,6 +2746,22 @@ test "core credits snapshot renders parsed, raw, and empty fallbacks" {
     const empty_text = try (CreditsSnapshot{}).renderText(std.testing.allocator);
     defer std.testing.allocator.free(empty_text);
     try std.testing.expectEqualStrings("[credits] no data returned by gateway\n", empty_text);
+}
+
+test "core credits snapshot interactive grok body omits credits prefix" {
+    const grok = CreditsSnapshot{
+        .origin = .grok,
+        .plan = "SuperGrok",
+        .used = "90% weekly",
+        .balance = "$0.00",
+    };
+    const text = try grok.renderInteractiveBody(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(
+        "plan=SuperGrok\nused=90% weekly\nbalance=$0.00",
+        text,
+    );
+    try std.testing.expect(std.mem.find(u8, text, "[credits]") == null);
 }
 
 test "core credits snapshot renders xai-usage only for grok origin" {

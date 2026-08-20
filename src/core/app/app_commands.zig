@@ -1615,7 +1615,10 @@ pub fn Handlers(comptime App: type) type {
                 .model = selected_model,
             });
             defer snapshot.deinit(app.alloc);
-            const text = snapshot.renderForView(app.alloc, view) catch {
+            const text = (if (view == .xai_usage)
+                snapshot.renderForView(app.alloc, view)
+            else
+                snapshot.renderInteractiveBody(app.alloc)) catch {
                 try app.writeDomainNotice(.{
                     .topic = "credits",
                     .tone = .@"error",
@@ -4382,7 +4385,7 @@ test "credits command renders through the composed provider" {
     try std.testing.expect(app.saw_expected_input);
     try std.testing.expectEqualStrings("credits", app.notice_topic.?);
     try std.testing.expectEqual(types.NoticeTone.neutral, app.notice_tone.?);
-    try std.testing.expectEqualStrings("[credits] balance=10\n", app.notice_body.items);
+    try std.testing.expectEqualStrings("balance=10", app.notice_body.items);
 }
 
 test "credits command lookup includes selected model and matches cli renderer" {
@@ -4395,7 +4398,7 @@ test "credits command lookup includes selected model and matches cli renderer" {
     try std.testing.expect(app.saw_expected_input);
     try std.testing.expect(app.saw_selected_model);
     try std.testing.expectEqualStrings("credits", app.notice_topic.?);
-    try std.testing.expectEqualStrings("[credits] balance=10\n", app.notice_body.items);
+    try std.testing.expectEqualStrings("balance=10", app.notice_body.items);
 }
 
 test "credits command refreshes SuperGrok cache on grok success" {
