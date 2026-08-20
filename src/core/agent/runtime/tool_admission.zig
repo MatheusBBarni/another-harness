@@ -296,10 +296,17 @@ fn terminalValidationDigestDecision(
     };
 }
 
+pub const repeated_terminal_validation_notice =
+    "Repeated terminal validation failures disabled the terminal tool for this turn. The invalid terminal calls were not executed and produced no terminal effect. Use grep, read, or other tools.";
+
+pub const terminal_disabled_for_turn_output =
+    "Terminal is disabled for the rest of this turn after repeated invalid action fields. Use grep, read, or other tools.";
+
 pub const TerminalValidationRetryState = struct {
     previous: std.ArrayList(TerminalValidationDigest) = .empty,
     current: std.ArrayList(TerminalValidationDigest) = .empty,
     stop_after_batch: bool = false,
+    disabled: bool = false,
 
     pub fn deinit(self: *TerminalValidationRetryState, alloc: Allocator) void {
         self.previous.deinit(alloc);
@@ -312,12 +319,22 @@ pub const TerminalValidationRetryState = struct {
         self.stop_after_batch = false;
     }
 
+    pub fn isDisabled(self: *const TerminalValidationRetryState) bool {
+        return self.disabled;
+    }
+
+    pub fn disable(self: *TerminalValidationRetryState) void {
+        self.disabled = true;
+        self.stop_after_batch = false;
+    }
+
     pub fn observe(
         self: *TerminalValidationRetryState,
         alloc: Allocator,
         call: ToolCall,
         model_output: []const u8,
     ) Allocator.Error!void {
+        if (self.disabled) return;
         if (!std.mem.eql(u8, call.name, "terminal")) return;
         if (try tool_result_errors.inspectTerminalActionFieldCorrection(
             alloc,
@@ -384,6 +401,41 @@ test "terminal validation retry state retains independent batch corrections" {
     try state.observe(alloc, call, correction_s);
     try std.testing.expectEqual(@as(usize, 2), state.current.items.len);
     try std.testing.expect(state.finishBatch());
+}
+
+test "terminal validation retry state stops observing after disable" {
+    const alloc = std.testing.allocator;
+    const correction = try tool_result_errors.terminalActionFieldCorrectionJson(alloc, .{
+        .action = "start",
+        .invalid_fields = &.{"session_id"},
+        .missing_fields = &.{},
+        .allowed_fields = &.{ "action", "command" },
+        .conflicts = &.{},
+    });
+    defer alloc.free(correction);
+    const call: ToolCall = .{
+        .id = "terminal-call",
+        .name = "terminal",
+        .arguments_json = "{}",
+    };
+
+    var state: TerminalValidationRetryState = .{};
+    defer state.deinit(alloc);
+    state.beginBatch();
+    try state.observe(alloc, call, correction);
+    try std.testing.expect(!state.finishBatch());
+
+    state.beginBatch();
+    try state.observe(alloc, call, correction);
+    try std.testing.expect(state.finishBatch());
+    state.disable();
+    try std.testing.expect(state.isDisabled());
+    try std.testing.expect(!state.stop_after_batch);
+
+    state.beginBatch();
+    try state.observe(alloc, call, correction);
+    try std.testing.expectEqual(@as(usize, 0), state.current.items.len);
+    try std.testing.expect(!state.finishBatch());
 }
 
 test "turn permission recovery binds approval exactly and deduplicates static wrappers" {
@@ -1092,6 +1144,18 @@ pub fn registeredToolValidationFailure(hooks: *const AgentRuntimeDeps, arena: Al
         .not_registered, .valid => null,
         .failure => |reason| .{ .model_output = reason, .status = .failure },
     };
+}
+
+pub fn terminalCallAdmissionFailure(
+    retry: *const TerminalValidationRetryState,
+    hooks: *const AgentRuntimeDeps,
+    arena: Allocator,
+    call: ToolCall,
+) !?ToolExecutionResult {
+    if (retry.isDisabled() and std.mem.eql(u8, call.name, "terminal")) {
+        return .{ .model_output = terminal_disabled_for_turn_output, .status = .failure };
+    }
+    return registeredToolValidationFailure(hooks, arena, call);
 }
 
 pub fn toolAvailabilityFailure(hooks: *const AgentRuntimeDeps, arena: Allocator, call: ToolCall) !?ToolExecutionResult {

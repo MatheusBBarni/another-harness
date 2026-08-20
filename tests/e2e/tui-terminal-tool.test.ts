@@ -1474,7 +1474,7 @@ test.skipIf(!tmuxAvailable())(
 );
 
 test.skipIf(!tmuxAvailable())(
-  "terminal repeated unknown correction with a valid neighbor stops without request three",
+  "terminal repeated unknown correction disables terminal and continues the turn",
   async () => {
     const fixture = createFixture("fx-tui-terminal-correction-loop-");
     const firstBatch = [
@@ -1523,8 +1523,9 @@ test.skipIf(!tmuxAvailable())(
           .toBeDefined();
         return fakeTerminalToolBatch(secondBatch);
       },
-      () => {
-        throw new Error("terminal correction loop issued request three");
+      (body) => {
+        expect(body).toContain("disabled the terminal tool");
+        return fakeGatewayFinalText("Continued after terminal was disabled.");
       },
     ]);
     gateways.push(gateway);
@@ -1532,11 +1533,12 @@ test.skipIf(!tmuxAvailable())(
 
     await active.sendText("Exercise repeated terminal validation corrections.");
     const pane = await active.waitForText(
-      "Repeated terminal validation failures stopped the tool loop",
+      "Continued after terminal was disabled.",
       TIMEOUT,
     );
+    expect(pane).toContain("disabled the terminal tool for this turn");
     expect(pane).toContain("no terminal effect");
-    expect(gateway.requests).toHaveLength(2);
+    expect(gateway.requests).toHaveLength(3);
     expect(terminalRecords(fixture.home)).toEqual([]);
     const trace = readFileSync(fixture.tracePath, "utf8");
     expect(trace).not.toContain("event=permission_requested");

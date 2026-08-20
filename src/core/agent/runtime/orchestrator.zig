@@ -61,7 +61,7 @@ const CredentialRefreshMode = runtime_deps.CredentialRefreshMode;
 
 const http_error_detail_max_bytes: usize = 4096;
 const repeated_terminal_validation_notice =
-    "Repeated terminal validation failures stopped the tool loop. The invalid terminal calls were not executed and produced no terminal effect.";
+    runtime_tool_admission.repeated_terminal_validation_notice;
 const Config = runtime_config.Config;
 const LifecycleContext = runtime_lifecycle.LifecycleContext;
 const PreparedToolCall = runtime_lifecycle.PreparedToolCall;
@@ -130,6 +130,7 @@ fn rejectPermissionForLiveAuthority(
 
 const PreparationClassifierContext = struct {
     deps: *const AgentRuntimeDeps,
+    terminal_validation_retry: *runtime_tool_admission.TerminalValidationRetryState,
 };
 
 fn preparationExecutionStatus(status: runtime_tool_contracts.ToolExecutionStatus) tool_preparation.ToolStatus {
@@ -149,7 +150,8 @@ fn prepareValidationTerminal(
     call: ToolCall,
 ) anyerror!?tool_preparation.CallbackTerminal {
     const ctx: *PreparationClassifierContext = @ptrCast(@alignCast(raw_ctx.?));
-    const execution = try runtime_tool_admission.registeredToolValidationFailure(
+    const execution = try runtime_tool_admission.terminalCallAdmissionFailure(
+        ctx.terminal_validation_retry,
         ctx.deps,
         alloc,
         call,
@@ -4413,6 +4415,7 @@ fn processQueuedPromptLoop(
         defer preparation_batch.deinit(arena, arena);
         var classifier_ctx: PreparationClassifierContext = .{
             .deps = deps,
+            .terminal_validation_retry = &terminal_validation_retry,
         };
         if (deps.context_enabled) {
             for (prepared_tool_calls, 0..) |prepared_call, i| {
@@ -4751,7 +4754,12 @@ fn processQueuedPromptLoop(
                             },
                         }
                     }
-                    if (try runtime_tool_admission.registeredToolValidationFailure(deps, arena, parallel_call)) |failure| {
+                    if (try runtime_tool_admission.terminalCallAdmissionFailure(
+                        &terminal_validation_retry,
+                        deps,
+                        arena,
+                        parallel_call,
+                    )) |failure| {
                         precomputed_results[group_index] = failure;
                         continue;
                     }
@@ -5488,7 +5496,12 @@ fn processQueuedPromptLoop(
             else
                 true;
             if (requires_legacy_classification) {
-                if (try runtime_tool_admission.registeredToolValidationFailure(deps, arena, tool_call)) |execution| {
+                if (try runtime_tool_admission.terminalCallAdmissionFailure(
+                    &terminal_validation_retry,
+                    deps,
+                    arena,
+                    tool_call,
+                )) |execution| {
                     try terminal_validation_retry.observe(
                         arena,
                         tool_call,
@@ -7210,29 +7223,12 @@ fn processQueuedPromptLoop(
                 deps.ctx,
                 repeated_terminal_validation_notice,
             );
-            const assistant_text = if (stop_state.retained_candidate != null)
-                try hooks.prompt.joinVisibleSegments(
-                    arena,
-                    stop_state.retained_candidate,
-                    stop_state.latest_partial,
-                )
-            else
-                "";
-            stop_state.terminal_materializing = true;
-            try finishCommonAssistantTerminal(
-                deps,
-                finalization,
-                arena,
-                job,
-                within_turn_suffix.items,
-                &summary_accumulator,
-                assistant_text,
-                .completed,
-                null,
-                &finish_trace,
-                "terminal_validation_retry",
-            );
-            return;
+            try within_turn_suffix.append(arena, .{
+                .role = .system,
+                .content = repeated_terminal_validation_notice,
+            });
+            terminal_validation_retry.disable();
+            continue;
         }
         if (terminal_provider_completion) {
             const raw_final = completion.content.?;
