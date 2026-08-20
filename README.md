@@ -4,112 +4,91 @@
  ⠀⠀⠀⣠⣶⣿⣿⣷⣶⡶⣶⣶⣆⠀⠀⠀⣴⣶⣶⠆
  ⠀⠀⠀⠉⢹⣿⣿⠉⠉⠀⠘⢿⣿⣧⣀⣾⣿⡿⠃⠀             Tiny, open, embeddable, native coding agent.
  ⠀⠀⠀⠀⣼⣿⡏⠀⠀⠀⠀⠀⠻⣿⣿⣿⠟⠀⠀⠀
- ⠀⠀⠀⢀⣿⣿⠃⠀⠀⠀⠀⢠⣦⠘⢿⣿⣷⡀⠀⠀             curl -fsSL https://fx.sh/setup.sh | bash
+ ⠀⠀⠀⢀⣿⣿⠃⠀⠀⠀⠀⢠⣦⠘⢿⣿⣷⡀⠀⠀             Fork of vercel-labs/fx with subscription logins.
  ⠀⠀⠀⣸⣿⡟⠀⠀⠀⠀⣰⣿⣿⠗⠀⠻⣿⣿⣄⠀
- ⠀⠀⠀⣿⣿⠇⠀⠀⠀⠾⠿⠿⠋⠀⠀⠀⠘⠿⠿⠦             ⚠ Status: Experimental. Use at your own risk.
+ ⠀⠀⠀⣿⣿⠇⠀⠀⠀⠾⠿⠿⠋⠀⠀⠀⠘⠿⠿⠦             ⚠ Experimental. Use at your own risk.
   ⠀⣸⣿⡿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
  ⣿⣿⣿⠟⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
 ```
 
-fx is a coding agent harness and CLI written in Zig, optimized for research and embeddability as part of larger systems.
+**another-harness** is a direct fork of [vercel-labs/fx](https://github.com/vercel-labs/fx): a Zig coding-agent CLI aimed at a Unix-shell feel rather than a heavy TUI.
 
-It focuses on minimalism and performance across the board, from system prompt design to its tools, feature set, and 7.8 MiB binary.
+This fork keeps fx’s harness, tools, and Vercel AI Gateway path, and adds **sign-in with real model subscriptions** so you can run frontier models without a provider API key.
 
-For end users, its CLI output style and form factor aim to be closer to a Unix shell than a heavy "IDE in the terminal" TUI.
-
-It's open source (Apache-2.0), model-agnostic, and suitable for both local and cloud inference.
-
-## Install
-
-```bash
-curl -fsSL https://fx.sh/setup.sh | bash
-```
-
-## Run fx
-
-To get started, sign in with Vercel:
-
-```bash
-fx login
-```
-
-Or add an AI Gateway API key:
-
-```bash
-fx setup
-```
-
-Run fx from a project:
-
-```bash
-cd your_project
-fx
-```
-
-The current directory becomes the primary workspace. Enter a prompt, or run `/help` to browse interactive commands.
-
-List saved sessions with `fx sessions`. Resume the latest session for the current workspace, or select an exact session ID, through the same command group:
-
-```bash
-fx session resume last
-fx session resume --id <id>
-```
-
-Run `/feedback` to open the feedback form at `fx.sh/feedback`. It does not create a diagnostic or change the clipboard.
-
-Run `/trace` to create a private Markdown diagnostic with logs, session context, runtime state, permissions, and recent activity. On macOS, fx copies the `.md` file to the clipboard; on other platforms, it saves the file and prints its path. Review and redact the trace before sharing it.
-
-Use `fx ask` for a single request:
-
-```bash
-fx ask "explain the changes in this repository"
-```
-
-fx starts in `auto` permission mode. Routine understood development actions run directly; unresolved sensitive actions receive one bounded automatic review. A blocked action may return an exact approval request that the agent can send to fx's real permission screen. Ordinary question text never grants permission. See [Permissions](https://fx.sh/docs/configure-fx/permissions) for other modes and persistent rules.
-
-JSON and quiet requests stay noninteractive by default. Add `--prompt-permissions` to allow the existing Y/N approval prompt when stdin is a TTY. Prompt text is written to stderr, so JSON stdout stays parseable and quiet stdout stays empty. Piped or redirected stdin remains noninteractive and fails instead of waiting for approval.
-
-Inside a saved session, `/permissions remember <allow|deny> <tool-name> <arguments-json>` stores an exact confirmed rule without running the action. `/permissions` lists stable rule IDs, and `/permissions revoke <rule-id>` removes a stored rule even when its original workspace or file state has changed.
-
-## Embed fx
-
-fx builds as a native binary or WebAssembly. Applications embedding fx can provide network transport, session storage, configuration, permission handling, and terminal I/O.
-
-| Surface | Use |
+| Login | Status |
 | --- | --- |
-| `fx acp` | Connect the native agent to editors and other Agent Client Protocol clients. |
-| `createFxAgent()` | Embed the agent core in a JavaScript host with `fx-core.wasm`. |
-| `createFxTerminal()` | Embed the interactive terminal with `fx-term.wasm`. |
+| **SuperGrok / X Premium** | Works: `fx login grok` → Grok models on `api.x.ai` |
+| **ChatGPT / Codex** | In development ([#1](https://github.com/MatheusBBarni/another-harness/issues/1)) |
+| **Vercel** | Unchanged: `fx login` / `fx login vercel` or `fx setup` |
 
-The WebAssembly SDK is experimental. See the [WebAssembly SDK](sdk/README.md) and [ACP documentation](https://fx.sh/docs/using-fx/acp).
+> [!IMPORTANT]
+> The binary is still named `fx` and uses `~/.fx/`. Installing this build **collides** with official fx. Use `./zig-out/bin/fx` from this checkout until the rename ([#4](https://github.com/MatheusBBarni/another-harness/issues/4)).
 
-## Extend fx
+> [!NOTE]
+> Upstream docs still apply for permissions, skills, MCP, and ACP: [fx.sh/docs](https://fx.sh/docs). This README only covers how the fork differs.
 
-Add reusable instructions with [skills](https://fx.sh/docs/capabilities/skills), connect external tools through [MCP](https://fx.sh/docs/capabilities/mcp), or delegate independent work to [subagents](https://fx.sh/docs/capabilities/subagents). Project instruction files may link within their scope, and read-only workspace or compatibility skill directories may link within their owning workspace or home; managed skills, `SKILL.md` files, resources, and escaping links remain no-follow. `fx status` and `fx doctor` report an invalid trusted MCP profile without starting its servers.
+## Features
 
-## Documentation
+- Everything in upstream fx: interactive shell, `fx ask`, ACP, WASM embed, skills, MCP, subagents
+- SuperGrok OAuth (device code) — no `XAI_API_KEY`
+- Last login owns the session and default model (`xai/grok-4.6` after Grok sign-in)
+- Vercel AI Gateway still available for other models
+- Tracks `vercel-labs/fx` via `upstream`; catch-up workflow in `.agents/skills/catching-up-upstream`
 
-Read the [fx documentation](https://fx.sh/docs).
+## Build
 
-## Build from source
-
-Building fx requires [Zig 0.16.0+](https://ziglang.org/download/):
+Requires [Zig 0.16.0+](https://ziglang.org/download/):
 
 ```bash
-git clone https://github.com/vercel-labs/fx.git
-cd fx
+git clone https://github.com/MatheusBBarni/another-harness.git
+cd another-harness
 zig build -Doptimize=ReleaseSafe
 ./zig-out/bin/fx
 ```
 
-Run the test suite with `zig build test`. See [CONTRIBUTING.md](CONTRIBUTING.md) for development and contribution guidelines.
+Do **not** use `curl … fx.sh/setup.sh` for this fork. That installs official fx.
 
-## License
+## Run
 
-[Apache-2.0](LICENSE)
+```bash
+cd your_project
+/path/to/another-harness/zig-out/bin/fx
+```
 
-Third-party licenses and attributions are listed in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Sign in:
+
+```bash
+./zig-out/bin/fx login          # picker: Vercel or Grok
+./zig-out/bin/fx login grok     # SuperGrok / X Premium
+./zig-out/bin/fx login vercel   # Vercel AI Gateway
+./zig-out/bin/fx setup          # Gateway API key
+```
+
+The current directory is the workspace. Type a prompt or `/help`.
+
+```bash
+./zig-out/bin/fx ask "explain the changes in this repository"
+./zig-out/bin/fx session resume last
+```
+
+Starts in `auto` permission mode. See [Permissions](https://fx.sh/docs/configure-fx/permissions).
+
+## Embed and extend
+
+Same surfaces as upstream fx:
+
+| Surface | Use |
+| --- | --- |
+| `fx acp` | Agent Client Protocol |
+| `createFxAgent()` | JS host + `fx-core.wasm` |
+| `createFxTerminal()` | Interactive terminal + `fx-term.wasm` |
+
+Skills, MCP, and subagents: [fx capabilities](https://fx.sh/docs/capabilities/skills). WASM SDK: [sdk/README.md](sdk/README.md).
+
+## Documentation
+
+- Upstream product docs: [fx.sh/docs](https://fx.sh/docs)
+- This fork: [issues](https://github.com/MatheusBBarni/another-harness/issues) (Codex OAuth, SuperGrok usage, subagents, rename)
 
 ## Credits
 
