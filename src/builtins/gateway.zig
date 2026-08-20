@@ -2245,6 +2245,52 @@ test "built-in credits provider renders grok snapshot with percent" {
     try std.testing.expect(std.mem.find(u8, json, "\"percent\":12") != null);
 }
 
+test "built-in credits provider skips http when xai model has no key" {
+    xai_credits_gateway_calls = 0;
+    xai_credits_grok_calls = 0;
+
+    const gatewayFetch = struct {
+        fn fetch(
+            alloc: Allocator,
+            _: ?[]const u8,
+            _: []const u8,
+        ) anyerror!gateway_client.GetResult {
+            _ = alloc;
+            xai_credits_gateway_calls += 1;
+            return error.UnexpectedGatewayCreditsFetch;
+        }
+    }.fetch;
+
+    const grokFetch = struct {
+        fn fetch(
+            alloc: Allocator,
+            _: GrokBillingRequest,
+        ) anyerror!gateway_client.GetResult {
+            _ = alloc;
+            xai_credits_grok_calls += 1;
+            return error.UnexpectedGrokBillingFetch;
+        }
+    }.fetch;
+
+    var snapshot = fetchCreditsWithFetch(
+        std.testing.allocator,
+        .{
+            .credential = null,
+            .tenant = null,
+            .model = "xai/grok-4.6",
+        },
+        gatewayFetch,
+        grokFetch,
+    );
+    defer snapshot.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), xai_credits_gateway_calls);
+    try std.testing.expectEqual(@as(usize, 0), xai_credits_grok_calls);
+    try std.testing.expect(snapshot.err_message != null);
+    try std.testing.expect(std.mem.find(u8, snapshot.err_message.?, "fx login grok") != null);
+    try std.testing.expect(std.mem.find(u8, snapshot.err_message.?, "HTTP") == null);
+}
+
 test "built-in model catalog owns default and loopback target resolution" {
     const default_url = try modelCatalogUrl(std.testing.allocator, models_path, null);
     defer std.testing.allocator.free(default_url);
