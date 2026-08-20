@@ -2698,6 +2698,33 @@ test "core credits snapshot renders parsed, raw, and empty fallbacks" {
     try std.testing.expectEqualStrings("[credits] no data returned by gateway\n", empty_text);
 }
 
+test "core credits snapshot renders xai-usage only for grok origin" {
+    const grok = CreditsSnapshot{
+        .origin = .grok,
+        .plan = @constCast("SuperGrok"),
+        .used = @constCast("12% weekly"),
+        .balance = @constCast("$2.50"),
+        .percent = 12,
+        .period = @constCast("weekly"),
+        .reset_at = @constCast("2026-08-24T17:33:48.278Z"),
+        .prepaid_cents = 250,
+    };
+    const grok_usage = try grok.renderForView(std.testing.allocator, .xai_usage);
+    defer std.testing.allocator.free(grok_usage);
+    try std.testing.expectEqualStrings(
+        "SuperGrok 12% weekly · resets 2026-08-24T17:33:48.278Z · prepaid $2.50",
+        grok_usage,
+    );
+
+    const gateway = CreditsSnapshot{ .balance = "10", .used = "2", .plan = "pro" };
+    const gateway_usage = try gateway.renderForView(std.testing.allocator, .xai_usage);
+    defer std.testing.allocator.free(gateway_usage);
+    try std.testing.expectEqualStrings(
+        "[credits] balance=10\n[credits] used=2\n[credits] plan=pro\n",
+        gateway_usage,
+    );
+}
+
 test "core upgrade snapshot renders errors and statuses" {
     const error_snapshot = UpgradeSnapshot{
         .current = "0.2.9",
