@@ -28,6 +28,7 @@ const web_search_provider = @import("../core/tooling/web_search_provider.zig");
 const gateway_schema = @import("../core/tooling/gateway_schema.zig");
 const tool_advertisement = @import("../core/tooling/tool_advertisement.zig");
 const tool_dispatch = @import("../core/tooling/tool_dispatch.zig");
+const grok_billing = @import("../gateway/grok_billing.zig");
 const grok_route = @import("../gateway/grok_route.zig");
 const grok_stream = @import("../gateway/grok_stream.zig");
 const openai_compat = @import("../core/gateway/openai_compat.zig");
@@ -595,6 +596,16 @@ fn fetchCreditsWithFetch(
             return .{};
         };
         defer result.deinit(alloc);
+        if (result.status == .unauthorized or result.status == .forbidden) {
+            const message = grok_billing.renderBillingHttpError(
+                alloc,
+                @intFromEnum(result.status),
+                result.body,
+            ) catch {
+                return .{};
+            };
+            return .{ .err_message = message };
+        }
         return .{};
     }
 

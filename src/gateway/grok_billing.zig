@@ -141,7 +141,7 @@ fn renderXaiUsageText(alloc: Allocator, snapshot: Snapshot, rpm: ?[]const u8) ![
     return out.toOwnedSlice();
 }
 
-fn renderBillingHttpError(alloc: Allocator, status: u16, _: []const u8) ![]u8 {
+pub fn renderBillingHttpError(alloc: Allocator, status: u16, _: []const u8) ![]u8 {
     return std.fmt.allocPrint(
         alloc,
         "Grok billing HTTP {d}. Run fx login grok.",
