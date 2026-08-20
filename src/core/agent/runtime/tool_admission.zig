@@ -9,7 +9,6 @@ const debug_trace = @import("../../shared/debug_trace.zig");
 const file_mutation_contract = @import("../../tooling/file_mutation_contract.zig");
 const tooling_tool_admission = @import("../../tooling/tool_admission.zig");
 const tool_dispatch = @import("../../tooling/tool_dispatch.zig");
-const tool_result_errors = @import("../../tooling/tool_result_errors.zig");
 const test_builtin_tools = if (builtin.is_test)
     @import("../../../builtins/tools.zig")
 else
@@ -28,7 +27,6 @@ const TraceContext = debug_trace.TraceContext;
 const AgentRuntimeDeps = runtime_deps.AgentRuntimeDeps;
 const ToolExecutionResult = runtime_tool_contracts.ToolExecutionResult;
 
-const TerminalValidationDigest = [std.crypto.hash.sha2.Sha256.digest_length]u8;
 pub const PermissionActionId = [std.crypto.hash.sha2.Sha256.digest_length]u8;
 const max_turn_permission_denials: usize = 64;
 
@@ -268,122 +266,6 @@ fn normalizeRecoveryCommand(command: []const u8) []const u8 {
         }
     }
     return normalized;
-}
-
-const TerminalValidationDigestDecision = struct {
-    append_current: bool,
-    repeated: bool,
-};
-
-fn containsTerminalValidationDigest(
-    digests: []const TerminalValidationDigest,
-    wanted: TerminalValidationDigest,
-) bool {
-    for (digests) |digest| {
-        if (std.mem.eql(u8, digest[0..], wanted[0..])) return true;
-    }
-    return false;
-}
-
-fn terminalValidationDigestDecision(
-    previous: []const TerminalValidationDigest,
-    current: []const TerminalValidationDigest,
-    digest: TerminalValidationDigest,
-) TerminalValidationDigestDecision {
-    return .{
-        .append_current = !containsTerminalValidationDigest(current, digest),
-        .repeated = containsTerminalValidationDigest(previous, digest),
-    };
-}
-
-pub const TerminalValidationRetryState = struct {
-    previous: std.ArrayList(TerminalValidationDigest) = .empty,
-    current: std.ArrayList(TerminalValidationDigest) = .empty,
-    stop_after_batch: bool = false,
-
-    pub fn deinit(self: *TerminalValidationRetryState, alloc: Allocator) void {
-        self.previous.deinit(alloc);
-        self.current.deinit(alloc);
-        self.* = .{};
-    }
-
-    pub fn beginBatch(self: *TerminalValidationRetryState) void {
-        self.current.clearRetainingCapacity();
-        self.stop_after_batch = false;
-    }
-
-    pub fn observe(
-        self: *TerminalValidationRetryState,
-        alloc: Allocator,
-        call: ToolCall,
-        model_output: []const u8,
-    ) Allocator.Error!void {
-        if (!std.mem.eql(u8, call.name, "terminal")) return;
-        if (try tool_result_errors.inspectTerminalActionFieldCorrection(
-            alloc,
-            model_output,
-        ) == null) return;
-
-        var digest: TerminalValidationDigest = undefined;
-        std.crypto.hash.sha2.Sha256.hash(model_output, &digest, .{});
-        const decision = terminalValidationDigestDecision(
-            self.previous.items,
-            self.current.items,
-            digest,
-        );
-        if (decision.append_current) try self.current.append(alloc, digest);
-        self.stop_after_batch = self.stop_after_batch or decision.repeated;
-    }
-
-    pub fn finishBatch(self: *TerminalValidationRetryState) bool {
-        if (self.stop_after_batch) return true;
-        const previous = self.previous;
-        self.previous = self.current;
-        self.current = previous;
-        self.current.clearRetainingCapacity();
-        return false;
-    }
-};
-
-test "terminal validation retry state retains independent batch corrections" {
-    const alloc = std.testing.allocator;
-    const correction_s = try tool_result_errors.terminalActionFieldCorrectionJson(alloc, .{
-        .action = "start",
-        .invalid_fields = &.{"session_id"},
-        .missing_fields = &.{},
-        .allowed_fields = &.{ "action", "command" },
-        .conflicts = &.{},
-    });
-    defer alloc.free(correction_s);
-    const correction_t = try tool_result_errors.terminalActionFieldCorrectionJson(alloc, .{
-        .action = "read",
-        .invalid_fields = &.{"command"},
-        .missing_fields = &.{},
-        .allowed_fields = &.{ "action", "session_id", "cursor_segment" },
-        .conflicts = &.{},
-    });
-    defer alloc.free(correction_t);
-    const call: ToolCall = .{
-        .id = "terminal-call",
-        .name = "terminal",
-        .arguments_json = "{}",
-    };
-
-    var state: TerminalValidationRetryState = .{};
-    defer state.deinit(alloc);
-    state.beginBatch();
-    try state.observe(alloc, call, correction_s);
-    try state.observe(alloc, call, correction_t);
-    try state.observe(alloc, call, correction_s);
-    try std.testing.expectEqual(@as(usize, 2), state.current.items.len);
-    try std.testing.expect(!state.finishBatch());
-
-    state.beginBatch();
-    try state.observe(alloc, call, correction_t);
-    try state.observe(alloc, call, "ordinary valid result");
-    try state.observe(alloc, call, correction_s);
-    try std.testing.expectEqual(@as(usize, 2), state.current.items.len);
-    try std.testing.expect(state.finishBatch());
 }
 
 test "turn permission recovery binds approval exactly and deduplicates static wrappers" {
