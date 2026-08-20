@@ -1130,11 +1130,16 @@ pub const Runtime = struct {
 
     pub fn refreshFxLoginIfNeeded(self: *Self, alloc: Allocator) !bool {
         const source = self.credentialSource() orelse return false;
-        if (source != .fx_login) return false;
-
-        const loaded = (try credentials.loadFxLoginCredential(alloc, self.oauth_transport)) orelse {
-            if (self.credentialNeedsRefresh()) return error.CredentialRefreshUnavailable;
-            return false;
+        const loaded = switch (source) {
+            .fx_login => (try credentials.loadFxLoginCredential(alloc, self.oauth_transport)) orelse {
+                if (self.credentialNeedsRefresh()) return error.CredentialRefreshUnavailable;
+                return false;
+            },
+            .grok_oauth => (try credentials.loadGrokLoginCredential(alloc, self.oauth_transport)) orelse {
+                if (self.credentialNeedsRefresh()) return error.CredentialRefreshUnavailable;
+                return false;
+            },
+            else => return false,
         };
         var credential = loaded;
         defer credential.deinit(alloc);
@@ -1568,6 +1573,20 @@ test "auth runtime exposes one current Gateway credential for prompt admission" 
     try std.testing.expectEqualStrings("token-a", gateway_credential.api_key);
     try std.testing.expectEqualStrings("team_123", gateway_credential.gateway_team.?);
     try std.testing.expectEqual(credentials.Source.fx_login, gateway_credential.source);
+}
+
+test "auth runtime grok_oauth refresh is not a no-op past refresh_after_ms" {
+    const alloc = std.testing.allocator;
+    var runtime: Runtime = .{};
+    defer runtime.deinit(alloc);
+
+    var credential = try makeTestCredential(alloc, "grok-token", .grok_oauth, null, null);
+    defer credential.deinit(alloc);
+    credential.refresh_after_ms = 0;
+    _ = runtime.adoptCredential(alloc, &credential);
+
+    try std.testing.expectError(error.CredentialRefreshUnavailable, runtime.refreshFxLoginIfNeeded(alloc));
+    try std.testing.expectEqual(credentials.Source.grok_oauth, runtime.credentialSource().?);
 }
 
 test "auth runtime withholds an Fx credential across its expiry boundary" {
