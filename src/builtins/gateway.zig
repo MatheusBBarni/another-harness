@@ -588,8 +588,12 @@ fn fetchCreditsWithFetch(
     grok_fetch: FetchGrokBillingFn,
 ) output_contracts.CreditsSnapshot {
     if (grok_route.forModel(input.model) != null) {
+        const grok_credential = input.credential orelse "";
+        if (grok_credential.len == 0) {
+            return creditsErrorSnapshot(alloc, "Run fx login grok.");
+        }
         var result = grok_fetch(alloc, .{
-            .access_token = input.credential orelse "",
+            .access_token = grok_credential,
             .client_mode = grok_client_mode,
             .client_version = grok_client_version,
         }) catch {
