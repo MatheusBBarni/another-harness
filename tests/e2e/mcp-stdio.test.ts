@@ -3924,6 +3924,7 @@ describe("modern MCP stdio compatibility", () => {
         "retry_attempt=0",
         "discovery=completed",
       ]) expect(pane).toContain(expected);
+      expect(pane).toContain(root.workspace);
       for (const forbidden of [
         "captured_at_ms=",
         "runtime_generation=",
@@ -3932,7 +3933,6 @@ describe("modern MCP stdio compatibility", () => {
         "HEALTH_SECRET_SENTINEL",
         "S11_SECRET_ENV",
         MODERN_FIXTURE,
-        root.root,
         "fake-mcp-stdio-key",
       ]) expect(pane).not.toContain(forbidden);
       expect(activeGateway.requests).toHaveLength(0);

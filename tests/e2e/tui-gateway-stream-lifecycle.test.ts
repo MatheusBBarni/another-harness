@@ -5851,6 +5851,10 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         FX_TRACE_LOG: tracePath,
         FX_TRACE_SCOPES: "tool",
       };
+      const withoutWorkspaceStatusline = (text: string): string =>
+        text.split("\n").filter((line) =>
+          !(line.includes(workspace) && line.includes(" · "))
+        ).join("\n");
 
       session = await TmuxSession.create({
         cwd: workspace,
@@ -5869,7 +5873,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       expect(compact).toContain(
         "Ran cd ./vercel/packages/cli/test/fixtures/unit/commands/git/connect/unlink && pwd",
       );
-      expect(compact).not.toContain(workspace);
+      expect(withoutWorkspaceStatusline(compact)).not.toContain(workspace);
       expect(countOccurrences(compact, `Ran ${firstDisplayCommand}`)).toBe(1);
       expect(compact).not.toContain(`Ran ${firstCommand}`);
       expect(countOccurrences(compact, `Ran ${thirdCommand}`)).toBe(1);
@@ -5884,7 +5888,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       expect(review).toContain(`├ Ran ${firstDisplayCommand}`);
       expect(review).not.toContain(`Ran ${firstCommand}`);
       expect(review).toContain("● 3 tool calls · 3 commands");
-      expect(review).not.toContain(workspace);
+      expect(withoutWorkspaceStatusline(review)).not.toContain(workspace);
 
       await session.sendKeys("Right");
       const full = await session.waitForText("Full detail · ←/→ switch · ctrl o close", TIMEOUT);
@@ -5892,7 +5896,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       await session.sendKeys("PPage");
       const fullAtSummary = await session.waitForText("● 3 tool calls · 3 commands", TIMEOUT);
       expect(fullAtSummary).toContain("● 3 tool calls · 3 commands");
-      expect(fullAtSummary).not.toContain(workspace);
+      expect(withoutWorkspaceStatusline(fullAtSummary)).not.toContain(workspace);
 
       const trace = readFileSync(tracePath, "utf8");
       for (const callId of [
@@ -5933,7 +5937,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       );
       expect(resumed).toContain(`Ran ${firstDisplayCommand}`);
       expect(resumed).not.toContain(`Ran ${firstCommand}`);
-      expect(resumed).not.toContain(workspace);
+      expect(withoutWorkspaceStatusline(resumed)).not.toContain(workspace);
       expect(summaryGateway.requests).toHaveLength(2);
       expect(readFileSync(resumedStderrPath, "utf8")).toBe("");
     },

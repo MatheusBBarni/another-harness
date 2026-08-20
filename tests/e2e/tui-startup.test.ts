@@ -120,6 +120,75 @@ describe.skipIf(SKIP_TMUX)("tui: fresh-session commands", () => {
   );
 
   test(
+    "statusline refreshes the working directory and Git branch",
+    async () => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), "fx-e2e-statusline-")));
+      const home = join(root, "home");
+      const repository = join(root, "repository");
+      const workspace = join(repository, "packages", "status-root");
+      const headPath = join(repository, ".git", "HEAD");
+      const stderrPath = join(root, "stderr.log");
+      mkdirSync(home, { recursive: true });
+      mkdirSync(join(repository, ".git"), { recursive: true });
+      mkdirSync(workspace, { recursive: true });
+      writeFileSync(headPath, "ref: refs/heads/initial-branch\n");
+      writeFileSync(stderrPath, "");
+
+      try {
+        session = await TmuxSession.create({
+          cwd: workspace,
+          env: {
+            HOME: home,
+            AI_GATEWAY_API_KEY: undefined,
+            VERCEL_OIDC_TOKEN: undefined,
+            FX_AUTO_UPGRADE: "0",
+            FX_DISABLE_KEYCHAIN: "1",
+            FX_SKIP_ONBOARDING: "1",
+          },
+          stderrPath,
+          width: 100,
+          height: 30,
+        });
+
+        await session.waitForPane(
+          (pane) => pane.includes("status-root") && pane.includes("initial-branch"),
+          10_000,
+        );
+
+        writeFileSync(headPath, "ref: refs/heads/refreshed-branch\n");
+        await session.resizeWindow(101, 30);
+        await session.waitForPane(
+          (pane) => pane.includes("status-root") && pane.includes("refreshed-branch"),
+          5_000,
+        );
+
+        writeFileSync(headPath, "0123456789abcdef0123456789abcdef01234567\n");
+        await session.resizeWindow(100, 30);
+        await session.waitForText("detached:0123456789ab", 5_000);
+
+        await session.resizeWindow(50, 30);
+        const narrow = await session.waitForPane(
+          (pane) => pane.includes("s-root") && pane.includes("detached:"),
+          5_000,
+        );
+        expect(narrow).not.toContain("initial-branch");
+        expect(session.isAlive()).toBe(true);
+
+        await session.sendText("/quit");
+        expect(await session.waitForSessionEnd(5_000)).toBe(true);
+        expect(readFileSync(stderrPath, "utf8")).toBe("");
+      } finally {
+        if (session) {
+          await session.kill();
+          session = null;
+        }
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
     "restore the launch header without retaining prior output",
     async () => {
       const root = realpathSync(mkdtempSync(join(tmpdir(), "fx-e2e-fresh-session-")));
