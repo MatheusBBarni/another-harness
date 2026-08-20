@@ -1699,6 +1699,16 @@ fn stubFetchCreditsObject(
 
 var captured_credits_path: [256]u8 = undefined;
 var captured_credits_path_len: usize = 0;
+var xai_credits_gateway_calls: usize = 0;
+var xai_credits_grok_calls: usize = 0;
+var xai_credits_url_buf: [128]u8 = undefined;
+var xai_credits_url_len: usize = 0;
+var xai_credits_auth_buf: [128]u8 = undefined;
+var xai_credits_auth_len: usize = 0;
+var xai_credits_mode_buf: [16]u8 = undefined;
+var xai_credits_mode_len: usize = 0;
+var xai_credits_version_buf: [16]u8 = undefined;
+var xai_credits_version_len: usize = 0;
 
 fn stubCaptureCreditsPath(
     alloc: Allocator,
@@ -1856,6 +1866,75 @@ test "built-in credits provider ignores non-string fields" {
     try std.testing.expect(snapshot.balance == null);
     try std.testing.expect(snapshot.used == null);
     try std.testing.expect(snapshot.plan == null);
+}
+
+test "built-in credits provider sends xai models to grok billing not gateway" {
+    xai_credits_gateway_calls = 0;
+    xai_credits_grok_calls = 0;
+    xai_credits_url_len = 0;
+    xai_credits_auth_len = 0;
+    xai_credits_mode_len = 0;
+    xai_credits_version_len = 0;
+
+    const gatewayFetch = struct {
+        fn fetch(
+            alloc: Allocator,
+            _: ?[]const u8,
+            _: []const u8,
+        ) anyerror!gateway_client.GetResult {
+            _ = alloc;
+            xai_credits_gateway_calls += 1;
+            return error.UnexpectedGatewayCreditsFetch;
+        }
+    }.fetch;
+
+    const grokFetch = struct {
+        fn fetch(
+            alloc: Allocator,
+            request: GrokBillingRequest,
+        ) anyerror!gateway_client.GetResult {
+            xai_credits_grok_calls += 1;
+            xai_credits_url_len = @min(request.url.len, xai_credits_url_buf.len);
+            @memcpy(xai_credits_url_buf[0..xai_credits_url_len], request.url[0..xai_credits_url_len]);
+            const authorization = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.access_token});
+            defer alloc.free(authorization);
+            xai_credits_auth_len = @min(authorization.len, xai_credits_auth_buf.len);
+            @memcpy(xai_credits_auth_buf[0..xai_credits_auth_len], authorization[0..xai_credits_auth_len]);
+            xai_credits_mode_len = @min(request.client_mode.len, xai_credits_mode_buf.len);
+            @memcpy(xai_credits_mode_buf[0..xai_credits_mode_len], request.client_mode[0..xai_credits_mode_len]);
+            xai_credits_version_len = @min(request.client_version.len, xai_credits_version_buf.len);
+            @memcpy(
+                xai_credits_version_buf[0..xai_credits_version_len],
+                request.client_version[0..xai_credits_version_len],
+            );
+            return .{
+                .status = .ok,
+                .body = try alloc.dupe(u8, "{\"config\":{\"creditUsagePercent\":12},\"subscription_tier\":\"SuperGrok\"}"),
+            };
+        }
+    }.fetch;
+
+    var snapshot = fetchCreditsWithFetch(
+        std.testing.allocator,
+        .{
+            .credential = "grok-access-token",
+            .tenant = "team_123",
+            .model = "xai/grok-4.6",
+        },
+        gatewayFetch,
+        grokFetch,
+    );
+    defer snapshot.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), xai_credits_gateway_calls);
+    try std.testing.expectEqual(@as(usize, 1), xai_credits_grok_calls);
+    try std.testing.expectEqualStrings(
+        "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+        xai_credits_url_buf[0..xai_credits_url_len],
+    );
+    try std.testing.expectEqualStrings("Bearer grok-access-token", xai_credits_auth_buf[0..xai_credits_auth_len]);
+    try std.testing.expectEqualStrings("cli", xai_credits_mode_buf[0..xai_credits_mode_len]);
+    try std.testing.expectEqualStrings("1.0.4", xai_credits_version_buf[0..xai_credits_version_len]);
 }
 
 test "built-in model catalog owns default and loopback target resolution" {
