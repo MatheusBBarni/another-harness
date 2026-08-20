@@ -2021,6 +2021,61 @@ test "built-in credits provider sends xai models to grok billing not gateway" {
     try std.testing.expectEqualStrings("1.0.4", xai_credits_version_buf[0..xai_credits_version_len]);
 }
 
+test "built-in credits provider keeps non-xai models on gateway" {
+    xai_credits_gateway_calls = 0;
+    xai_credits_grok_calls = 0;
+    captured_credits_path_len = 0;
+
+    const gatewayFetch = struct {
+        fn fetch(
+            alloc: Allocator,
+            _: ?[]const u8,
+            path: []const u8,
+        ) anyerror!gateway_client.GetResult {
+            xai_credits_gateway_calls += 1;
+            captured_credits_path_len = @min(path.len, captured_credits_path.len);
+            @memcpy(
+                captured_credits_path[0..captured_credits_path_len],
+                path[0..captured_credits_path_len],
+            );
+            return .{
+                .status = .ok,
+                .body = try alloc.dupe(u8, "{\"balance\":\"10\",\"used\":\"2\",\"plan\":\"pro\"}"),
+            };
+        }
+    }.fetch;
+
+    const grokFetch = struct {
+        fn fetch(
+            alloc: Allocator,
+            _: GrokBillingRequest,
+        ) anyerror!gateway_client.GetResult {
+            _ = alloc;
+            xai_credits_grok_calls += 1;
+            return error.UnexpectedGrokBillingFetch;
+        }
+    }.fetch;
+
+    var snapshot = fetchCreditsWithFetch(
+        std.testing.allocator,
+        .{
+            .credential = "gateway-token",
+            .tenant = null,
+            .model = "zai/glm-5.2",
+        },
+        gatewayFetch,
+        grokFetch,
+    );
+    defer snapshot.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), xai_credits_gateway_calls);
+    try std.testing.expectEqual(@as(usize, 0), xai_credits_grok_calls);
+    try std.testing.expectEqualStrings(
+        "/coding-agent/v1/credits",
+        captured_credits_path[0..captured_credits_path_len],
+    );
+}
+
 test "built-in model catalog owns default and loopback target resolution" {
     const default_url = try modelCatalogUrl(std.testing.allocator, models_path, null);
     defer std.testing.allocator.free(default_url);
