@@ -1806,6 +1806,7 @@ var xai_credits_version_buf: [16]u8 = undefined;
 var xai_credits_version_len: usize = 0;
 var grok_billing_http_status: std.http.Status = .ok;
 const grok_billing_leaked_token = "sk-secret-token-value";
+const grok_billing_ok_json = "{\"config\":{\"currentPeriod\":{\"type\":\"USAGE_PERIOD_TYPE_WEEKLY\",\"end\":\"2026-08-24T17:33:48.278812+00:00\"},\"creditUsagePercent\":12.4,\"prepaidBalance\":{\"val\":250}},\"subscription_tier\":\"SuperGrok\"}";
 
 fn stubCaptureCreditsPath(
     alloc: Allocator,
@@ -2139,6 +2140,65 @@ test "built-in credits provider hides grok billing token on 401 and 403" {
         try std.testing.expect(std.mem.find(u8, snapshot.err_message.?, "fx login grok") != null);
         try std.testing.expect(std.mem.find(u8, snapshot.err_message.?, grok_billing_leaked_token) == null);
     }
+}
+
+test "built-in credits provider renders grok snapshot with percent" {
+    xai_credits_gateway_calls = 0;
+    xai_credits_grok_calls = 0;
+
+    const gatewayFetch = struct {
+        fn fetch(
+            alloc: Allocator,
+            _: ?[]const u8,
+            _: []const u8,
+        ) anyerror!gateway_client.GetResult {
+            _ = alloc;
+            xai_credits_gateway_calls += 1;
+            return error.UnexpectedGatewayCreditsFetch;
+        }
+    }.fetch;
+
+    const grokFetch = struct {
+        fn fetch(
+            alloc: Allocator,
+            _: GrokBillingRequest,
+        ) anyerror!gateway_client.GetResult {
+            xai_credits_grok_calls += 1;
+            return .{
+                .status = .ok,
+                .body = try alloc.dupe(u8, grok_billing_ok_json),
+            };
+        }
+    }.fetch;
+
+    var snapshot = fetchCreditsWithFetch(
+        std.testing.allocator,
+        .{
+            .credential = "grok-access-token",
+            .tenant = null,
+            .model = "xai/grok-4.6",
+        },
+        gatewayFetch,
+        grokFetch,
+    );
+    defer snapshot.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), xai_credits_gateway_calls);
+    try std.testing.expectEqual(@as(usize, 1), xai_credits_grok_calls);
+    try std.testing.expectEqual(output_contracts.CreditsSnapshot.Origin.grok, snapshot.origin);
+    try std.testing.expectEqual(@as(u8, 12), snapshot.percent.?);
+
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(
+        "[credits] plan=SuperGrok\n[credits] used=12% weekly\n[credits] balance=$2.50\n",
+        text,
+    );
+
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.find(u8, json, "\"origin\":\"grok\"") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"percent\":12") != null);
 }
 
 test "built-in model catalog owns default and loopback target resolution" {
