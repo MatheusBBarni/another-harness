@@ -15,7 +15,7 @@ Primary trade-off: credits follow the selected model, not last-login. A Vercel l
 - **`CreditsProvider` (`src/core/gateway/gateway_provider.zig`)** — lookup seam. Input gains `model`. Output stays `CreditsSnapshot`.
 - **`fetchCredits` (`src/builtins/gateway.zig`)** — composition. If `grok_route.forModel(model) != null`, call Grok billing GET; else existing `fetchCreditsWithFetch` / Gateway GET.
 - **`grok_billing.zig`** — parse billing JSON, map 401/403, render credits text, `/xai-usage` text, status-line fragment, RPM window. Export the functions that tests already cover.
-- **Command router + `commandShowCredits` + CLI `.credits`** — one fetch; renderer chosen by invoked token (`/xai-usage` vs `/credits`/`/balance`/`fx credits`).
+- **Command router + `commandShowCredits` + CLI `.credits`** — one fetch; renderer chosen by invoked token **and** snapshot origin. `/xai-usage` uses the Pi line only when `origin = grok`. `/credits`, `/balance`, and `fx credits` always use the credits renderer. Gateway origin never uses the Pi line.
 - **`grok_stream.zig`** — after a successful Grok response, parse `x-ratelimit-*-requests` and publish RPM to process cache.
 - **App process cache + footer** — last SuperGrok percent/reset from a successful usage command; last RPM from stream headers. Footer appends the fragment only while the selected model is `xai/`.
 
@@ -23,9 +23,11 @@ Data flow:
 
 ```
 slash/CLI
-  → CreditsLookupInput { credential, tenant, model }
+  → admit/refresh selected credential (TUI prompt path; CLI startup .refresh_if_needed)
+  → CreditsLookupInput { credential: apiKey(), tenant, model }
   → fetchCredits
-       xai/  → grok billing GET → grok_billing.parse → CreditsSnapshot.origin=grok
+       xai/ + no key after refresh → relogin copy, no HTTP
+       xai/ + key → grok billing GET → grok_billing.parse → CreditsSnapshot.origin=grok
        else  → Gateway GET     → existing JSON map  → CreditsSnapshot.origin=gateway
   → renderer (credits | xai_usage)
   → TUI notice / CLI stdout
@@ -77,7 +79,7 @@ pub const GrokBillingRequest = struct {
 // x-grok-client-version: 1.0.4
 ```
 
-`command_router.ParsedCommand.credits` becomes `credits: CreditsView`. Matching `/xai-usage` sets `.xai_usage`; `/credits` and `/balance` set `.credits`. `CommandHandlers.show_credits` takes that view. CLI `fx credits` is always `.credits`.
+`command_router.ParsedCommand.credits` becomes `credits: CreditsView`. Matching `/xai-usage` sets `.xai_usage`; `/credits` and `/balance` set `.credits`. `CommandHandlers.show_credits` takes that view. CLI `fx credits` is always `.credits`. The handler still consults `snapshot.origin`: `.xai_usage` plus `.grok` calls `renderXaiUsageText`; every other combination calls `renderCreditsText`.
 
 Export from `grok_billing.zig`: `parseBilling`, `renderCreditsText`, `renderXaiUsageText`, `renderBillingHttpError`, `parseRequestWindow`, `renderStatusLineFragment`. Keep `Snapshot` as parser output; copy into `CreditsSnapshot` in `fetchCredits`.
 
@@ -118,11 +120,15 @@ Do not invent quota from local token counts.
 - existing `GET {gateway}/coding-agent/v1/credits[?teamId=…]`
 - existing denial formatting via `formatHttpErrorMessage`
 
-When model is `xai/` and credential is missing or not a Grok session, **do not** call Gateway. Return the relogin error.
+When the model is `xai/`, refresh the **selected** credential before reading the Bearer. TUI `/credits` and `/xai-usage` already require a prompt credential via `admitPromptCredential` → `preparePromptCredential`. Today that path only calls `refreshFxLoginIfNeeded`, which no-ops unless the selected source is `fx_login`. Extend it so selected `grok_oauth` refreshes through `loadGrokLoginCredential` the same way `fx_login` uses `loadFxLoginCredential`. CLI `fx credits` already loads startup with `.refresh_if_needed`. Preferred `grok_oauth` refresh must not fall through to precedence: `loadGrokLoginCredential` currently swallows refresh errors and returns null, and `resolvePreferring` then picks Vercel/env/stored key. For `xai/` that would send the wrong Bearer. Surface the refresh error (same as `fx_login`) and keep the selected source; do not adopt another credential. After refresh, the SuperGrok Bearer is `app.auth.apiKey()` / `startup.apiKey()`. Do not inspect token shape and do not open a dormant Grok session while another login is selected.
+
+If selected `grok_oauth` refresh fails, `recoverPromptCredentialRefreshFailure` must be source-aware: record `grok_oauth`, print `Run fx login grok.`, and still open the picker. Do not hardcode `source=fx_login`. If the selected source is not refreshable or `apiKey()` is still null after a successful admission, **do not** call Gateway. Return `Run fx login grok.` with no HTTP and no invented status code. When that key is present, send it as the SuperGrok Bearer even if the active login is Vercel.
+
+`/xai-usage` shares that same fetch. Render the Pi notify line only when `origin = grok`. A Gateway snapshot keeps the existing credits body even if the invoked token was `/xai-usage`.
 
 ## Integration Points
 
-- **cli-chat-proxy.grok.com** — SuperGrok Bearer from `app.auth.apiKey()` / startup credential when the user is on an `xai/` model. No retry on 401/403. No second HTTP stack; `std.http.Client` like `grok_stream`.
+- **cli-chat-proxy.grok.com** — SuperGrok Bearer is the active `apiKey()` after selected-credential refresh when the model is `xai/`. No retry on 401/403. No second HTTP stack; `std.http.Client` like `grok_stream`.
 - **ai-gateway.vercel.sh** — unchanged for non-`xai/` models. WASM `fetchCredits` stub stays empty; this cycle is native CLI/TUI.
 
 ## Impact Analysis
@@ -134,6 +140,8 @@ When model is `xai/` and credential is missing or not a Grok session, **do not**
 | `builtins/gateway.zig` `fetchCredits` | modified | Dual GET; risk of leaking token in errors | Branch on `grok_route.forModel`; spies |
 | `grok_billing.zig` | modified | Export existing fns | No new package |
 | `command_router` / `app_commands.commandShowCredits` | modified | Alias view + pass `selected_model` | `/xai-usage` renderer; cache refresh |
+| `app_auth_runtime.preparePromptCredential` | modified | Today only refreshes `fx_login`; failed refresh hardcodes `source=fx_login` | Refresh selected `grok_oauth` via `loadGrokLoginCredential`; recover with that source |
+| `credentials.loadGrokLoginCredential` / `resolvePreferring` | modified | Refresh failure returns null and preferred Grok falls through to another source | Return the refresh error; preferred `grok_oauth` stays selected so CLI credits cannot send a Vercel key |
 | `cli_surface` credits | modified | Pass `startup.selected_model` | Same branch as slash |
 | `grok_stream.zig` | modified | Must read response headers; `client.fetch` cannot | Switch to a request that exposes headers |
 | `ui/render.zig` `StatuslineItems` | modified | Optional SuperGrok fragment | Append only for `xai/` |
@@ -157,12 +165,17 @@ Injected GET spies on `fetchCredits` (ADR-005):
 
 - Grok origin `/credits` text matches `renderCreditsText` (plan, `% weekly`, prepaid)
 - Grok origin `/xai-usage` text matches Pi notify line including reset and optional RPM
+- Gateway origin `/xai-usage` text matches the existing credits body, not the Pi line
+- selected `grok_oauth` past `refresh_after_ms`: admission refreshes via `loadGrokLoginCredential`, then billing uses the new `apiKey()`; Gateway spy call count = 0
+- selected `grok_oauth` refresh failure: no Grok GET, no Gateway GET; recovery records `source=grok_oauth`, notice contains `Run fx login grok.`, picker opens; never records `fx_login`
+- CLI preferred `grok_oauth` refresh failure: no precedence fallthrough, no Gateway GET, relogin copy; startup credential source stays `grok_oauth` or missing, never a silent Vercel key
+- still-missing `apiKey()` after admission on an `xai/` model: no Grok GET, no Gateway GET, relogin copy with no invented HTTP status
 - Gateway JSON still `{kind, balance, used, plan}`; Grok JSON includes new nullable fields
 - `deinit` frees `period` and `reset_at`
 
 `commandShowCredits` fake app: lookup input includes `selected_model`. Router: `/xai-usage` → `.xai_usage`, `/credits`/`/balance` → `.credits`.
 
-`parseRequestWindow` / stream: headers `"8299"`/`"8300"` → RPM cache; missing/non-numeric → no RPM.
+`parseRequestWindow` / stream: headers `"8299"`/`"8300"` → RPM cache; missing/non-numeric → no RPM. Footer fragment with RPM and no percent is `{remaining}/{limit} RPM`, never `SG 0%`.
 
 ### Integration Tests
 
@@ -194,8 +207,11 @@ No new E2E file. Keep `tests/e2e/tui-slash-extra.test.ts` Gateway 403 case as th
 
 ### Key Decisions
 
-- **One fetch, two renderers** — avoids a second provider and a new CLI command. Cost: router must carry the alias.
+- **One fetch, two renderers** — avoids a second provider and a new CLI command. Cost: router must carry the alias. The Pi line is Grok-origin only; Gateway `/xai-usage` stays on the credits body.
 - **Model wins** — same prefix as `grok_route.forModel`. Cost: last-login no longer owns credits (issue text overridden).
+- **Active `apiKey()` is the SuperGrok Bearer** — no token-shape check, no dormant Grok session peek. Cost: a Vercel key on an `xai/` model is sent to Grok and 401s.
+- **Refresh selected Grok before relogin** — `apiKey()` is already null past `refresh_after_ms`. TUI `preparePromptCredential` must refresh `grok_oauth`, not only `fx_login`. Relogin copy is only for no key / failed refresh. Cost: `/credits` can rewrite the Grok session file the same way chat already does on Vercel refresh.
+- **Source-aware refresh recovery** — `recoverPromptCredentialRefreshFailure` currently hardcodes `source=fx_login`. Failed `grok_oauth` refresh records `grok_oauth`, prints `Run fx login grok.`, and still opens the picker. Cost: chat and `/credits` share that recovery.
 - **Extend `CreditsSnapshot`** — JSON and status cache share typed fields. Cost: Gateway JSON grows null keys.
 - **Process cache, no paint-time fetch** — percent/reset after `/credits` or `/xai-usage`; RPM after a Grok turn. Cost: empty SuperGrok percent until first successful usage command this process.
 - **Spies, not e2e** — proves Gateway isolation at the seam that currently always calls Gateway.
