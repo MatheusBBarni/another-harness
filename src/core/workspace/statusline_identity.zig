@@ -38,6 +38,7 @@ const HeadPathResolution = union(enum) {
 /// terminal-safe strings, and repeated renders stat HEAD without rereading it
 /// unless its metadata changes.
 pub const Runtime = struct {
+    enabled: bool = false,
     workspace_root: []u8 = &.{},
     workspace_label: []u8 = &.{},
     head_path: []u8 = &.{},
@@ -64,6 +65,7 @@ pub const Runtime = struct {
         alloc: std.mem.Allocator,
         workspace_root: []const u8,
     ) !Snapshot {
+        if (!self.enabled) return .{};
         if (!std.mem.eql(u8, self.workspace_root, workspace_root)) {
             try self.rebuildWorkspace(alloc, workspace_root);
         }
@@ -297,7 +299,7 @@ test "workspace statusline identity refreshes branch and detached HEAD" {
 
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
     defer alloc.free(root);
-    var runtime: Runtime = .{};
+    var runtime: Runtime = .{ .enabled = true };
     defer runtime.deinit(alloc);
 
     var snapshot = try runtime.refresh(alloc, root);
@@ -330,7 +332,7 @@ test "workspace statusline identity resolves worktree gitdir files" {
 
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
     defer alloc.free(root);
-    var runtime: Runtime = .{};
+    var runtime: Runtime = .{ .enabled = true };
     defer runtime.deinit(alloc);
 
     const snapshot = try runtime.refresh(alloc, root);
@@ -346,7 +348,7 @@ test "workspace statusline identity finds a repository above the working directo
 
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "repo/packages/app");
     defer alloc.free(root);
-    var runtime: Runtime = .{};
+    var runtime: Runtime = .{ .enabled = true };
     defer runtime.deinit(alloc);
 
     const snapshot = try runtime.refresh(alloc, root);
@@ -371,7 +373,7 @@ test "workspace statusline identity handles non-git and hostile paths" {
         "unsafe-\x1b[31m-workspace",
     );
     defer alloc.free(root);
-    var runtime: Runtime = .{};
+    var runtime: Runtime = .{ .enabled = true };
     defer runtime.deinit(alloc);
 
     const snapshot = try runtime.refresh(alloc, root);
@@ -388,7 +390,7 @@ test "workspace statusline identity rejects malformed detached HEAD" {
 
     const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
     defer alloc.free(root);
-    var runtime: Runtime = .{};
+    var runtime: Runtime = .{ .enabled = true };
     defer runtime.deinit(alloc);
 
     const snapshot = try runtime.refresh(alloc, root);
@@ -397,9 +399,36 @@ test "workspace statusline identity rejects malformed detached HEAD" {
 
 test "workspace statusline identity represents the filesystem root" {
     const alloc = std.testing.allocator;
-    var runtime: Runtime = .{};
+    var runtime: Runtime = .{ .enabled = true };
     defer runtime.deinit(alloc);
 
     const snapshot = try runtime.refresh(alloc, std.fs.path.sep_str);
     try std.testing.expectEqualStrings(std.fs.path.sep_str, snapshot.workspace_label);
+}
+
+test "workspace statusline disabled refresh preserves cached identity" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeTestFile(tmp.dir, "workspace/.git/HEAD", "ref: refs/heads/main\n");
+
+    const root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
+    defer alloc.free(root);
+    var runtime: Runtime = .{ .enabled = true };
+    defer runtime.deinit(alloc);
+
+    const initial = try runtime.refresh(alloc, root);
+    try std.testing.expectEqualStrings("main", initial.git_branch.?);
+
+    runtime.enabled = false;
+    try writeTestFile(tmp.dir, "workspace/.git/HEAD", "ref: refs/heads/changed-while-disabled\n");
+    const disabled = try runtime.refresh(alloc, root);
+    try std.testing.expectEqualStrings("", disabled.workspace_label);
+    try std.testing.expect(disabled.git_branch == null);
+    try std.testing.expectEqualStrings(root, runtime.workspace_root);
+    try std.testing.expectEqualStrings("main", runtime.branch_label);
+
+    runtime.enabled = true;
+    const reenabled = try runtime.refresh(alloc, root);
+    try std.testing.expectEqualStrings("changed-while-disabled", reenabled.git_branch.?);
 }

@@ -8,6 +8,7 @@ import unittest
 
 from scripts.pgso.model import PgsoError, sha256_file
 from scripts.pgso.pipeline import (
+    BENCHMARK_USE_FLAGS,
     GENERATION_FLAGS,
     PROFILE_SECTION_ALIGNMENTS,
     USE_FLAGS,
@@ -103,10 +104,20 @@ class PgsoPipelineTests(unittest.TestCase):
                 "--disable-vp",
                 "-pgo-kind=pgo-instr-use-pipeline",
                 "-pgo-cold-func-opt=minsize",
-                "-profile-summary-cutoff-cold=990000",
+                "-profile-summary-cutoff-cold=600000",
                 "-passes=default<O2>",
             ),
             USE_FLAGS,
+        )
+        self.assertEqual(
+            (
+                "--disable-vp",
+                "-pgo-kind=pgo-instr-use-pipeline",
+                "-pgo-cold-func-opt=minsize",
+                "-profile-summary-cutoff-cold=990000",
+                "-passes=default<O2>",
+            ),
+            BENCHMARK_USE_FLAGS,
         )
         self.assertEqual(
             (
@@ -129,6 +140,21 @@ class PgsoPipelineTests(unittest.TestCase):
                 str(self.paths.profile_use_bitcode),
             ),
             profile_use_argv(self.toolchain, self.paths),
+        )
+        benchmark_paths = PipelinePaths.create(
+            self.root / "benchmark-run",
+            selector="ui_activity",
+        )
+        self.assertEqual(
+            (
+                str(self.toolchain.opt),
+                *BENCHMARK_USE_FLAGS,
+                f"-profile-file={benchmark_paths.merged_profile}",
+                str(benchmark_paths.bitcode),
+                "-o",
+                str(benchmark_paths.profile_use_bitcode),
+            ),
+            profile_use_argv(self.toolchain, benchmark_paths),
         )
         mapped_profile = self.paths.profiles / "production.profdata"
         self.assertEqual(

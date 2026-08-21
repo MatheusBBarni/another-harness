@@ -34,6 +34,7 @@ pub const StatuslineItem = enum {
     sandbox,
     context,
     session,
+    workspace,
 };
 
 pub const StatuslineItemPatch = struct {
@@ -1127,18 +1128,22 @@ fn cleanupLegacyWorkspacePreferences(
             application,
         );
         if (patch.statusline_item) |item_patch| {
-            removeLegacyNestedLeaf(
-                &entry.value_ptr.object,
-                "statusLine",
-                @tagName(item_patch.item),
-                switch (item_patch.item) {
-                    .sandbox => .statusline_sandbox,
-                    .context => .statusline_context,
-                    .session => .statusline_session,
-                },
-                true,
-                application,
-            );
+            const legacy_field: ?UserPreferenceField = switch (item_patch.item) {
+                .sandbox => .statusline_sandbox,
+                .context => .statusline_context,
+                .session => .statusline_session,
+                .workspace => null,
+            };
+            if (legacy_field) |field| {
+                removeLegacyNestedLeaf(
+                    &entry.value_ptr.object,
+                    "statusLine",
+                    @tagName(item_patch.item),
+                    field,
+                    true,
+                    application,
+                );
+            }
         }
         if (application.legacy_fields_removed != removed_before) {
             application.legacy_workspaces_changed += 1;
@@ -1742,6 +1747,11 @@ fn validateKnownSettingsObject(
                     if (enabled != .bool) return error.InvalidSettingsFormat;
                 }
             }
+            if (!tolerate_non_object_user_containers) {
+                if (value.object.get("workspace")) |enabled| {
+                    if (enabled != .bool) return error.InvalidSettingsFormat;
+                }
+            }
         } else if (!tolerate_non_object_user_containers) {
             return error.InvalidSettingsFormat;
         }
@@ -1945,6 +1955,101 @@ test "user patch writes user preferences at top level" {
     try std.testing.expect(std.mem.find(u8, bytes, "\"notifications\":{\"turn_end\":true,\"attention_required\":false}") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"future\":{\"nested\":7}") != null);
     try std.testing.expect(std.mem.find(u8, bytes, "\"workspaces\"") == null);
+}
+
+test "workspace statusline patch writes globally and preserves nested leaf" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), "home/.fx");
+    try writeStoreFixture(
+        tmp.dir,
+        "home/.fx/settings.json",
+        "{\"statusLine\":{\"future\":7},\"workspaces\":{\"/workspace\":{\"statusLine\":{\"workspace\":false,\"future\":8}}}}\n",
+    );
+
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home);
+    var store = try Store.initFromHome(alloc, home, .writable);
+    defer store.deinit(alloc);
+
+    var outcome = try store.applyUserPatch(alloc, .{
+        .statusline_item = .{ .item = .workspace, .enabled = true },
+    });
+    defer outcome.deinit(alloc);
+
+    try std.testing.expect(outcome == .committed);
+    try std.testing.expectEqual(@as(usize, 0), outcome.committed.cleanup.fields_removed);
+    try std.testing.expectEqual(@as(usize, 0), outcome.committed.cleanup.recovery_paths.len);
+
+    const bytes = try store.readPrimaryForTest(alloc);
+    defer alloc.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, bytes, .{});
+    defer parsed.deinit();
+
+    const root_statusline = parsed.value.object.get("statusLine").?.object;
+    try std.testing.expectEqual(true, root_statusline.get("workspace").?.bool);
+    try std.testing.expectEqual(@as(i64, 7), root_statusline.get("future").?.integer);
+
+    const nested_statusline = parsed.value.object.get("workspaces").?.object
+        .get("/workspace").?.object.get("statusLine").?.object;
+    try std.testing.expectEqual(false, nested_statusline.get("workspace").?.bool);
+    try std.testing.expectEqual(@as(i64, 8), nested_statusline.get("future").?.integer);
+}
+
+test "durable validation rejects malformed workspace statusline" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), "home/.fx");
+    try writeStoreFixture(
+        tmp.dir,
+        "home/.fx/settings.json",
+        "{\"statusLine\":{\"workspace\":\"yes\"}}\n",
+    );
+
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home);
+    var store = try Store.initFromHome(alloc, home, .writable);
+    defer store.deinit(alloc);
+
+    try std.testing.expectError(
+        error.InvalidSettingsFormat,
+        store.applyUserPatch(alloc, .{ .startup_scrollback = false }),
+    );
+}
+
+test "workspace patch ignores malformed nested workspace statusline" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), "home/.fx");
+    try writeStoreFixture(
+        tmp.dir,
+        "home/.fx/settings.json",
+        "{\"workspaces\":{\"/workspace\":{\"statusLine\":{\"workspace\":\"ignored\"},\"future\":7}}}\n",
+    );
+
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home);
+    var store = try Store.initFromHome(alloc, home, .writable);
+    defer store.deinit(alloc);
+
+    var outcome = try store.applyWorkspacePatch(alloc, "/workspace", .{ .sandbox = "none" });
+    defer outcome.deinit(alloc);
+    try std.testing.expect(outcome == .committed);
+
+    const bytes = try store.readPrimaryForTest(alloc);
+    defer alloc.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, bytes, .{});
+    defer parsed.deinit();
+    const workspace = parsed.value.object.get("workspaces").?.object.get("/workspace").?.object;
+    try std.testing.expectEqualStrings(
+        "ignored",
+        workspace.get("statusLine").?.object.get("workspace").?.string,
+    );
+    try std.testing.expectEqual(@as(i64, 7), workspace.get("future").?.integer);
+    try std.testing.expectEqualStrings("none", workspace.get("sandbox").?.string);
 }
 
 test "notification user patch preserves sibling fields and valid workspace overrides" {

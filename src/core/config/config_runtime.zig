@@ -58,6 +58,7 @@ pub const Settings = struct {
     statusline_sandbox: ?bool = null,
     statusline_context: ?bool = null,
     statusline_session: ?bool = null,
+    statusline_workspace: ?bool = null,
     notification_turn_end: ?bool = null,
     notification_attention_required: ?bool = null,
     notification_max: ?bool = null,
@@ -626,7 +627,13 @@ fn mergeDetailedSettingsLayer(
     source: ConfigSource,
     permission_source: DetailedPermissionSource,
 ) !void {
-    if (parseSettingsValueForLayer(alloc, value, settings_layer, tolerate_non_object_user_containers)) |layer_settings| {
+    if (parseSettingsValueForLayer(
+        alloc,
+        value,
+        settings_layer,
+        tolerate_non_object_user_containers,
+        source != .user_workspace,
+    )) |layer_settings| {
         var incoming = layer_settings;
         defer incoming.deinit(alloc);
         incoming.context_limits.retag(switch (source) {
@@ -634,7 +641,9 @@ fn mergeDetailedSettingsLayer(
             .user_workspace => .user_workspace,
             else => .compiled_default,
         });
-        if (source == .user_workspace) incoming.update_channel = null;
+        if (source == .user_workspace) {
+            incoming.update_channel = null;
+        }
         updateConfigSources(state.sources, incoming, source);
         if (incoming.has_permission_rules) {
             switch (permission_source) {
@@ -742,6 +751,7 @@ pub fn userSettingsPath(alloc: Allocator) !?[]u8 {
 pub const AllowlistResetScope = settings_store.AllowlistResetScope;
 pub const PermissionMutation = settings_store.PermissionMutation;
 pub const PermissionScope = settings_store.PermissionScope;
+pub const StatuslineItem = settings_store.StatuslineItem;
 pub const UserSettingsPatch = settings_store.UserSettingsPatch;
 pub const WorkspaceDirectoryMutation = settings_store.WorkspaceDirectoryMutation;
 pub const WorkspaceSettingsPatch = settings_store.WorkspaceSettingsPatch;
@@ -929,7 +939,7 @@ pub fn loadMergedSettingsFromPaths(alloc: Allocator, paths: Paths) !Settings {
 
         try mergeSettingsFile(&settings, alloc, paths.workspace_settings);
 
-        var user_settings = try parseSettingsValueForLayer(alloc, parsed.value, .profile, false);
+        var user_settings = try parseSettingsValueForLayer(alloc, parsed.value, .profile, false, true);
         defer user_settings.deinit(alloc);
         user_settings.context_limits.retag(.user_global);
         mergeSettings(&settings, &user_settings, alloc);
@@ -1036,7 +1046,7 @@ fn mergeWorkspaceOverridesFromValue(target: *Settings, alloc: Allocator, root_va
     const override_val = workspaces_val.object.get(workspace_root) orelse return;
     if (override_val != .object) return;
 
-    var override_settings = try parseSettingsValueForLayer(alloc, override_val, .profile, true);
+    var override_settings = try parseSettingsValueForLayer(alloc, override_val, .profile, true, false);
     defer override_settings.deinit(alloc);
     override_settings.update_channel = null;
     override_settings.context_limits.retag(.user_workspace);
@@ -1075,7 +1085,7 @@ fn parseSettingsJson(alloc: Allocator, json_text: []const u8) !Settings {
 fn parseSettingsJsonForLayer(alloc: Allocator, json_text: []const u8, layer: SettingsLayer) !Settings {
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json_text, .{});
     defer parsed.deinit();
-    return parseSettingsValueForLayer(alloc, parsed.value, layer, false);
+    return parseSettingsValueForLayer(alloc, parsed.value, layer, false, true);
 }
 
 const JsonStringToken = struct {
@@ -1283,13 +1293,20 @@ fn parseSettingsValueForLayer(
     root: std.json.Value,
     layer: SettingsLayer,
     tolerate_non_object_user_containers: bool,
+    parse_workspace_statusline: bool,
 ) !Settings {
     if (root != .object) return error.InvalidSettingsShape;
 
     var settings = Settings{};
     errdefer settings.deinit(alloc);
 
-    if (layer == .profile) try parseProfileOnlyFields(&settings, alloc, root, tolerate_non_object_user_containers);
+    if (layer == .profile) try parseProfileOnlyFields(
+        &settings,
+        alloc,
+        root,
+        tolerate_non_object_user_containers,
+        parse_workspace_statusline,
+    );
     try parseProjectSafeFields(&settings, alloc, root);
 
     return settings;
@@ -1300,6 +1317,7 @@ fn parseProfileOnlyFields(
     alloc: Allocator,
     root: std.json.Value,
     tolerate_non_object_user_containers: bool,
+    parse_workspace_statusline: bool,
 ) !void {
     if (root.object.contains("skill_match_fuzzy")) return error.RetiredSkillMatchFuzzy;
     if (root.object.get("model")) |model_value| {
@@ -1420,6 +1438,12 @@ fn parseProfileOnlyFields(
                 if (v != .bool) return error.InvalidStatusLineSessionType;
                 settings.statusline_session = v.bool;
             }
+            if (parse_workspace_statusline) {
+                if (value.object.get("workspace")) |v| {
+                    if (v != .bool) return error.InvalidStatusLineWorkspaceType;
+                    settings.statusline_workspace = v.bool;
+                }
+            }
         }
     }
 
@@ -1518,6 +1542,7 @@ fn mergeSettings(target: *Settings, incoming: *Settings, alloc: Allocator) void 
     if (incoming.statusline_sandbox) |value| target.statusline_sandbox = value;
     if (incoming.statusline_context) |value| target.statusline_context = value;
     if (incoming.statusline_session) |value| target.statusline_session = value;
+    if (incoming.statusline_workspace) |value| target.statusline_workspace = value;
     if (incoming.notification_turn_end) |value| target.notification_turn_end = value;
     if (incoming.notification_attention_required) |value| target.notification_attention_required = value;
     if (incoming.notification_max) |value| target.notification_max = value;
@@ -3100,12 +3125,12 @@ test "malformed project profile-only settings are ignored before value parsing" 
 test "global statusline fields parse and merge independently" {
     var target = try parseSettingsJson(
         std.testing.allocator,
-        "{\"statusLine\":{\"sandbox\":false,\"context\":true,\"session\":false}}",
+        "{\"statusLine\":{\"sandbox\":false,\"context\":true,\"session\":false,\"workspace\":false}}",
     );
     defer target.deinit(std.testing.allocator);
     var incoming = try parseSettingsJson(
         std.testing.allocator,
-        "{\"statusLine\":{\"session\":true}}",
+        "{\"statusLine\":{\"session\":true,\"workspace\":true}}",
     );
     defer incoming.deinit(std.testing.allocator);
 
@@ -3114,6 +3139,7 @@ test "global statusline fields parse and merge independently" {
     try std.testing.expectEqual(false, target.statusline_sandbox.?);
     try std.testing.expectEqual(true, target.statusline_context.?);
     try std.testing.expectEqual(true, target.statusline_session.?);
+    try std.testing.expectEqual(true, target.statusline_workspace.?);
 }
 
 test "global statusline rejects malformed containers and fields" {
@@ -3142,6 +3168,42 @@ test "global statusline rejects malformed containers and fields" {
             "{\"statusLine\":{\"session\":1}}",
         ),
     );
+    try std.testing.expectError(
+        error.InvalidStatusLineWorkspaceType,
+        parseSettingsJson(
+            std.testing.allocator,
+            "{\"statusLine\":{\"workspace\":1}}",
+        ),
+    );
+}
+
+test "workspace statusline is global only in ordinary and detailed loads" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), "home/.fx");
+    try tmp.dir.createDirPath(io_mod.getIo(), "workspace");
+
+    const home_root = try io_mod.dirRealpathAlloc(std.testing.allocator, tmp.dir, "home");
+    defer std.testing.allocator.free(home_root);
+    const workspace_root = try io_mod.dirRealpathAlloc(std.testing.allocator, tmp.dir, "workspace");
+    defer std.testing.allocator.free(workspace_root);
+
+    const user_settings = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{{\"statusLine\":{{\"workspace\":true}},\"workspaces\":{{\"{s}\":{{\"statusLine\":{{\"workspace\":\"ignored\"}}}}}}}}\n",
+        .{workspace_root},
+    );
+    defer std.testing.allocator.free(user_settings);
+    try writeFixtureFile(tmp.dir, "home/.fx/settings.json", user_settings);
+
+    var ordinary = try loadMergedSettingsFromHome(std.testing.allocator, home_root, workspace_root);
+    defer ordinary.deinit(std.testing.allocator);
+    try std.testing.expectEqual(true, ordinary.statusline_workspace.?);
+
+    var detailed = try loadMergedSettingsDetailedFromHome(std.testing.allocator, home_root, workspace_root);
+    defer detailed.deinit(std.testing.allocator);
+    try std.testing.expectEqual(true, detailed.settings.statusline_workspace.?);
+    try std.testing.expectEqual(@as(usize, 0), detailed.diagnostics.len);
 }
 
 test "ordinary and detailed loads agree on workspace overrides with legacy statusline containers" {

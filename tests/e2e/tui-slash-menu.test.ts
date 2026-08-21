@@ -162,6 +162,25 @@ async function waitForSettingValue(
   );
 }
 
+async function waitForStatuslineValue(
+  settingsPath: string,
+  key: string,
+  expected: boolean,
+): Promise<void> {
+  const deadline = Date.now() + TIMEOUT;
+  let latest: unknown;
+  while (Date.now() < deadline) {
+    if (existsSync(settingsPath)) {
+      latest = JSON.parse(readFileSync(settingsPath, "utf8")).statusLine?.[key];
+      if (latest === expected) return;
+    }
+    await Bun.sleep(100);
+  }
+  throw new Error(
+    `Timed out waiting for statusLine.${key}=${expected}; last=${JSON.stringify(latest)}`,
+  );
+}
+
 async function waitForAppearanceMenu(
   session: TmuxSession,
   expectedSelection?: string,
@@ -1113,7 +1132,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       let grid = await waitForSettingsMenu(session);
       expect(grid.join("\n")).toContain("Slash menu categories");
 
-      for (let index = 0; index < 5; index += 1) {
+      for (let index = 0; index < 6; index += 1) {
         await session.sendKeys("Down");
       }
       await session.sendKeys("Left");
@@ -1444,11 +1463,17 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       const root = realpathSync(mkdtempSync(join(tmpdir(), "fx-settings-menu-")));
       workDirs.push(root);
       const home = join(root, "home");
-      const workspace = join(root, "workspace");
+      const workspace = join(root, "workspace-statusline-visible");
       const settingsPath = join(home, ".fx", "settings.json");
       mkdirSync(join(home, ".fx"), { recursive: true });
       mkdirSync(workspace, { recursive: true });
-      writeFileSync(settingsPath, `${JSON.stringify({ input_appearance: "tint" })}\n`);
+      writeFileSync(
+        settingsPath,
+        `${JSON.stringify({
+          input_appearance: "tint",
+          statusLine: { workspace: false },
+        })}\n`,
+      );
 
       session = await TmuxSession.create({
         cwd: workspace,
@@ -1488,11 +1513,17 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       await session.sendKeys("Left");
       await waitForSettingValue(settingsPath, "maxxing_mode", "legacy");
 
+      for (let index = 0; index < 4; index += 1) await session.sendKeys("Down");
+      await session.waitForText(/Status line workspace\s+off/, 5_000);
+      await session.sendKeys("Right");
+      await waitForStatuslineValue(settingsPath, "workspace", true);
+
       await session.sendKeys("Escape");
-      await session.waitForPane(
+      pane = await session.waitForPane(
         (current) =>
           hasEmptyComposer(current) &&
           current.includes("𝒇x") &&
+          current.includes("workspace-statusline-visible") &&
           !current.includes("←→ Change"),
         5_000,
       );
@@ -1655,14 +1686,14 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       const root = realpathSync(mkdtempSync(join(tmpdir(), "fx-statusline-menu-")));
       workDirs.push(root);
       const home = join(root, "home");
-      const workspace = join(root, "workspace");
+      const workspace = join(root, "compact-statusline-workspace");
       const settingsPath = join(home, ".fx", "settings.json");
       mkdirSync(join(home, ".fx"), { recursive: true });
       mkdirSync(workspace, { recursive: true });
       writeFileSync(
         settingsPath,
         `${JSON.stringify({
-          statusLine: { sandbox: false, context: false },
+          statusLine: { sandbox: false, context: false, workspace: false },
         })}\n`,
       );
 
@@ -1684,6 +1715,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       let pane = grid.join("\n");
       expect(pane).toContain("Sandbox");
       expect(pane).toContain("Context");
+      expect(pane).toContain("Workspace");
       expect(pane).toContain("off  on");
       expect(pane).not.toContain("❯");
       expect(pane).not.toContain("Choose what appears");
@@ -1703,15 +1735,32 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       expect(pane).not.toContain("● Statusline:");
       expect(JSON.parse(readFileSync(settingsPath, "utf8")).statusLine.context).toBe(true);
 
+      await session.sendKeys("Down");
+      await session.sendKeys("Down");
+      await session.sendKeys("Right");
+      grid = await waitForStatuslineMenu(session, "Workspace");
+      pane = grid.join("\n");
+      expect(pane).not.toContain("saved to user settings");
+      await waitForStatuslineValue(settingsPath, "workspace", true);
+
       await session.sendKeys("Escape");
       await session.waitForPane(
         (current) =>
           hasEmptyComposer(current) &&
           current.includes("𝒇x") &&
+          current.includes("compact-statusline-workspace") &&
           !current.includes("←→ Change"),
         5_000,
       );
       expect(session.isAlive()).toBe(true);
+
+      await session.sendText("/statusline workspace");
+      await session.waitForText("● Statusline: workspace: off", 5_000);
+      await waitForStatuslineValue(settingsPath, "workspace", false);
+      await session.waitForPane(
+        (current) => hasEmptyComposer(current) && !current.includes("compact-statusline-workspace"),
+        5_000,
+      );
 
       await session.sendText("/quit");
       expect(await session.waitForSessionEnd(TIMEOUT)).toBe(true);

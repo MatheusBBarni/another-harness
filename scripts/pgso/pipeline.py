@@ -29,6 +29,14 @@ USE_FLAGS = (
     "--disable-vp",
     "-pgo-kind=pgo-instr-use-pipeline",
     "-pgo-cold-func-opt=minsize",
+    "-profile-summary-cutoff-cold=600000",
+    "-passes=default<O2>",
+)
+
+BENCHMARK_USE_FLAGS = (
+    "--disable-vp",
+    "-pgo-kind=pgo-instr-use-pipeline",
+    "-pgo-cold-func-opt=minsize",
     "-profile-summary-cutoff-cold=990000",
     "-passes=default<O2>",
 )
@@ -304,9 +312,10 @@ def profile_use_argv(
     profile_path: pathlib.Path | None = None,
 ) -> tuple[str, ...]:
     profile = profile_path or paths.merged_profile
+    flags = USE_FLAGS if paths.selector == "fx" else BENCHMARK_USE_FLAGS
     return (
         str(toolchain.opt),
-        *USE_FLAGS,
+        *flags,
         f"-profile-file={profile}",
         str(paths.bitcode),
         "-o",

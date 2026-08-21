@@ -176,17 +176,21 @@ fn appendShadowedUserSources(
     try appendShadowedUserSource(writer, "input_appearance", patch.input_appearance != null, sources.input_appearance, &wrote_header);
     try appendShadowedUserSource(writer, "prompt_history", patch.prompt_history_enabled != null, sources.prompt_history_enabled, &wrote_header);
     if (patch.statusline_item) |item| {
-        const source = switch (item.item) {
+        const source: ?config_runtime.ConfigSource = switch (item.item) {
             .sandbox => sources.statusline_sandbox,
             .context => sources.statusline_context,
             .session => sources.statusline_session,
+            .workspace => null,
         };
-        const field = switch (item.item) {
-            .sandbox => "statusLine.sandbox",
-            .context => "statusLine.context",
-            .session => "statusLine.session",
-        };
-        try appendShadowedUserSource(writer, field, true, source, &wrote_header);
+        if (source) |resolved| {
+            const field = switch (item.item) {
+                .sandbox => "statusLine.sandbox",
+                .context => "statusLine.context",
+                .session => "statusLine.session",
+                .workspace => unreachable,
+            };
+            try appendShadowedUserSource(writer, field, true, resolved, &wrote_header);
+        }
     }
     try appendShadowedUserSource(
         writer,

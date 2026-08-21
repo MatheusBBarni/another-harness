@@ -11,6 +11,7 @@ const config_runtime = @import("../config/config_runtime.zig");
 const host = @import("../hosts/host.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const record_tape = @import("../workspace/record_tape.zig");
+const statusline_identity = @import("../workspace/statusline_identity.zig");
 const shared_io = @import("../shared/io.zig");
 const mcp_runtime = @import("../mcp/mcp_runtime.zig");
 const permissions = @import("../permissions/permissions.zig");
@@ -287,6 +288,9 @@ pub fn Runtime(comptime App: type) type {
             app.statusline_sandbox = startup.statusline_sandbox;
             app.statusline_context = startup.statusline_context;
             app.statusline_session = startup.statusline_session;
+            if (comptime @hasField(App, "workspace_identity")) {
+                app.workspace_identity.enabled = startup.statusline_workspace;
+            }
             if (comptime @hasDecl(App, "setNotificationPreferences")) {
                 app.setNotificationPreferences(
                     startup.notification_turn_end,
@@ -543,6 +547,7 @@ const TestApp = struct {
     statusline_sandbox: bool = false,
     statusline_context: bool = false,
     statusline_session: bool = false,
+    workspace_identity: statusline_identity.Runtime = .{},
     requested_resume: ?u8 = null,
     mcp_runtime: ?*mcp_runtime.McpRuntime = null,
     skills: skill_runtime.Runtime = .{},
@@ -562,6 +567,7 @@ const TestApp = struct {
             self.workspace_root = &.{};
         }
         self.auth.deinit(self.alloc);
+        self.workspace_identity.deinit(self.alloc);
         self.selected_model.deinit(self.alloc);
         self.permission_engine.deinit(self.alloc);
         self.worker.deinit(std.heap.c_allocator);
@@ -695,6 +701,7 @@ fn makeStartupState(alloc: Allocator) !app_lifecycle.StartupState {
     state.update_channel = .dev;
     state.effort = types.ReasoningEffort.literal("high");
     state.sandbox_backend = .none;
+    state.statusline_workspace = true;
     if (active_capture.?.emit_config_diagnostics) {
         const diagnostics = try alloc.alloc(config_runtime.ConfigDiagnostic, 2);
         errdefer alloc.free(diagnostics);
@@ -918,6 +925,7 @@ test "app_bootstrap_runtime transfers startup state and starts a fresh session" 
     try std.testing.expect(!app.auto_upgrade_enabled);
     try std.testing.expectEqual(types.ReasoningEffort.literal("high"), app.effort);
     try std.testing.expectEqual(sandbox.BackendKind.none, app.permission_state.sandbox_backend);
+    try std.testing.expect(app.workspace_identity.enabled);
     try std.testing.expectEqualStrings("/skills", app.skills.dir);
     try std.testing.expectEqualStrings("welcome\n", app.transcript.items);
     try std.testing.expect(app.transcript_recorded);

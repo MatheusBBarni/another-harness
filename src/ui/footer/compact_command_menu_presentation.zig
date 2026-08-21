@@ -818,6 +818,7 @@ test "compact status line menu renders toggled items without choose copy" {
             .statusline_sandbox = true,
             .statusline_context = false,
             .statusline_session = true,
+            .statusline_workspace = false,
         },
     } };
 
@@ -838,6 +839,11 @@ test "compact status line menu renders toggled items without choose copy" {
     try std.testing.expect(std.mem.find(u8, sandbox.items, "Sandbox") != null);
     try std.testing.expect(std.mem.find(u8, sandbox.items, "on") != null);
     try std.testing.expect(std.mem.find(u8, sandbox.items, "❯") == null);
+
+    var workspace = try composeCompactCommandMenuRow(std.testing.allocator, projection, 5, rows, 80);
+    defer workspace.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.find(u8, workspace.items, "Workspace") != null);
+    try std.testing.expect(std.mem.find(u8, workspace.items, "off") != null);
 
     var context = try composeCompactCommandMenuRow(std.testing.allocator, projection, 3, rows, 80);
     defer context.deinit(std.testing.allocator);

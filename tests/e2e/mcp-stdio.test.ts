@@ -3924,7 +3924,7 @@ describe("modern MCP stdio compatibility", () => {
         "retry_attempt=0",
         "discovery=completed",
       ]) expect(pane).toContain(expected);
-      expect(pane).toContain(root.workspace);
+      expect(pane).not.toContain(root.workspace);
       for (const forbidden of [
         "captured_at_ms=",
         "runtime_generation=",

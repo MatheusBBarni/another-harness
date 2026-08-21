@@ -737,6 +737,7 @@ const statusline_arg_completions = [_][]const u8{
     "/statusline sandbox",
     "/statusline context",
     "/statusline session",
+    "/statusline workspace",
 };
 
 const notifications_arg_completions = [_][]const u8{

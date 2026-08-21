@@ -442,7 +442,7 @@ pub const slash_specs = [_]SlashSpec{
     .{ .kind = .fast, .command = "/fast", .help_entry = "/fast", .completion_description = "toggle Fast mode when supported", .presentation_category = .model },
     .{ .kind = .appearance, .command = "/appearance", .aliases = &.{ "/input", "/maxxing" }, .show_aliases_in_completion = false, .help_entry = "/appearance [input lines|tint|presentation normal|minimal]", .completion_description = "choose input and transcript presentation", .presentation_category = .appearance, .has_args = true, .accepts_payload = true },
     .{ .kind = .sandbox, .command = "/sandbox", .help_entry = "/sandbox [os|none]", .completion_description = "choose command sandbox behavior", .presentation_category = .security, .has_args = true, .accepts_payload = true },
-    .{ .kind = .statusline, .command = "/statusline", .help_entry = "/statusline [sandbox|context|session]", .completion_description = "toggle status line segments", .presentation_category = .appearance, .has_args = true, .accepts_payload = true },
+    .{ .kind = .statusline, .command = "/statusline", .help_entry = "/statusline [sandbox|context|session|workspace]", .completion_description = "toggle status line segments", .presentation_category = .appearance, .has_args = true, .accepts_payload = true },
     .{ .kind = .notifications, .command = "/sound", .help_entry = "/sound [on|off|max]", .completion_description = "toggle sounds and terminal bells", .presentation_category = .appearance, .has_args = true, .accepts_payload = true },
     .{ .kind = .workspace, .command = "/workspace", .help_entry = "/workspace [list|add PATH|remove PATH|clear]", .completion_description = "manage additional workspace directories", .presentation_category = .workspace, .show_in_welcome = true, .has_args = true, .accepts_payload = true },
     .{ .kind = .version, .command = "/version", .help_entry = "/version", .completion_description = "show the fx version", .presentation_category = .general },
@@ -601,4 +601,17 @@ test "built-in paste completion describes clipboard image attachment" {
 
     const description = nthSlashCompletionDescription("/pas", 0) orelse return error.TestExpectedEqual;
     try std.testing.expectEqualStrings("attach an image from the clipboard when supported", description);
+}
+
+test "built-in statusline help and completion include workspace" {
+    const help = try renderSlashHelp(std.testing.allocator);
+    defer std.testing.allocator.free(help);
+    try std.testing.expect(
+        std.mem.find(u8, help, "/statusline [sandbox|context|session|workspace]") != null,
+    );
+
+    try std.testing.expectEqualStrings(
+        "/statusline workspace",
+        nthSlashCompletion("/statusline w", 0).?,
+    );
 }

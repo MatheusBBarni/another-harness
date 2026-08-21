@@ -63,6 +63,49 @@ describe.skipIf(SKIP)("tui: startup and exit", () => {
 
 describe.skipIf(SKIP_TMUX)("tui: fresh-session commands", () => {
   test(
+    "statusline hides the workspace identity by default",
+    async () => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), "fx-e2e-statusline-default-")));
+      const home = join(root, "home");
+      const workspace = join(root, "workspace-default-hidden");
+      const stderrPath = join(root, "stderr.log");
+      mkdirSync(home, { recursive: true });
+      mkdirSync(join(workspace, ".git"), { recursive: true });
+      writeFileSync(join(workspace, ".git", "HEAD"), "ref: refs/heads/default-hidden-branch\n");
+      writeFileSync(stderrPath, "");
+
+      try {
+        session = await TmuxSession.create({
+          cwd: workspace,
+          env: {
+            HOME: home,
+            AI_GATEWAY_API_KEY: undefined,
+            VERCEL_OIDC_TOKEN: undefined,
+            FX_AUTO_UPGRADE: "0",
+            FX_DISABLE_KEYCHAIN: "1",
+            FX_SKIP_ONBOARDING: "1",
+          },
+          stderrPath,
+          width: 100,
+          height: 30,
+        });
+
+        const pane = await session.waitForComposer(10_000);
+        expect(pane).not.toContain("workspace-default-hidden");
+        expect(pane).not.toContain("default-hidden-branch");
+        expect(readFileSync(stderrPath, "utf8")).toBe("");
+      } finally {
+        if (session) {
+          await session.kill();
+          session = null;
+        }
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    TIMEOUT,
+  );
+
+  test(
     "/help keeps command descriptions close after a wide-to-narrow resize",
     async () => {
       const root = realpathSync(mkdtempSync(join(tmpdir(), "fx-e2e-help-columns-")));
@@ -128,10 +171,14 @@ describe.skipIf(SKIP_TMUX)("tui: fresh-session commands", () => {
       const workspace = join(repository, "packages", "status-root");
       const headPath = join(repository, ".git", "HEAD");
       const stderrPath = join(root, "stderr.log");
-      mkdirSync(home, { recursive: true });
+      mkdirSync(join(home, ".fx"), { recursive: true });
       mkdirSync(join(repository, ".git"), { recursive: true });
       mkdirSync(workspace, { recursive: true });
       writeFileSync(headPath, "ref: refs/heads/initial-branch\n");
+      writeFileSync(
+        join(home, ".fx", "settings.json"),
+        `${JSON.stringify({ statusLine: { workspace: true } })}\n`,
+      );
       writeFileSync(stderrPath, "");
 
       try {
