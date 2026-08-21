@@ -19,7 +19,7 @@ Stop SuperGrok `/credits` and `/xai-usage` from calling Vercel AI Gateway. On an
 3. **One fetch, two renderers**  
    `/credits`, `/balance`, `fx credits` always use `renderCreditsText`.  
    `/xai-usage` uses `renderXaiUsageText` only when `origin = grok`; Gateway origin keeps the credits body.  
-   TUI `/credits` uses the interactive body (no `[credits]` prefix — the notice is already labeled Credits). TUI `/xai-usage` uses the Pi notify line. CLI `fx credits` keeps `[credits]` prefixes.
+   TUI `/credits` uses the interactive body (no `[credits]` prefix — the notice is already labeled Credits). TUI `/xai-usage` uses the Pi notify line and appends last RPM when known. CLI `fx credits` keeps `[credits]` prefixes.
 
 4. **Snapshot**  
    Extend `CreditsSnapshot` with `origin`, `percent: ?u8`, `period`, `reset_at`, `prepaid_cents`, `rpm_remaining`, `rpm_limit`. Gateway leaves them null / `origin = gateway`. `deinit` frees new owned strings. JSON includes the new fields. Do not invent quota from local token counts.

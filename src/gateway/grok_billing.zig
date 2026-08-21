@@ -205,6 +205,9 @@ pub const UsageCache = struct {
     }
 
     pub fn rememberRpm(self: *UsageCache, alloc: Allocator, window: RequestWindow) !void {
+        if (self.rpm) |current| {
+            if (current.remaining == window.remaining and current.limit == window.limit) return;
+        }
         self.rpm = window;
         try self.rebuildFragment(alloc);
     }

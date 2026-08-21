@@ -1377,9 +1377,12 @@ pub const CreditsSnapshot = struct {
         defer out.deinit();
 
         const plan = self.plan orelse "SuperGrok";
-        const percent = self.percent orelse 0;
         const period = self.period orelse "current period";
-        try out.writer.print("{s} {d}% {s}", .{ plan, percent, period });
+        if (self.percent) |percent| {
+            try out.writer.print("{s} {d}% {s}", .{ plan, percent, period });
+        } else {
+            try out.writer.print("{s} {s}", .{ plan, period });
+        }
         if (self.reset_at) |reset_at| {
             try out.writer.print(" · resets {s}", .{reset_at});
         }
@@ -1391,6 +1394,11 @@ pub const CreditsSnapshot = struct {
                 try out.writer.print(" · prepaid -${d}.{d:0>2}", .{ dollars, remainder });
             } else {
                 try out.writer.print(" · prepaid ${d}.{d:0>2}", .{ dollars, remainder });
+            }
+        }
+        if (self.rpm_remaining) |remaining| {
+            if (self.rpm_limit) |limit| {
+                try out.writer.print("\n{d}/{d} RPM", .{ remaining, limit });
             }
         }
         return try out.toOwnedSlice();
@@ -1513,18 +1521,54 @@ pub const CreditsSnapshot = struct {
         if (self.origin == .grok) {
             try out.writer.writeAll(",\"origin\":");
             try std.json.Stringify.value(@tagName(self.origin), .{}, &out.writer);
-            try out.writer.writeAll(",\"percent\":");
-            if (self.percent) |value| {
-                try out.writer.print("{d}", .{value});
-            } else {
-                try out.writer.writeAll("null");
-            }
+            try writeCreditsJsonU8(&out.writer, "percent", self.percent);
+            try writeCreditsJsonStr(&out.writer, "period", self.period);
+            try writeCreditsJsonStr(&out.writer, "reset_at", self.reset_at);
+            try writeCreditsJsonI64(&out.writer, "prepaid_cents", self.prepaid_cents);
+            try writeCreditsJsonU64(&out.writer, "rpm_remaining", self.rpm_remaining);
+            try writeCreditsJsonU64(&out.writer, "rpm_limit", self.rpm_limit);
         }
 
         try out.writer.writeByte('}');
         return try out.toOwnedSlice();
     }
 };
+
+fn writeCreditsJsonStr(writer: *std.Io.Writer, key: []const u8, value: ?[]const u8) !void {
+    try writer.print(",\"{s}\":", .{key});
+    if (value) |text_value| {
+        try std.json.Stringify.value(text_value, .{}, writer);
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
+fn writeCreditsJsonU8(writer: *std.Io.Writer, key: []const u8, value: ?u8) !void {
+    try writer.print(",\"{s}\":", .{key});
+    if (value) |number| {
+        try writer.print("{d}", .{number});
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
+fn writeCreditsJsonI64(writer: *std.Io.Writer, key: []const u8, value: ?i64) !void {
+    try writer.print(",\"{s}\":", .{key});
+    if (value) |number| {
+        try writer.print("{d}", .{number});
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
+fn writeCreditsJsonU64(writer: *std.Io.Writer, key: []const u8, value: ?u64) !void {
+    try writer.print(",\"{s}\":", .{key});
+    if (value) |number| {
+        try writer.print("{d}", .{number});
+    } else {
+        try writer.writeAll("null");
+    }
+}
 
 pub const UpgradeSnapshot = struct {
     current: []const u8,
@@ -2788,6 +2832,56 @@ test "core credits snapshot renders xai-usage only for grok origin" {
     try std.testing.expectEqualStrings(
         "[credits] balance=10\n[credits] used=2\n[credits] plan=pro\n",
         gateway_usage,
+    );
+}
+
+test "core credits snapshot grok json includes typed fields" {
+    const grok = CreditsSnapshot{
+        .origin = .grok,
+        .plan = "SuperGrok",
+        .used = "12% weekly",
+        .balance = "$2.50",
+        .percent = 12,
+        .period = "weekly",
+        .reset_at = "2026-08-24T17:33:48.278Z",
+        .prepaid_cents = 250,
+        .rpm_remaining = 8299,
+        .rpm_limit = 8300,
+    };
+    const json = try grok.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"credits\",\"balance\":\"$2.50\",\"used\":\"12% weekly\",\"plan\":\"SuperGrok\",\"origin\":\"grok\",\"percent\":12,\"period\":\"weekly\",\"reset_at\":\"2026-08-24T17:33:48.278Z\",\"prepaid_cents\":250,\"rpm_remaining\":8299,\"rpm_limit\":8300}",
+        json,
+    );
+}
+
+test "core credits snapshot xai-usage omits invented percent and appends rpm" {
+    const without_percent = CreditsSnapshot{
+        .origin = .grok,
+        .plan = "SuperGrok",
+        .period = "weekly",
+    };
+    const omitted = try without_percent.renderForView(std.testing.allocator, .xai_usage);
+    defer std.testing.allocator.free(omitted);
+    try std.testing.expectEqualStrings("SuperGrok weekly", omitted);
+    try std.testing.expect(std.mem.find(u8, omitted, "0%") == null);
+
+    const with_rpm = CreditsSnapshot{
+        .origin = .grok,
+        .plan = "SuperGrok",
+        .percent = 12,
+        .period = "weekly",
+        .reset_at = "2026-08-24T17:33:48.278Z",
+        .prepaid_cents = 250,
+        .rpm_remaining = 8299,
+        .rpm_limit = 8300,
+    };
+    const usage = try with_rpm.renderForView(std.testing.allocator, .xai_usage);
+    defer std.testing.allocator.free(usage);
+    try std.testing.expectEqualStrings(
+        "SuperGrok 12% weekly · resets 2026-08-24T17:33:48.278Z · prepaid $2.50\n8299/8300 RPM",
+        usage,
     );
 }
 

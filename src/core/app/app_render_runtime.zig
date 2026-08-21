@@ -1253,9 +1253,8 @@ pub fn Runtime(comptime App: type) type {
             if (comptime @hasField(App, "grok_usage_cache")) {
                 if (grok_route.forModel(visible_model) != null) {
                     if (grok_stream.lastRequestWindow()) |window| {
-                        app.grok_usage_cache.rpm = window;
+                        app.grok_usage_cache.rememberRpm(app.alloc, window) catch {};
                     }
-                    app.grok_usage_cache.rebuildFragment(app.alloc) catch {};
                     items.grok_fragment = app.grok_usage_cache.fragmentSlice();
                 }
             }

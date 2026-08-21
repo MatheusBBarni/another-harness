@@ -590,7 +590,7 @@ fn fetchCreditsWithFetch(
     if (grok_route.forModel(input.model) != null) {
         const grok_credential = input.credential orelse "";
         if (grok_credential.len == 0) {
-            return creditsErrorSnapshot(alloc, "Run fx login grok.");
+            return grokCreditsErrorSnapshot(alloc, "Run fx login grok.");
         }
         var result = grok_fetch(alloc, .{
             .access_token = grok_credential,
@@ -608,7 +608,7 @@ fn fetchCreditsWithFetch(
             ) catch {
                 return grokBillingErrorSnapshot(alloc);
             };
-            return .{ .err_message = message };
+            return .{ .origin = .grok, .err_message = message };
         }
         if (result.status != .ok) {
             return grokBillingErrorSnapshot(alloc);
@@ -651,7 +651,14 @@ fn fetchCreditsWithFetch(
 }
 
 fn grokBillingErrorSnapshot(alloc: Allocator) output_contracts.CreditsSnapshot {
-    return creditsErrorSnapshot(alloc, "failed to fetch grok billing");
+    return grokCreditsErrorSnapshot(alloc, "failed to fetch grok billing");
+}
+
+fn grokCreditsErrorSnapshot(alloc: Allocator, message: []const u8) output_contracts.CreditsSnapshot {
+    return .{
+        .origin = .grok,
+        .err_message = alloc.dupe(u8, message) catch null,
+    };
 }
 
 fn grokCreditsSnapshotFromBody(alloc: Allocator, body: []const u8) output_contracts.CreditsSnapshot {
@@ -2184,6 +2191,7 @@ test "built-in credits provider hides grok billing token on 401 and 403" {
 
         try std.testing.expectEqual(@as(usize, 0), xai_credits_gateway_calls);
         try std.testing.expectEqual(@as(usize, 1), xai_credits_grok_calls);
+        try std.testing.expectEqual(output_contracts.CreditsSnapshot.Origin.grok, snapshot.origin);
         try std.testing.expect(snapshot.err_message != null);
         try std.testing.expect(std.mem.find(u8, snapshot.err_message.?, "fx login grok") != null);
         try std.testing.expect(std.mem.find(u8, snapshot.err_message.?, grok_billing_leaked_token) == null);
@@ -2237,6 +2245,7 @@ test "built-in credits provider maps grok transport and non-401 http to grok bil
 
         try std.testing.expectEqual(@as(usize, 0), xai_credits_gateway_calls);
         try std.testing.expectEqual(@as(usize, 1), xai_credits_grok_calls);
+        try std.testing.expectEqual(output_contracts.CreditsSnapshot.Origin.grok, snapshot.origin);
         try std.testing.expect(snapshot.err_message != null);
         try std.testing.expect(std.mem.find(u8, snapshot.err_message.?, "grok billing") != null);
         try std.testing.expect(std.mem.find(u8, snapshot.err_message.?, "no data returned by gateway") == null);

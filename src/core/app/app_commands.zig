@@ -8,6 +8,7 @@ const credentials = @import("../auth/credentials.zig");
 const background_commands = @import("../background/background_commands.zig");
 const gateway_provider = @import("../gateway/gateway_provider.zig");
 const grok_billing = @import("../../gateway/grok_billing.zig");
+const grok_stream = @import("../../gateway/grok_stream.zig");
 const host = @import("../hosts/host.zig");
 const change_tracker_mod = @import("../workspace/change_tracker.zig");
 const command_router = @import("../slash_commands/command_router.zig");
@@ -1598,6 +1599,21 @@ pub fn Handlers(comptime App: type) type {
             }, true);
         }
 
+        fn applyGrokRpmWindow(app: *App, snapshot: *output_contracts.CreditsSnapshot) void {
+            if (snapshot.origin != .grok or snapshot.err_message != null) return;
+            if (grok_stream.lastRequestWindow()) |window| {
+                snapshot.rpm_remaining = window.remaining;
+                snapshot.rpm_limit = window.limit;
+                return;
+            }
+            if (comptime @hasField(App, "grok_usage_cache")) {
+                if (app.grok_usage_cache.rpm) |window| {
+                    snapshot.rpm_remaining = window.remaining;
+                    snapshot.rpm_limit = window.limit;
+                }
+            }
+        }
+
         fn commandShowCredits(ctx: *anyopaque, view: output_contracts.CreditsView) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
             const selected_model: []const u8 = if (comptime @hasField(App, "selected_model")) blk: {
@@ -1615,6 +1631,7 @@ pub fn Handlers(comptime App: type) type {
                 .model = selected_model,
             });
             defer snapshot.deinit(app.alloc);
+            applyGrokRpmWindow(app, &snapshot);
             const text = (if (view == .xai_usage)
                 snapshot.renderForView(app.alloc, view)
             else
@@ -3607,7 +3624,11 @@ const CreditsCommandFakeApp = struct {
     selected_model: []const u8 = "xai/grok-4.6",
     origin: output_contracts.CreditsSnapshot.Origin = .gateway,
     percent: ?u8 = null,
+    plan: ?[]const u8 = null,
+    used: ?[]const u8 = null,
+    period: ?[]const u8 = null,
     reset_at: ?[]const u8 = null,
+    prepaid_cents: ?i64 = null,
     calls: usize = 0,
     saw_expected_input: bool = false,
     saw_selected_model: bool = false,
@@ -3642,8 +3663,12 @@ const CreditsCommandFakeApp = struct {
         var snapshot = output_contracts.CreditsSnapshot{
             .origin = self.origin,
             .percent = self.percent,
+            .prepaid_cents = self.prepaid_cents,
             .balance = alloc.dupe(u8, "10") catch null,
         };
+        if (self.plan) |value| snapshot.plan = alloc.dupe(u8, value) catch null;
+        if (self.used) |value| snapshot.used = alloc.dupe(u8, value) catch null;
+        if (self.period) |value| snapshot.period = alloc.dupe(u8, value) catch null;
         if (self.reset_at) |value| {
             snapshot.reset_at = alloc.dupe(u8, value) catch null;
         }
@@ -4399,6 +4424,27 @@ test "credits command lookup includes selected model and matches cli renderer" {
     try std.testing.expect(app.saw_selected_model);
     try std.testing.expectEqualStrings("credits", app.notice_topic.?);
     try std.testing.expectEqualStrings("balance=10", app.notice_body.items);
+}
+
+test "credits command xai-usage notice includes cached rpm" {
+    grok_stream.testingClearLastRequestWindow();
+    var app = CreditsCommandFakeApp{
+        .alloc = std.testing.allocator,
+        .origin = .grok,
+        .percent = 12,
+        .plan = "SuperGrok",
+        .used = "12% weekly",
+        .period = "weekly",
+        .reset_at = "2026-08-24T17:33:48.278Z",
+        .prepaid_cents = 250,
+    };
+    defer app.deinit();
+    app.grok_usage_cache.rpm = .{ .remaining = 8299, .limit = 8300 };
+
+    try Handlers(CreditsCommandFakeApp).commandShowCredits(@ptrCast(&app), .xai_usage);
+
+    try std.testing.expect(std.mem.find(u8, app.notice_body.items, "SuperGrok 12% weekly") != null);
+    try std.testing.expect(std.mem.find(u8, app.notice_body.items, "8299/8300 RPM") != null);
 }
 
 test "credits command refreshes SuperGrok cache on grok success" {

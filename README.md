@@ -32,6 +32,7 @@ This fork keeps fx’s harness, tools, and Vercel AI Gateway path, and adds **si
 - Everything in upstream fx: interactive shell, `fx ask`, ACP, WASM embed, skills, MCP, subagents
 - SuperGrok OAuth (device code) — no `XAI_API_KEY`
 - Last login owns the session and default model (`xai/grok-4.6` after Grok sign-in)
+- On `xai/` models, `/credits` and `/xai-usage` read Grok billing (not Vercel Gateway). The footer shows `SG {n}%` after a usage command
 - Vercel AI Gateway still available for other models
 - Tracks `vercel-labs/fx` via `upstream`; catch-up workflow in `.agents/skills/catching-up-upstream`
 
