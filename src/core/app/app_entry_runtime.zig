@@ -10,6 +10,8 @@ const background_process_provider = @import(
     "../execution/background_process_provider.zig",
 );
 const gateway_provider = @import("../gateway/gateway_provider.zig");
+const model_catalog = @import("../gateway/model_catalog.zig");
+const agent_stream_provider = @import("../agent/stream_provider.zig");
 const host = @import("../hosts/host.zig");
 const host_target = @import("../hosts/target.zig");
 const io_mod = @import("../shared/io.zig");
@@ -46,6 +48,9 @@ pub const Config = struct {
     gateway_retry_count: usize,
     gateway_chat_url: []const u8,
     gateway_provider: gateway_provider.Provider,
+    codex_agent_stream: ?agent_stream_provider.Provider = null,
+    codex_cli_model_catalog: ?gateway_provider.CliModelCatalogProvider = null,
+    codex_model_catalog: ?model_catalog.Provider = null,
     background_process_provider: background_process_provider.Provider =
         background_process_provider.unavailable_provider,
     url_opener: host.UrlOpener,
@@ -68,6 +73,7 @@ pub const Config = struct {
     acp_runner: acp_runner.Runner,
     devbox_provider: ?devbox_executor.Provider = null,
     permission_reviewer_provider: ?permission_auto_classifier.Provider = null,
+    codex_permission_reviewer_provider: ?permission_auto_classifier.Provider = null,
 };
 
 pub fn run(comptime App: type, alloc: Allocator, args: []const [:0]const u8, cfg: Config) !void {
@@ -393,6 +399,9 @@ fn cliSurfaceConfig(cfg: Config) cli_surface.Config {
         .gateway_retry_count = cfg.gateway_retry_count,
         .gateway_chat_url = cfg.gateway_chat_url,
         .gateway_provider = cfg.gateway_provider,
+        .codex_agent_stream = cfg.codex_agent_stream,
+        .codex_cli_model_catalog = cfg.codex_cli_model_catalog,
+        .codex_model_catalog = cfg.codex_model_catalog,
         .background_process_provider = cfg.background_process_provider,
         .url_opener = cfg.url_opener,
         .secret_store = cfg.secret_store,
@@ -414,6 +423,7 @@ fn cliSurfaceConfig(cfg: Config) cli_surface.Config {
         .acp_runner = cfg.acp_runner,
         .devbox_provider = cfg.devbox_provider,
         .permission_reviewer_provider = cfg.permission_reviewer_provider,
+        .codex_permission_reviewer_provider = cfg.codex_permission_reviewer_provider,
     };
 }
 

@@ -105,7 +105,7 @@ class PgsoPipelineTests(unittest.TestCase):
                 "-pgo-kind=pgo-instr-use-pipeline",
                 "-pgo-cold-func-opt=minsize",
                 "-profile-summary-cutoff-cold=600000",
-                "-passes=default<O2>",
+                "-passes=default<O2>,mergefunc,iroutliner",
             ),
             USE_FLAGS,
         )
@@ -115,7 +115,7 @@ class PgsoPipelineTests(unittest.TestCase):
                 "-pgo-kind=pgo-instr-use-pipeline",
                 "-pgo-cold-func-opt=minsize",
                 "-profile-summary-cutoff-cold=990000",
-                "-passes=default<O2>",
+                "-passes=default<O2>,mergefunc,iroutliner",
             ),
             BENCHMARK_USE_FLAGS,
         )
@@ -274,11 +274,13 @@ class PgsoPipelineTests(unittest.TestCase):
             candidate,
         )
 
-    def test_candidate_is_resigned_with_16k_pages_after_strip(self) -> None:
+    def test_candidate_object_and_signing_contract(self) -> None:
         actions = self.root / "candidate-actions.txt"
         artifact_tool = self.write_executable(
             "artifact-tool",
-            """import pathlib,sys
+            f"""import pathlib,sys
+with pathlib.Path({str(actions)!r}).open('a') as stream:
+    stream.write('artifact ' + ' '.join(sys.argv[1:]) + '\\n')
 output = pathlib.Path(sys.argv[sys.argv.index('-o') + 1])
 output.parent.mkdir(parents=True, exist_ok=True)
 output.write_bytes(b'artifact')""",
@@ -313,6 +315,15 @@ with pathlib.Path({str(actions)!r}).open('a') as stream:
 
         self.assertEqual(
             [
+                "artifact -S "
+                f"{self.paths.profile_use_bitcode} -o "
+                f"{self.paths.profile_use_ir}",
+                "artifact -filetype=obj -O=2 "
+                f"{self.paths.profile_use_bitcode} -o "
+                f"{self.paths.profile_use_object}",
+                "artifact cc -target aarch64-macos -O2 -Wl,-dead_strip -s "
+                f"{self.paths.profile_use_object} -o "
+                f"{self.paths.candidate_binary} -lc",
                 f"strip -S -x {self.paths.candidate_binary}",
                 "codesign --force --sign - --options linker-signed "
                 f"--pagesize 16384 {self.paths.candidate_binary}",

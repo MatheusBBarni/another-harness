@@ -5,6 +5,7 @@ pub const LoginProvider = enum {
     picker,
     grok,
     vercel,
+    codex,
 };
 
 pub const grok_default_model = "xai/grok-4.6";
@@ -20,6 +21,7 @@ pub fn parseLoginProvider(rest: anytype) error{InvalidLoginProvider}!LoginProvid
     if (rest.len != 1) return error.InvalidLoginProvider;
     if (std.mem.eql(u8, rest[0], "grok")) return .grok;
     if (std.mem.eql(u8, rest[0], "vercel")) return .vercel;
+    if (std.mem.eql(u8, rest[0], "codex")) return .codex;
     return error.InvalidLoginProvider;
 }
 
@@ -32,6 +34,10 @@ pub fn lastLoginOwnership(provider: LoginProvider, previous_model: []const u8) L
         .grok => .{
             .credential_source = .grok_oauth,
             .model = grok_default_model,
+        },
+        .codex => .{
+            .credential_source = .chatgpt_subscription,
+            .model = previous_model,
         },
     };
 }
@@ -47,6 +53,7 @@ test "login grok and vercel skip the picker; unknown args fail" {
     try std.testing.expectEqual(LoginProvider.picker, try parseLoginProvider(&.{}));
     try std.testing.expectEqual(LoginProvider.grok, try parseLoginProvider(&.{"grok"}));
     try std.testing.expectEqual(LoginProvider.vercel, try parseLoginProvider(&.{"vercel"}));
+    try std.testing.expectEqual(LoginProvider.codex, try parseLoginProvider(&.{"codex"}));
     try std.testing.expectError(error.InvalidLoginProvider, parseLoginProvider(&.{"openai"}));
     try std.testing.expectError(error.InvalidLoginProvider, parseLoginProvider(&.{ "grok", "vercel" }));
 }

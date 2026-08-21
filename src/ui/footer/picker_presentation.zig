@@ -67,7 +67,7 @@ pub noinline fn composeAuthPickerRow(
     width: u16,
 ) !std.ArrayList(u8) {
     if (view.stage == .sign_in) {
-        return composeSignInPickerRow(alloc, view.sign_in, row_index, width);
+        return composeSignInPickerRow(alloc, view.sign_in, view.sign_in_source, row_index, width);
     }
     if (view.stage == .api_key) {
         return composeApiKeyPickerRow(alloc, view.api_key_mask_count, row_index, width);
@@ -92,6 +92,7 @@ pub noinline fn composeAuthPickerRow(
         }
         const header = switch (view.stage) {
             .root => "   Setup",
+            .provider => "   Switch provider",
             .sign_in => unreachable,
             .api_key => unreachable,
             .change_team => unreachable,
@@ -114,6 +115,7 @@ pub noinline fn composeAuthPickerRow(
         try row.appendSlice(alloc, ui_render.dim_style);
         try row_text.appendClipped(alloc, &row, switch (view.stage) {
             .root => "",
+            .provider => "     No providers available",
             .sign_in => unreachable,
             .api_key => unreachable,
             .change_team => if (view.team_query.len == 0)
@@ -159,7 +161,7 @@ fn onboardingProjectedRowIndex(view: auth_runtime.PickerView, row_index: u16, ro
 
     const selected_row: u16 = if (view.selectedIndex() == 0) 8 else 9;
     const other_row: u16 = if (selected_row == 8) 9 else 8;
-    const priority = [_]u16{ selected_row, other_row, 14, 7, 11, 5, 0, 2, 3, 6, 10, 12, 13, 1, 4, 15, 16 };
+    const priority = [_]u16{ selected_row, other_row, 10, 14, 7, 11, 5, 0, 2, 3, 6, 12, 13, 1, 4, 15, 16 };
 
     var projected_index: u16 = 0;
     for (0..17) |source_row| {
@@ -188,6 +190,7 @@ fn composeOnboardingPickerRow(
     const maybe_choice_index: ?usize = switch (source_row_index) {
         8 => 0,
         9 => 1,
+        10 => 2,
         else => null,
     };
     if (maybe_choice_index) |choice_index| {
@@ -231,6 +234,7 @@ fn composeOnboardingPickerRow(
 fn composeSignInPickerRow(
     alloc: Allocator,
     snapshot: login_flow.SignInSnapshot,
+    source: credentials.Source,
     row_index: u16,
     width: u16,
 ) !std.ArrayList(u8) {
@@ -247,18 +251,24 @@ fn composeSignInPickerRow(
     );
     var label_buf: [512]u8 = undefined;
     const label = switch (row_index) {
-        0 => "   Sign in with Vercel",
+        0 => if (source == .chatgpt_subscription) "   Sign in with Codex" else "   Sign in with Vercel",
         1, 4 => "",
         2 => std.fmt.bufPrint(
             &label_buf,
             "   Open   {s}",
             .{snapshot.verification_uri},
-        ) catch "   Open the Vercel device authorization page",
-        3 => std.fmt.bufPrint(
-            &label_buf,
-            "   Code   {s}",
-            .{snapshot.user_code},
-        ) catch "   Code unavailable",
+        ) catch if (source == .chatgpt_subscription)
+            "   Open the Codex authorization page"
+        else
+            "   Open the Vercel device authorization page",
+        3 => if (snapshot.user_code.len == 0)
+            ""
+        else
+            std.fmt.bufPrint(
+                &label_buf,
+                "   Code   {s}",
+                .{snapshot.user_code},
+            ) catch "   Code unavailable",
         5 => switch (snapshot.state) {
             .idle => "   Preparing sign-in…",
             .polling => "   Waiting for authorization…",
@@ -1523,6 +1533,16 @@ test "typed file picker tiny directory row retains kind identity" {
     try std.testing.expect(std.mem.find(u8, row.items, "/") != null);
 }
 
+test "compose model picker rows render raw catalog model ids" {
+    var codex = try composePickerOptionRow(std.testing.allocator, .model_stage, 1, "gpt-5.4", true, 80);
+    defer codex.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.find(u8, codex.items, "gpt-5.4") != null);
+
+    var gateway = try composePickerOptionRow(std.testing.allocator, .model_stage, 1, "anthropic/claude-sonnet-4.6", false, 80);
+    defer gateway.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.find(u8, gateway.items, "anthropic/claude-sonnet-4.6") != null);
+}
+
 test "compose model picker status row aligns to active token" {
     var row = try composePickerStatusRow(std.testing.allocator, .model_stage, .fast, false, false, 23, 48);
     defer row.deinit(std.testing.allocator);
@@ -1572,7 +1592,11 @@ test "auth onboarding composes the welcome copy and setup choices" {
     defer selected_row.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, selected_row.items, "› Sign in with Vercel") != null);
 
-    var unselected_row = try composeAuthPickerRow(alloc, view, 9, authPickerRowCount(view), 100);
+    var chatgpt_row = try composeAuthPickerRow(alloc, view, 9, authPickerRowCount(view), 100);
+    defer chatgpt_row.deinit(alloc);
+    try std.testing.expect(std.mem.find(u8, chatgpt_row.items, "Sign in with Codex") != null);
+
+    var unselected_row = try composeAuthPickerRow(alloc, view, 10, authPickerRowCount(view), 100);
     defer unselected_row.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, unselected_row.items, "Add an API key") != null);
 
@@ -1590,7 +1614,7 @@ test "auth onboarding composes the welcome copy and setup choices" {
     }
     try std.testing.expect(std.mem.find(u8, compact_screen.items, "Sign in with Vercel") != null);
     try std.testing.expect(std.mem.find(u8, compact_screen.items, "Add an API key") != null);
-    try std.testing.expect(std.mem.find(u8, compact_screen.items, "Esc to set up later") != null);
+    try std.testing.expect(std.mem.find(u8, compact_screen.items, "Sign in with Codex") != null);
 }
 
 test "auth picker composes only detected credential sources" {
@@ -1603,7 +1627,7 @@ test "auth picker composes only detected credential sources" {
         .include_skip = false,
     };
     const row_count = authPickerRowCount(view);
-    try std.testing.expectEqual(@as(u16, 5), row_count);
+    try std.testing.expectEqual(@as(u16, 6), row_count);
 
     var header = try composeAuthPickerRow(alloc, view, 0, row_count, 80);
     defer header.deinit(alloc);
@@ -1613,16 +1637,20 @@ test "auth picker composes only detected credential sources" {
     defer sign_in.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, sign_in.items, "Sign in with Vercel") != null);
 
-    var setup = try composeAuthPickerRow(alloc, view, 2, row_count, 80);
+    var chatgpt = try composeAuthPickerRow(alloc, view, 2, row_count, 80);
+    defer chatgpt.deinit(alloc);
+    try std.testing.expect(std.mem.find(u8, chatgpt.items, "Sign in with Codex") != null);
+
+    var setup = try composeAuthPickerRow(alloc, view, 3, row_count, 80);
     defer setup.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, setup.items, "API key") != null);
 
-    var change_team = try composeAuthPickerRow(alloc, view, 3, row_count, 80);
+    var change_team = try composeAuthPickerRow(alloc, view, 4, row_count, 80);
     defer change_team.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, change_team.items, "Change team") != null);
     try std.testing.expect(std.mem.find(u8, change_team.items, "sign in first") != null);
 
-    var switch_credential = try composeAuthPickerRow(alloc, view, 4, row_count, 80);
+    var switch_credential = try composeAuthPickerRow(alloc, view, 5, row_count, 80);
     defer switch_credential.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, switch_credential.items, "Switch credential") != null);
 }

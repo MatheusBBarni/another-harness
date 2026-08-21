@@ -83,6 +83,7 @@ pub const ModelMenuLoadState = enum {
 
 pub const ModelMenuCatalogState = struct {
     access_level: ?model_catalog.AccessLevel = null,
+    source: ?credentials.Source = null,
     public_only_reason: ?credentials.CatalogPublicOnlyReason = null,
     private_models_hidden: bool = false,
     failure: ?Failure = null,
@@ -440,6 +441,31 @@ pub const Runtime = struct {
         self.cancel_requested.store(false, .seq_cst);
     }
 
+    /// Installs a catalog that was completely fetched and validated before the
+    /// caller's publication boundary. Ownership transfers without allocation.
+    pub fn adoptOwnedCatalog(
+        self: *Self,
+        access: credentials.CatalogAccess,
+        owned_catalog: *std.ArrayList(model_catalog.ModelCatalogEntry),
+    ) void {
+        self.cancelAndJoin();
+
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        self.menu.deinit(self.alloc);
+        model_catalog.freeModelCatalog(self.alloc, &self.catalog);
+        self.catalog = owned_catalog.*;
+        owned_catalog.* = .empty;
+        self.outcome = .{ .loaded = .{
+            .access = model_catalog.AccessMetadata.init(access),
+        } };
+        self.state = .ready;
+        self.completion_pending = true;
+        self.last_attempt_ms = io_mod.milliTimestamp();
+        self.requested_access = model_catalog.AccessMetadata.init(access);
+        self.cancel_requested.store(false, .seq_cst);
+    }
+
     pub fn isLoading(self: *Self) bool {
         self.finishThreadIfDone();
         self.mutex.lockUncancelable(io_mod.getIo());
@@ -688,6 +714,7 @@ fn modelMenuCatalogState(outcome: CatalogOutcome) ModelMenuCatalogState {
         null;
     return .{
         .access_level = access.level,
+        .source = access.source,
         .public_only_reason = access.public_only_reason,
         .private_models_hidden = access.private_models_may_be_hidden,
         .failure = if (failure) |failed| .{

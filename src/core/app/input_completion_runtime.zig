@@ -18,6 +18,7 @@ const file_index = @import("../workspace/file_index.zig");
 const app_workspace_runtime = @import("app_workspace_runtime.zig");
 const app_session_runtime = @import("app_session_runtime.zig");
 const app_commands = @import("app_commands.zig");
+const provider_runtime = @import("provider_runtime.zig");
 const input_queue_runtime = @import("input_queue_runtime.zig");
 const input_limit_feedback = @import("input_limit_feedback.zig");
 const types = @import("../shared/types.zig");
@@ -931,11 +932,12 @@ pub fn CompletionRuntime(comptime App: type) type {
 
         pub fn modelPickerCompletions(app: *App, query: []const u8, out: *[32][]const u8) usize {
             const count = app.modelCompletions(query, out);
-            if (comptime !@hasField(App, "selected_model")) return count;
+            if (comptime !provider_runtime.supported(App)) return count;
             if (!app.input_runtime.picker.model_completion_anchor_current or query.len != 0) return count;
 
-            if (modelCompletionIndex(out[0..count], app.selected_model.items) == null) {
-                if (catalogModelCompletion(app, app.selected_model.items)) |current| {
+            const selected_model = provider_runtime.model(app);
+            if (modelCompletionIndex(out[0..count], selected_model) == null) {
+                if (catalogModelCompletion(app, selected_model)) |current| {
                     if (count < out.len) {
                         out[count] = current;
                         return count + 1;
@@ -957,9 +959,9 @@ pub fn CompletionRuntime(comptime App: type) type {
 
         pub fn modelPickerIndex(app: *App, completions: []const []const u8) usize {
             if (completions.len == 0) return 0;
-            if (comptime !@hasField(App, "selected_model")) return app.input_runtime.picker.model_completion_index % completions.len;
+            if (comptime !provider_runtime.supported(App)) return app.input_runtime.picker.model_completion_index % completions.len;
             if (app.input_runtime.picker.model_completion_anchor_current) {
-                if (modelCompletionIndex(completions, app.selected_model.items)) |index| return index;
+                if (modelCompletionIndex(completions, provider_runtime.model(app))) |index| return index;
             }
             return app.input_runtime.picker.model_completion_index % completions.len;
         }

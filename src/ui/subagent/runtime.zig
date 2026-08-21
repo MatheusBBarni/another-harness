@@ -12,6 +12,7 @@ const io_mod = @import("../../core/shared/io.zig");
 const manager_mod = @import("../../core/subagent/manager.zig");
 const permission_request = @import("../../core/permissions/permission_request.zig");
 const projection = @import("../../core/subagent/ui_projection.zig");
+const resume_admission = @import("../../core/subagent/resume_admission.zig");
 const terminal_projection = @import("../../core/terminal/ui_projection.zig");
 const skill_contract = @import("../../core/skills/skill_contract.zig");
 const input_action = @import("../../core/input/input_action.zig");
@@ -342,6 +343,7 @@ const AttachState = struct {
     candidates: std.ArrayList(projection.AttachCandidate) = .empty,
     selected: usize = 0,
     has_more: bool = false,
+    continuation: ?resume_admission.ActionableContinuation = null,
     loading: bool = false,
     selection_stale: bool = false,
     attempt: MutationAttempt = .{},
@@ -355,6 +357,8 @@ const AttachState = struct {
     fn clear(self: *AttachState, alloc: Allocator) void {
         for (self.candidates.items) |*candidate| candidate.deinit(alloc);
         self.candidates.clearRetainingCapacity();
+        if (self.continuation) |*continuation| continuation.deinit(alloc);
+        self.continuation = null;
         self.attempt.deinit(alloc);
         self.selected = 0;
         self.has_more = false;
@@ -740,6 +744,16 @@ pub const ChildRouteState = struct {
     presentation_diffs: std.ArrayList(diff_mod.DiffEntry) = .empty,
     presented_through_sequence: u64 = 0,
 
+    noinline fn init() ChildRouteState {
+        var result: ChildRouteState = .{
+            .editor = undefined,
+            .presentation = undefined,
+        };
+        result.editor = .{};
+        result.presentation = null;
+        return result;
+    }
+
     fn deinit(self: *ChildRouteState, alloc: Allocator) void {
         self.clear(alloc);
         self.pages.deinit(alloc);
@@ -879,7 +893,11 @@ pub const Runtime = struct {
     count_projection: usize = 0,
 
     pub noinline fn init() Runtime {
-        var result: Runtime = .{ .form = undefined };
+        var result: Runtime = .{
+            .child = undefined,
+            .form = undefined,
+        };
+        result.child = ChildRouteState.init();
         result.form = FormState.init();
         return result;
     }
@@ -2203,6 +2221,12 @@ pub const Runtime = struct {
         var page = page_value;
         errdefer page.deinit(alloc);
         const has_more = page.has_more;
+        const continuation = page.continuation;
+        page.continuation = null;
+        errdefer if (continuation) |value| {
+            var owned = value;
+            owned.deinit(alloc);
+        };
         if (!append) {
             const prior_selected = self.attach.selectedCandidate();
             var next_candidates: std.ArrayList(projection.AttachCandidate) = .empty;
@@ -2237,6 +2261,8 @@ pub const Runtime = struct {
         }
         alloc.free(page.candidates);
         page = undefined;
+        if (self.attach.continuation) |*prior| prior.deinit(alloc);
+        self.attach.continuation = continuation;
         self.attach.has_more = has_more;
         self.attach.loading = false;
         if (self.attach.candidates.items.len == 0) self.attach.selected = 0 else {
@@ -2253,9 +2279,9 @@ pub const Runtime = struct {
     }
 
     pub fn attachContinuation(self: Runtime) ?@import("../../core/session/session_store.zig").ResumableSessionContinuation {
-        if (!self.attach.has_more or self.attach.candidates.items.len == 0) return null;
-        const last = self.attach.candidates.items[self.attach.candidates.items.len - 1];
-        return .{ .updated_at_ms = last.updated_at_ms, .id = last.session_id };
+        if (!self.attach.has_more) return null;
+        const continuation = self.attach.continuation orelse return null;
+        return continuation.view();
     }
 
     pub fn prepareManagerMutation(
@@ -3893,6 +3919,36 @@ test "repeated editor defaults are initialized through one runtime path" {
     for (runtime.form.editors) |editor| {
         try std.testing.expect(editor.slash_menu_categories);
     }
+}
+
+test "child route initializer preserves every runtime default" {
+    var child = ChildRouteState.init();
+    defer child.deinit(std.testing.allocator);
+
+    try std.testing.expect(child.chat == null);
+    try std.testing.expect(child.unavailable == null);
+    try std.testing.expectEqual(@as(usize, 0), child.pages.pages.items.len);
+    try std.testing.expect(child.editor.slash_menu_categories);
+    try std.testing.expectEqual(@as(usize, 0), child.scroll_from_bottom);
+    try std.testing.expectEqual(@as(usize, 0), child.max_scroll);
+    try std.testing.expect(child.invocation_id == null);
+    try std.testing.expectEqual(@as(u64, 0), child.identity_epoch);
+    try std.testing.expect(child.submission_failure == null);
+    try std.testing.expect(child.input_failure == null);
+    try std.testing.expect(child.paste_rejection == null);
+    try std.testing.expectEqual(@as(u64, 0), child.operation_counter);
+    try std.testing.expect(child.rendered_chat_rows == null);
+    try std.testing.expectEqual(ViewportMutation.none, child.viewport_mutation);
+    try std.testing.expect(child.presentation == null);
+    try std.testing.expectEqual(
+        transcript_presentation.Depth.inline_mode,
+        child.presentation_transcript_depth,
+    );
+    try std.testing.expect(child.presentation_live_work_id == null);
+    try std.testing.expectEqual(@as(usize, 0), child.presentation_live_event_count);
+    try std.testing.expectEqual(@as(u32, 1), child.presentation_next_diff_id);
+    try std.testing.expectEqual(@as(usize, 0), child.presentation_diffs.items.len);
+    try std.testing.expectEqual(@as(u64, 0), child.presented_through_sequence);
 }
 
 pub fn paint(

@@ -17,6 +17,7 @@ const text_utils = @import("../shared/text_utils.zig");
 const session = @import("../session/session.zig");
 const session_child_store = @import("../session/session_child_store.zig");
 const session_codec = @import("../session/session_codec.zig");
+const model_provider = @import("../config/model_provider.zig");
 const session_event = @import("../session/session_event.zig");
 const session_store = @import("../session/session_store.zig");
 const permissions = @import("../permissions/permissions.zig");
@@ -48,6 +49,7 @@ else
 const Allocator = std.mem.Allocator;
 
 pub const TurnPreferences = struct {
+    provider: model_provider.ProviderId = .gateway,
     model: []const u8,
     effort: types.ReasoningEffort,
 };
@@ -59,9 +61,30 @@ pub fn resolveTurnPreferences(
     persisted: session_codec.DurableSessionPreferences,
 ) TurnPreferences {
     return .{
+        .provider = persisted.provider,
         .model = configuration.model orelse persisted.model,
         .effort = configuration.effort orelse persisted.effort,
     };
+}
+
+test "turn preference overrides preserve the persisted provider" {
+    var command = try domain.validateCommand(std.testing.allocator, .{ .create = .{
+        .name = "child",
+        .mode = .persistent,
+        .model = "gpt-5.4-mini",
+    } });
+    defer command.deinit(std.testing.allocator);
+    const preferences = resolveTurnPreferences(
+        command.create.configuration,
+        .{
+            .provider = .codex,
+            .model = @constCast("gpt-5.6-sol"),
+            .effort = types.ReasoningEffort.literal("high"),
+            .fast_mode = false,
+        },
+    );
+    try std.testing.expectEqual(model_provider.ProviderId.codex, preferences.provider);
+    try std.testing.expectEqualStrings("gpt-5.4-mini", preferences.model);
 }
 
 pub const WorkOutcome = enum {
@@ -1361,6 +1384,12 @@ pub const Owner = struct {
     approval_registry: ?*approval_registry_mod.Registry = null,
     notification_clock: ?NotificationClock = null,
     notification_poller: ?NotificationPoller = null,
+    /// Borrowed from the host and valid until `deinit` joins the reaper.
+    retirement_root_id: ?[]const u8 = null,
+    retirement_cursor: ?[]u8 = null,
+    retirement_scan_pending: bool = false,
+    retirement_due_ms: ?i64 = null,
+    retirement_retry_after_scan: bool = false,
     max_history_turns: usize = 8,
     mutex: std.Io.Mutex = .init,
     reaper_cond: std.Io.Condition = .init,
@@ -1453,6 +1482,18 @@ pub const Owner = struct {
             self.mutex.unlock(io_mod.getIo());
             return result;
         }
+    }
+
+    pub fn requestRetirementSweep(
+        self: *Owner,
+        timestamp_ms: i64,
+    ) StartError!void {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        if (self.closed) return error.OwnerClosed;
+        if (self.retirement_root_id == null) return;
+        try self.ensureReaperLocked();
+        self.scheduleRetirementSweepLocked(timestamp_ms);
     }
 
     /// Returns the latest in-memory execution outcome without consuming it.
@@ -1726,6 +1767,12 @@ pub const Owner = struct {
 
     pub fn deinit(self: *Owner) void {
         self.mutex.lockUncancelable(io_mod.getIo());
+        if (self.retirement_scan_pending and self.retirement_root_id != null) {
+            self.retirement_due_ms = reaperNowMs(self);
+            self.mutex.unlock(io_mod.getIo());
+            self.runRetirementSweep(reaperNowMs(self));
+            self.mutex.lockUncancelable(io_mod.getIo());
+        }
         self.closed = true;
         for (self.slots.items) |slot| {
             slot.shutdown.store(true, .seq_cst);
@@ -1786,6 +1833,7 @@ pub const Owner = struct {
             schedule.deinit(self.alloc);
         }
         self.notification_schedules.deinit(self.alloc);
+        if (self.retirement_cursor) |cursor| self.alloc.free(cursor);
         self.slots.deinit(self.alloc);
         self.* = undefined;
     }
@@ -1898,6 +1946,15 @@ pub const Owner = struct {
         if (self.reaper_thread != null) return;
         self.reaper_thread = std.Thread.spawn(.{}, reaperMain, .{self}) catch
             return error.ThreadSpawnFailed;
+    }
+
+    fn scheduleRetirementSweepLocked(self: *Owner, due_ms: i64) void {
+        self.retirement_scan_pending = true;
+        self.retirement_due_ms = if (self.retirement_due_ms) |current|
+            @min(current, due_ms)
+        else
+            due_ms;
+        self.reaper_wake.set(io_mod.getIo());
     }
 
     fn registerNotificationSchedule(
@@ -2237,6 +2294,16 @@ pub const Owner = struct {
             "terminal reconciliation deferred child_id={s} outcome={s}",
             .{ child_id, @errorName(err) },
         );
+        _ = reconcileOneOffFinalResultLocked(
+            self.alloc,
+            communication_state,
+            record,
+            &.{},
+        ) catch |err| debug_trace.logf(
+            "subagent",
+            "final result reconciliation deferred child_id={s} outcome={s}",
+            .{ child_id, @errorName(err) },
+        );
         return count;
     }
 
@@ -2350,6 +2417,12 @@ pub const Owner = struct {
             communication_state,
             record,
         ) catch return error.ControlStoreFailed;
+        _ = reconcileOneOffFinalResultLocked(
+            self.alloc,
+            communication_state,
+            record,
+            loaded.state.history,
+        ) catch return error.ControlStoreFailed;
         return changed;
     }
 
@@ -2379,7 +2452,353 @@ pub const Owner = struct {
         report.work_interrupted += changed.interrupted;
         report.work_completed += changed.completed;
     }
+
+    fn runRetirementSweep(self: *Owner, now_ms: i64) void {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        if (!self.retirement_scan_pending or
+            (self.retirement_due_ms orelse now_ms) > now_ms)
+        {
+            self.mutex.unlock(io_mod.getIo());
+            return;
+        }
+        self.retirement_scan_pending = false;
+        self.retirement_due_ms = null;
+        const root_id = self.retirement_root_id orelse {
+            self.mutex.unlock(io_mod.getIo());
+            return;
+        };
+        const owned_root = self.alloc.dupe(u8, root_id) catch {
+            self.scheduleRetirementSweepLocked(now_ms + retirement_retry_delay_ms);
+            self.mutex.unlock(io_mod.getIo());
+            return;
+        };
+        const cursor = self.retirement_cursor;
+        self.retirement_cursor = null;
+        self.mutex.unlock(io_mod.getIo());
+        defer self.alloc.free(owned_root);
+        defer if (cursor) |value| self.alloc.free(value);
+
+        var result = self.manager.snapshot(self.alloc, .{
+            .root_id = owned_root,
+            .cursor = cursor,
+            .limit = domain.default_page_limit,
+        }) catch |err| {
+            debug_trace.logf(
+                "subagent",
+                "retirement sweep deferred root_id={s} outcome={s}",
+                .{ owned_root, @errorName(err) },
+            );
+            self.finishRetirementSweep(null, true, now_ms);
+            return;
+        };
+        defer result.deinit(self.alloc);
+        const snapshot = switch (result) {
+            .failure => |failure| {
+                const retry = failure.code == .store_failure or
+                    failure.code == .graph_changed;
+                debug_trace.logf(
+                    "subagent",
+                    "retirement sweep retained root_id={s} reason={s} retryable={}",
+                    .{ owned_root, @tagName(failure.code), retry },
+                );
+                self.finishRetirementSweep(null, retry, now_ms);
+                return;
+            },
+            .snapshot => |*value| value,
+        };
+        if (snapshot.restart_required) {
+            self.finishRetirementSweep(null, true, now_ms);
+            return;
+        }
+
+        var retry = false;
+        for (snapshot.nodes) |node| {
+            if (!isTerminalOneOff(node.mode, node.state)) continue;
+            retry = self.tryRetireOneOff(node.child_id) or retry;
+        }
+        for (snapshot.diagnostics) |diagnostic| {
+            if (diagnostic.code != .session_unavailable) continue;
+            const parent_id = diagnostic.parent_id orelse continue;
+            _ = relationship_index.removeChild(
+                self.alloc,
+                self.sessions,
+                parent_id,
+                diagnostic.session_id,
+                self.child_store_options,
+            ) catch |err| {
+                traceRetirementRetain(
+                    diagnostic.session_id,
+                    "stale_relationship_remove",
+                    err,
+                );
+                retry = shouldScheduleRetirementRetry(err) or retry;
+            };
+        }
+        const next_cursor = if (snapshot.next_cursor) |next|
+            self.alloc.dupe(u8, next) catch {
+                self.finishRetirementSweep(null, true, now_ms);
+                return;
+            }
+        else
+            null;
+        self.finishRetirementSweep(next_cursor, retry, now_ms);
+    }
+
+    fn finishRetirementSweep(
+        self: *Owner,
+        next_cursor: ?[]u8,
+        retry: bool,
+        now_ms: i64,
+    ) void {
+        self.mutex.lockUncancelable(io_mod.getIo());
+        defer self.mutex.unlock(io_mod.getIo());
+        if (self.closed) {
+            if (next_cursor) |cursor| self.alloc.free(cursor);
+            return;
+        }
+        if (self.retirement_scan_pending) {
+            self.retirement_retry_after_scan =
+                self.retirement_retry_after_scan or retry;
+            if (next_cursor) |cursor| self.alloc.free(cursor);
+            return;
+        }
+        if (self.retirement_cursor) |cursor| self.alloc.free(cursor);
+        self.retirement_cursor = next_cursor;
+        if (next_cursor != null) {
+            self.retirement_retry_after_scan =
+                self.retirement_retry_after_scan or retry;
+            self.scheduleRetirementSweepLocked(now_ms);
+        } else {
+            const should_retry = retry or self.retirement_retry_after_scan;
+            self.retirement_retry_after_scan = false;
+            if (should_retry) {
+                self.scheduleRetirementSweepLocked(
+                    now_ms + retirement_retry_delay_ms,
+                );
+            }
+        }
+    }
+
+    /// Returns true only when another automatic bounded attempt is warranted.
+    fn tryRetireOneOff(self: *Owner, child_id: []const u8) bool {
+        _ = relationship_index.migrateLegacyPage(
+            self.alloc,
+            self.sessions,
+            child_id,
+            self.child_store_options,
+        ) catch |err| {
+            if (err == error.StoreUnavailable) {
+                var page = self.sessions.listResumablePage(
+                    self.alloc,
+                    null,
+                    null,
+                ) catch |backfill_err| {
+                    traceRetirementRetain(
+                        child_id,
+                        "migration_backfill",
+                        backfill_err,
+                    );
+                    return shouldScheduleRetirementRetry(backfill_err);
+                };
+                page.deinit(self.alloc);
+                return true;
+            }
+            traceRetirementRetain(child_id, "migration", err);
+            return shouldScheduleRetirementRetry(err);
+        };
+
+        var loaded = self.sessions.resumeTargetForWrite(
+            self.alloc,
+            .{ .id = child_id },
+            self.sessions.workspace_root,
+            self.session_resume_options,
+        ) catch |err| {
+            traceRetirementRetain(child_id, "writer", err);
+            return shouldScheduleRetirementRetry(err);
+        };
+        var loaded_consumed = false;
+        defer if (!loaded_consumed) loaded.deinit(self.alloc);
+
+        var capability = self.sessions.openSubagentControlCapabilityWritable(
+            self.alloc,
+            child_id,
+            self.child_store_options,
+        ) catch |err| {
+            traceRetirementRetain(child_id, "control_open", err);
+            return shouldScheduleRetirementRetry(err);
+        };
+        defer capability.deinit();
+        const control = control_store.Store{
+            .capability = &capability,
+            .expected_child_id = child_id,
+        };
+        var lock = control.acquireLock() catch |err| {
+            traceRetirementRetain(child_id, "control_lock", err);
+            return shouldScheduleRetirementRetry(err);
+        };
+        defer lock.release();
+        var record = control.load(self.alloc) catch |err| {
+            traceRetirementRetain(child_id, "control_load", err);
+            return shouldScheduleRetirementRetry(err);
+        };
+        defer record.deinit(self.alloc);
+        if (!isTerminalOneOff(record.mode, record.state)) return false;
+        const parent_id = record.parent_id orelse return false;
+
+        var communication_capability = self.sessions.openSubagentControlCapabilityWritable(
+            self.alloc,
+            child_id,
+            self.communication_store_options,
+        ) catch |err| {
+            traceRetirementRetain(child_id, "communication_open", err);
+            return shouldScheduleRetirementRetry(err);
+        };
+        defer communication_capability.deinit();
+        const communication_state = communication_store.Store{
+            .capability = &communication_capability,
+            .expected_session_id = child_id,
+        };
+        _ = reconcileOneOffFinalResultLocked(
+            self.alloc,
+            communication_state,
+            record,
+            loaded.state.history,
+        ) catch |err| {
+            traceRetirementRetain(child_id, "result_reconcile", err);
+            return shouldScheduleRetirementRetry(err);
+        };
+        var ledger = communication_state.loadOptional(self.alloc) catch |err| {
+            traceRetirementRetain(child_id, "communication_load", err);
+            return shouldScheduleRetirementRetry(err);
+        } orelse return true;
+        defer ledger.deinit(self.alloc);
+        const work_id = terminalOneOffWorkId(record) orelse return false;
+        const delivery_id = communication.stableDeliveryId(
+            child_id,
+            work_id,
+            "final-result",
+        );
+        const result_acknowledged = communication.parentTurnDeliveryFullyAcknowledged(
+            ledger,
+            "parent-model",
+            parent_id,
+            &delivery_id,
+        );
+        if (!result_acknowledged) return false;
+
+        const active_count = relationship_index.activeCountIfMigrationComplete(
+            self.alloc,
+            self.sessions,
+            child_id,
+            self.child_store_options,
+        ) catch |err| {
+            traceRetirementRetain(child_id, "descendant_proof", err);
+            return shouldScheduleRetirementRetry(err);
+        };
+        const facts = OneOffRetirementFacts{
+            .mode = record.mode,
+            .state = record.state,
+            .result_acknowledged = result_acknowledged,
+            .migration_complete = active_count != null,
+            .active_count = active_count,
+        };
+        if (!canRetireOneOff(facts)) return active_count == null;
+
+        const disposition = self.sessions.deleteCommittedSession(
+            self.alloc,
+            &loaded,
+        );
+        loaded_consumed = true;
+        switch (disposition) {
+            .retained => return false,
+            .indeterminate => return true,
+            .discarded => {},
+        }
+        _ = relationship_index.removeChild(
+            self.alloc,
+            self.sessions,
+            parent_id,
+            child_id,
+            self.child_store_options,
+        ) catch |err| {
+            traceRetirementRetain(child_id, "relationship_remove", err);
+            return shouldScheduleRetirementRetry(err);
+        };
+        debug_trace.logf(
+            "subagent",
+            "one-off retirement committed child_id={s} parent_id={s}",
+            .{ child_id, parent_id },
+        );
+        return false;
+    }
 };
+
+const retirement_retry_delay_ms: i64 = 100;
+
+fn isTerminalOneOff(mode: domain.Mode, state: domain.State) bool {
+    if (mode != .one_off) return false;
+    return switch (state) {
+        .completed, .failed, .cancelled => true,
+        else => false,
+    };
+}
+
+const OneOffRetirementFacts = struct {
+    mode: domain.Mode,
+    state: domain.State,
+    result_acknowledged: bool,
+    migration_complete: bool,
+    active_count: ?u64,
+};
+
+fn canRetireOneOff(facts: OneOffRetirementFacts) bool {
+    return isTerminalOneOff(facts.mode, facts.state) and
+        facts.result_acknowledged and
+        facts.migration_complete and
+        facts.active_count != null and
+        facts.active_count.? == 0;
+}
+
+fn terminalOneOffWorkId(record: control_store.Record) ?[]const u8 {
+    var index = record.queue.len;
+    while (index > 0) {
+        index -= 1;
+        switch (record.queue[index].status) {
+            .completed, .failed, .cancelled => return record.queue[index].id,
+            else => {},
+        }
+    }
+    return null;
+}
+
+fn shouldScheduleRetirementRetry(err: anyerror) bool {
+    return switch (err) {
+        error.SessionBusy,
+        error.ExternalBusy,
+        error.ControlLockBusy,
+        error.LockBusy,
+        error.SessionStoreUnavailable,
+        error.StoreUnavailable,
+        error.CommitIndeterminate,
+        error.RecoveryRequired,
+        error.StaleCursor,
+        error.OutOfMemory,
+        => true,
+        else => false,
+    };
+}
+
+fn traceRetirementRetain(
+    child_id: []const u8,
+    stage: []const u8,
+    err: anyerror,
+) void {
+    debug_trace.logf(
+        "subagent",
+        "one-off retirement retained child_id={s} stage={s} outcome={s} retryable={}",
+        .{ child_id, stage, @errorName(err), shouldScheduleRetirementRetry(err) },
+    );
+}
 
 fn isRetryableNotificationPollError(err: communication_manager.Error) bool {
     return switch (err) {
@@ -2416,11 +2835,23 @@ fn reaperMain(owner: *Owner) void {
             break;
         }
         const slot = selected orelse {
-            const next_check_ms = owner.nextNotificationCheckLocked();
-            const now_ms = if (owner.notification_clock) |clock|
-                clock.now_ms()
+            const now_ms = reaperNowMs(owner);
+            if (owner.retirement_scan_pending and
+                (owner.retirement_due_ms orelse now_ms) <= now_ms)
+            {
+                owner.mutex.unlock(io_mod.getIo());
+                owner.runRetirementSweep(now_ms);
+                owner.mutex.lockUncancelable(io_mod.getIo());
+                continue;
+            }
+            const notification_check_ms = owner.nextNotificationCheckLocked();
+            const next_check_ms = if (owner.retirement_scan_pending)
+                if (notification_check_ms) |notification_due|
+                    @min(notification_due, owner.retirement_due_ms orelse now_ms)
+                else
+                    owner.retirement_due_ms
             else
-                0;
+                notification_check_ms;
             if (next_check_ms != null and next_check_ms.? <= now_ms) {
                 owner.mutex.unlock(io_mod.getIo());
                 _ = owner.pollNotifications() catch |err| {
@@ -2459,12 +2890,22 @@ fn reaperMain(owner: *Owner) void {
         }
         owner.removeSlotLocked(slot);
         owner.cacheCompletionLocked(slot.child_id, slot.result);
+        if (owner.retirement_root_id != null) {
+            owner.scheduleRetirementSweepLocked(reaperNowMs(owner));
+        }
         owner.reaper_cond.broadcast(io_mod.getIo());
         owner.mutex.unlock(io_mod.getIo());
         slot.live.deinit(owner.alloc);
         owner.alloc.destroy(slot);
         owner.mutex.lockUncancelable(io_mod.getIo());
     }
+}
+
+fn reaperNowMs(owner: *const Owner) i64 {
+    return if (owner.notification_clock) |clock|
+        clock.now_ms()
+    else
+        io_mod.milliTimestamp();
 }
 
 fn appendSlotLiveText(raw: *anyopaque, value: []const u8) void {
@@ -2755,6 +3196,12 @@ fn runOne(slot: *Slot) OneResult {
         communication_state,
         record,
     ) catch return .control_failed;
+    _ = reconcileOneOffFinalResultLocked(
+        owner.alloc,
+        communication_state,
+        record,
+        loaded.state.history,
+    ) catch return .control_failed;
     const index = nextRunnableIndex(record.queue, slot.retry_interrupted) orelse
         return if (record.mode == .one_off and record.state == .completed)
             .completed
@@ -2778,7 +3225,8 @@ fn runOne(slot: *Slot) OneResult {
         return .admission_failed;
     };
     defer admission.deinit(owner.alloc);
-    if (admission.permission_mode != record.configuration.permission_mode or
+    if (admission.provider != preferences.provider or
+        admission.permission_mode != record.configuration.permission_mode or
         !std.mem.eql(u8, admission.parent_id, parent_id) or
         !std.mem.eql(u8, admission.source_id, record.queue[index].source_id) or
         !std.mem.eql(u8, admission.model, preferences.model) or
@@ -2896,6 +3344,15 @@ fn runOne(slot: *Slot) OneResult {
         owner.wakeNotificationSchedules(slot.child_id, completed_at_ms);
         return .control_failed;
     };
+    _ = reconcileOneOffFinalResultLocked(
+        owner.alloc,
+        communication_state,
+        current,
+        loaded.state.history,
+    ) catch {
+        owner.wakeNotificationSchedules(slot.child_id, completed_at_ms);
+        return .control_failed;
+    };
     owner.wakeNotificationSchedules(slot.child_id, completed_at_ms);
     if (outcome == .failed) return .failed;
     if (current.mode == .one_off) return .completed;
@@ -2986,6 +3443,158 @@ fn completedWorkIdForRecovery(
     return work_id;
 }
 
+const TerminalTransition = struct {
+    timestamp_ms: i64,
+    reason: ?[]const u8,
+};
+
+fn terminalTransitionForWork(
+    events: []const domain.Event,
+    work_id: []const u8,
+    status: domain.QueueStatus,
+) ?TerminalTransition {
+    var index = events.len;
+    while (index > 0) {
+        index -= 1;
+        const transition = switch (events[index].kind) {
+            .work_transition => |value| value,
+            else => continue,
+        };
+        if (transition.current != status or
+            !std.mem.eql(u8, transition.work_item_id, work_id))
+        {
+            continue;
+        }
+        return .{
+            .timestamp_ms = events[index].timestamp_ms,
+            .reason = transition.reason,
+        };
+    }
+    return null;
+}
+
+fn assistantTextForWork(
+    history: []const types.HistoryTurn,
+    work_id: []const u8,
+) ?[]const u8 {
+    var index = history.len;
+    while (index > 0) {
+        index -= 1;
+        const candidate = history[index];
+        const candidate_work_id = session.historyTurnWorkId(candidate) orelse continue;
+        if (!std.mem.eql(u8, candidate_work_id, work_id)) continue;
+        return switch (candidate) {
+            .assistant => |value| value.assistant,
+            .background_command => |value| value.assistant orelse "",
+            .interrupted => |value| value.assistant orelse "",
+            .compacted_summary => null,
+        };
+    }
+    return null;
+}
+
+fn boundedFinalResultAlloc(
+    alloc: Allocator,
+    content: []const u8,
+) Allocator.Error![]u8 {
+    if (content.len <= communication.max_delivery_content_bytes) {
+        return alloc.dupe(u8, content);
+    }
+    const suffix = try std.fmt.allocPrint(
+        alloc,
+        "\n\n[truncated; original_bytes={d}]",
+        .{content.len},
+    );
+    defer alloc.free(suffix);
+    std.debug.assert(suffix.len < communication.max_delivery_content_bytes);
+    const prefix = text_utils.utf8PrefixByBytes(
+        content,
+        communication.max_delivery_content_bytes - suffix.len,
+    );
+    return std.fmt.allocPrint(alloc, "{s}{s}", .{ prefix, suffix });
+}
+
+fn oneOffFinalResultAlloc(
+    alloc: Allocator,
+    work: domain.QueuedMessage,
+    transition: TerminalTransition,
+    history: []const types.HistoryTurn,
+) (Allocator.Error || error{InvalidRecord})![]u8 {
+    const fallback_completed = "One-off subagent completed without a final text response.";
+    var formatted: ?[]u8 = null;
+    defer if (formatted) |value| alloc.free(value);
+    const raw = switch (work.status) {
+        .completed => blk: {
+            const assistant = assistantTextForWork(history, work.id) orelse
+                fallback_completed;
+            break :blk if (assistant.len != 0 and text_utils.isModelSafeText(assistant))
+                assistant
+            else
+                fallback_completed;
+        },
+        .failed => blk: {
+            formatted = try std.fmt.allocPrint(
+                alloc,
+                "One-off subagent failed: {s}",
+                .{transition.reason orelse "unknown failure"},
+            );
+            break :blk formatted.?;
+        },
+        .cancelled => blk: {
+            formatted = try std.fmt.allocPrint(
+                alloc,
+                "One-off subagent cancelled: {s}",
+                .{work.cancellation_reason orelse transition.reason orelse "cancelled"},
+            );
+            break :blk formatted.?;
+        },
+        .pending, .running, .awaiting_approval, .interrupted => return error.InvalidRecord,
+    };
+    return boundedFinalResultAlloc(alloc, raw);
+}
+
+fn reconcileOneOffFinalResultLocked(
+    alloc: Allocator,
+    store: communication_store.Store,
+    record: control_store.Record,
+    history: []const types.HistoryTurn,
+) communication_manager.Error!bool {
+    if (record.mode != .one_off) return false;
+    var index = record.queue.len;
+    while (index > 0) {
+        index -= 1;
+        const work = record.queue[index];
+        switch (work.status) {
+            .completed, .failed, .cancelled => {},
+            else => continue,
+        }
+        const parent_id = record.parent_id orelse return error.InvalidRecord;
+        const transition = terminalTransitionForWork(
+            record.events,
+            work.id,
+            work.status,
+        ) orelse return error.InvalidRecord;
+        const content = oneOffFinalResultAlloc(
+            alloc,
+            work,
+            transition,
+            history,
+        ) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidRecord => error.InvalidRecord,
+        };
+        defer alloc.free(content);
+        return communication_manager.reconcileFinalResultLocked(alloc, store, .{
+            .child_id = record.child_id,
+            .parent_id = parent_id,
+            .work_id = work.id,
+            .timestamp_ms = transition.timestamp_ms,
+            .content = content,
+        });
+    }
+    return false;
+}
+
 fn findDeliveryById(
     deliveries: []const communication.Delivery,
     id: []const u8,
@@ -3027,6 +3636,104 @@ fn serviceFailureReason(err: ServiceError) []const u8 {
         error.ProviderFailed => "provider_failed",
         error.Cancelled => "cancelled",
     };
+}
+
+test "one off terminal results and retry classification stay bounded" {
+    const alloc = std.testing.allocator;
+    const transition = TerminalTransition{ .timestamp_ms = 2, .reason = "provider_failed" };
+    const failed = domain.QueuedMessage{
+        .id = @constCast("failed-work"),
+        .source_id = @constCast("parent"),
+        .content = @constCast("work"),
+        .status = .failed,
+        .created_at_ms = 1,
+    };
+    const failed_result = try oneOffFinalResultAlloc(alloc, failed, transition, &.{});
+    defer alloc.free(failed_result);
+    try std.testing.expectEqualStrings(
+        "One-off subagent failed: provider_failed",
+        failed_result,
+    );
+
+    const cancelled = domain.QueuedMessage{
+        .id = @constCast("cancelled-work"),
+        .source_id = @constCast("parent"),
+        .content = @constCast("work"),
+        .status = .cancelled,
+        .cancellation_reason = @constCast("user cancelled"),
+        .created_at_ms = 1,
+    };
+    const cancelled_result = try oneOffFinalResultAlloc(
+        alloc,
+        cancelled,
+        .{ .timestamp_ms = 2, .reason = "user cancelled" },
+        &.{},
+    );
+    defer alloc.free(cancelled_result);
+    try std.testing.expectEqualStrings(
+        "One-off subagent cancelled: user cancelled",
+        cancelled_result,
+    );
+
+    const oversized = try alloc.alloc(u8, communication.max_delivery_content_bytes + 100);
+    defer alloc.free(oversized);
+    @memset(oversized, 'a');
+    const history = [_]types.HistoryTurn{.{ .assistant = .{
+        .user = .{ .text = @constCast("work"), .work_id = @constCast("completed-work") },
+        .assistant = oversized,
+    } }};
+    const completed = domain.QueuedMessage{
+        .id = @constCast("completed-work"),
+        .source_id = @constCast("parent"),
+        .content = @constCast("work"),
+        .status = .completed,
+        .created_at_ms = 1,
+    };
+    const completed_result = try oneOffFinalResultAlloc(
+        alloc,
+        completed,
+        .{ .timestamp_ms = 2, .reason = null },
+        &history,
+    );
+    defer alloc.free(completed_result);
+    try std.testing.expectEqual(
+        communication.max_delivery_content_bytes,
+        completed_result.len,
+    );
+    try std.testing.expect(std.mem.endsWith(u8, completed_result, "]"));
+
+    try std.testing.expect(shouldScheduleRetirementRetry(error.LockBusy));
+    try std.testing.expect(shouldScheduleRetirementRetry(error.CommitIndeterminate));
+    try std.testing.expect(!shouldScheduleRetirementRetry(error.LockUnsupported));
+    try std.testing.expect(!shouldScheduleRetirementRetry(error.PathUnsafe));
+    try std.testing.expect(!shouldScheduleRetirementRetry(error.InvalidRecord));
+
+    const eligible = OneOffRetirementFacts{
+        .mode = .one_off,
+        .state = .completed,
+        .result_acknowledged = true,
+        .migration_complete = true,
+        .active_count = 0,
+    };
+    try std.testing.expect(canRetireOneOff(eligible));
+    var rejected = eligible;
+    rejected.mode = .persistent;
+    try std.testing.expect(!canRetireOneOff(rejected));
+    rejected = eligible;
+    rejected.state = .running;
+    try std.testing.expect(!canRetireOneOff(rejected));
+    rejected = eligible;
+    rejected.result_acknowledged = false;
+    try std.testing.expect(!canRetireOneOff(rejected));
+    rejected = eligible;
+    rejected.migration_complete = false;
+    try std.testing.expect(!canRetireOneOff(rejected));
+    rejected = eligible;
+    rejected.active_count = null;
+    try std.testing.expect(!canRetireOneOff(rejected));
+    rejected = eligible;
+    rejected.active_count = 1;
+    try std.testing.expect(!canRetireOneOff(rejected));
 }
 
 fn mapOpenControlError(err: session_store.OpenSubagentControlError) ControlError {
@@ -8580,6 +9287,160 @@ test "session-backed owner executes through deterministic gateway and normal age
         else => {},
     };
     try std.testing.expect(saw_pending and saw_running and saw_completed);
+}
+
+test "completed one off reconciles one stable final result message" {
+    const alloc = std.testing.allocator;
+    var env = try TestEnvironment.init(alloc);
+    defer env.deinit(alloc);
+    try env.createSession(alloc, "parent");
+    try env.createSession(alloc, "one-off-child");
+    try env.installControl(
+        alloc,
+        "one-off-child",
+        .one_off,
+        "anthropic/claude-opus-4.6",
+        types.ReasoningEffort.literal("high"),
+        &.{"one-off-work"},
+    );
+    _ = try relationship_index.ensureChild(
+        alloc,
+        &env.store,
+        "parent",
+        "one-off-child",
+        .{},
+    );
+    var gateway_execution: GatewayExecution = .{};
+    var manager = manager_mod.Manager{ .sessions = &env.store };
+    var live_authority = authority_mod.Resolver{
+        .sessions = &env.store,
+        .host = .{ .resolve_fn = GatewayExecution.resolveHostAuthority },
+    };
+    var owner = Owner{
+        .alloc = alloc,
+        .sessions = &env.store,
+        .manager = &manager,
+        .services = gateway_execution.services(),
+        .live_authority = &live_authority,
+        .retirement_root_id = "parent",
+    };
+    defer owner.deinit();
+    try std.testing.expectEqual(StartResult.started, try owner.start("one-off-child", false));
+    try std.testing.expectEqual(ChildResult.completed, try owner.join("one-off-child"));
+    var indexed = try env.store.listResumablePage(alloc, null, null);
+    indexed.deinit(alloc);
+
+    var communication_query = communication_manager.Manager{ .sessions = &env.store };
+    var page = try communication_query.page(
+        alloc,
+        "one-off-child",
+        "parent-model",
+        "parent",
+        null,
+        16,
+    );
+    defer page.deinit(alloc);
+    var result_count: usize = 0;
+    for (page.deliveries) |delivery| switch (delivery.payload) {
+        .message => |message| {
+            result_count += 1;
+            try std.testing.expectEqualStrings("gateway child reply", message);
+            try std.testing.expectEqualStrings("one-off-work", delivery.work_id.?);
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 1), result_count);
+
+    _ = try owner.recover(20);
+    var repeated = try communication_query.page(
+        alloc,
+        "one-off-child",
+        "parent-model",
+        "parent",
+        null,
+        16,
+    );
+    defer repeated.deinit(alloc);
+    var repeated_count: usize = 0;
+    for (repeated.deliveries) |delivery| {
+        if (delivery.payload == .message) repeated_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), repeated_count);
+
+    while (true) {
+        var pending = try communication_query.prepareParentBoundary(
+            alloc,
+            "one-off-child",
+            "parent-model",
+            "parent",
+            .turn_boundary,
+            null,
+        );
+        defer pending.deinit(alloc);
+        if (pending == .wait) break;
+        try communication_query.acknowledgeParentBoundary(
+            alloc,
+            "one-off-child",
+            "parent-model",
+            "parent",
+            .{
+                .sequence = pending.inject.through_sequence,
+                .delivery_id = pending.inject.delivery_id,
+                .start_offset = pending.inject.start_offset,
+                .end_offset = pending.inject.end_offset,
+                .total_bytes = pending.inject.total_bytes,
+            },
+        );
+    }
+    var canonical = try manager.snapshot(alloc, .{ .root_id = "parent" });
+    defer canonical.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 1), canonical.snapshot.nodes.len);
+    {
+        var communication_capability = try env.store.openSubagentControlCapabilityReadOnly(
+            alloc,
+            "one-off-child",
+            .{},
+        );
+        defer communication_capability.deinit();
+        const communication_state = communication_store.Store{
+            .capability = &communication_capability,
+            .expected_session_id = "one-off-child",
+        };
+        var acknowledged = try communication_state.load(alloc);
+        defer acknowledged.deinit(alloc);
+        const result_id = communication.stableDeliveryId(
+            "one-off-child",
+            "one-off-work",
+            "final-result",
+        );
+        try std.testing.expect(communication.parentTurnDeliveryFullyAcknowledged(
+            acknowledged,
+            "parent-model",
+            "parent",
+            &result_id,
+        ));
+    }
+    try std.testing.expectEqual(
+        @as(?u64, 0),
+        try relationship_index.activeCountIfMigrationComplete(
+            alloc,
+            &env.store,
+            "one-off-child",
+            .{},
+        ),
+    );
+    try std.testing.expect(!owner.tryRetireOneOff("one-off-child"));
+    try std.testing.expectError(
+        error.SessionNotFound,
+        env.store.loadReadOnly(alloc, "one-off-child"),
+    );
+    try std.testing.expect((try relationship_index.lookupSlot(
+        alloc,
+        &env.store,
+        "parent",
+        "one-off-child",
+        .{},
+    )) == null);
 }
 
 fn checkAdmissionAllocationFailures(alloc: Allocator) !void {

@@ -9,6 +9,7 @@ const debug_trace = @import("../../shared/debug_trace.zig");
 const file_mutation_contract = @import("../../tooling/file_mutation_contract.zig");
 const tooling_tool_admission = @import("../../tooling/tool_admission.zig");
 const tool_dispatch = @import("../../tooling/tool_dispatch.zig");
+const tool_result_errors = @import("../../tooling/tool_result_errors.zig");
 const test_builtin_tools = if (builtin.is_test)
     @import("../../../builtins/tools.zig")
 else
@@ -27,8 +28,10 @@ const TraceContext = debug_trace.TraceContext;
 const AgentRuntimeDeps = runtime_deps.AgentRuntimeDeps;
 const ToolExecutionResult = runtime_tool_contracts.ToolExecutionResult;
 
+const TerminalValidationDigest = [std.crypto.hash.sha2.Sha256.digest_length]u8;
 pub const PermissionActionId = [std.crypto.hash.sha2.Sha256.digest_length]u8;
 const max_turn_permission_denials: usize = 64;
+const max_consecutive_malformed_argument_batches: usize = 3;
 
 const ApprovedAction = struct {
     authority: command_admission.ToolExecutionAuthority,
@@ -266,6 +269,202 @@ fn normalizeRecoveryCommand(command: []const u8) []const u8 {
         }
     }
     return normalized;
+}
+
+const TerminalValidationDigestDecision = struct {
+    append_current: bool,
+    repeated: bool,
+};
+
+fn containsTerminalValidationDigest(
+    digests: []const TerminalValidationDigest,
+    wanted: TerminalValidationDigest,
+) bool {
+    for (digests) |digest| {
+        if (std.mem.eql(u8, digest[0..], wanted[0..])) return true;
+    }
+    return false;
+}
+
+fn terminalValidationDigestDecision(
+    previous: []const TerminalValidationDigest,
+    current: []const TerminalValidationDigest,
+    digest: TerminalValidationDigest,
+) TerminalValidationDigestDecision {
+    return .{
+        .append_current = !containsTerminalValidationDigest(current, digest),
+        .repeated = containsTerminalValidationDigest(previous, digest),
+    };
+}
+
+pub const TerminalValidationRetryState = struct {
+    previous: std.ArrayList(TerminalValidationDigest) = .empty,
+    current: std.ArrayList(TerminalValidationDigest) = .empty,
+    stop_after_batch: bool = false,
+
+    pub fn deinit(self: *TerminalValidationRetryState, alloc: Allocator) void {
+        self.previous.deinit(alloc);
+        self.current.deinit(alloc);
+        self.* = .{};
+    }
+
+    pub fn beginBatch(self: *TerminalValidationRetryState) void {
+        self.current.clearRetainingCapacity();
+        self.stop_after_batch = false;
+    }
+
+    pub fn observe(
+        self: *TerminalValidationRetryState,
+        alloc: Allocator,
+        call: ToolCall,
+        model_output: []const u8,
+    ) Allocator.Error!void {
+        if (!std.mem.eql(u8, call.name, "terminal")) return;
+        if (try tool_result_errors.inspectTerminalActionFieldCorrection(
+            alloc,
+            model_output,
+        ) == null) return;
+
+        var digest: TerminalValidationDigest = undefined;
+        std.crypto.hash.sha2.Sha256.hash(model_output, &digest, .{});
+        const decision = terminalValidationDigestDecision(
+            self.previous.items,
+            self.current.items,
+            digest,
+        );
+        if (decision.append_current) try self.current.append(alloc, digest);
+        self.stop_after_batch = self.stop_after_batch or decision.repeated;
+    }
+
+    pub fn finishBatch(self: *TerminalValidationRetryState) bool {
+        if (self.stop_after_batch) return true;
+        const previous = self.previous;
+        self.previous = self.current;
+        self.current = previous;
+        self.current.clearRetainingCapacity();
+        return false;
+    }
+};
+
+pub const MalformedArgumentsRetryState = struct {
+    consecutive_malformed_batches: usize = 0,
+    current_call_count: usize = 0,
+    current_malformed_count: usize = 0,
+
+    pub fn beginBatch(self: *MalformedArgumentsRetryState) void {
+        self.current_call_count = 0;
+        self.current_malformed_count = 0;
+    }
+
+    pub fn observe(self: *MalformedArgumentsRetryState, call: ToolCall) void {
+        self.current_call_count += 1;
+        if (call.argument_integrity != .malformed_json) return;
+        self.current_malformed_count += 1;
+    }
+
+    pub fn finishBatch(self: *MalformedArgumentsRetryState) bool {
+        const all_malformed = self.current_call_count > 0 and
+            self.current_call_count == self.current_malformed_count;
+        if (!all_malformed) {
+            self.consecutive_malformed_batches = 0;
+            return false;
+        }
+        if (self.consecutive_malformed_batches < max_consecutive_malformed_argument_batches) {
+            self.consecutive_malformed_batches += 1;
+        }
+        return self.consecutive_malformed_batches == max_consecutive_malformed_argument_batches;
+    }
+};
+
+test "malformed arguments retry state stops consecutive all-malformed batches" {
+    const malformed_read: ToolCall = .{
+        .id = "read-1",
+        .name = "read_file",
+        .arguments_json = "{}",
+        .argument_integrity = .malformed_json,
+    };
+    const malformed_fetch: ToolCall = .{
+        .id = "fetch-1",
+        .name = "web_fetch",
+        .arguments_json = "{}",
+        .argument_integrity = .malformed_json,
+    };
+    const valid_read: ToolCall = .{
+        .id = "read-valid",
+        .name = "read_file",
+        .arguments_json = "{\"path\":\"README.md\"}",
+    };
+
+    var state: MalformedArgumentsRetryState = .{};
+    state.beginBatch();
+    state.observe(malformed_read);
+    try std.testing.expect(!state.finishBatch());
+
+    state.beginBatch();
+    state.observe(malformed_fetch);
+    try std.testing.expect(!state.finishBatch());
+
+    state.beginBatch();
+    state.observe(malformed_fetch);
+    try std.testing.expect(state.finishBatch());
+
+    state.beginBatch();
+    state.observe(malformed_fetch);
+    state.observe(valid_read);
+    try std.testing.expect(!state.finishBatch());
+
+    state.beginBatch();
+    state.observe(malformed_read);
+    try std.testing.expect(!state.finishBatch());
+
+    state.beginBatch();
+    state.observe(malformed_read);
+    try std.testing.expect(!state.finishBatch());
+
+    state.beginBatch();
+    state.observe(malformed_read);
+    try std.testing.expect(state.finishBatch());
+}
+
+test "terminal validation retry state retains independent batch corrections" {
+    const alloc = std.testing.allocator;
+    const correction_s = try tool_result_errors.terminalActionFieldCorrectionJson(alloc, .{
+        .action = "start",
+        .invalid_fields = &.{"session_id"},
+        .missing_fields = &.{},
+        .allowed_fields = &.{ "action", "command" },
+        .conflicts = &.{},
+    });
+    defer alloc.free(correction_s);
+    const correction_t = try tool_result_errors.terminalActionFieldCorrectionJson(alloc, .{
+        .action = "read",
+        .invalid_fields = &.{"command"},
+        .missing_fields = &.{},
+        .allowed_fields = &.{ "action", "session_id", "cursor_segment" },
+        .conflicts = &.{},
+    });
+    defer alloc.free(correction_t);
+    const call: ToolCall = .{
+        .id = "terminal-call",
+        .name = "terminal",
+        .arguments_json = "{}",
+    };
+
+    var state: TerminalValidationRetryState = .{};
+    defer state.deinit(alloc);
+    state.beginBatch();
+    try state.observe(alloc, call, correction_s);
+    try state.observe(alloc, call, correction_t);
+    try state.observe(alloc, call, correction_s);
+    try std.testing.expectEqual(@as(usize, 2), state.current.items.len);
+    try std.testing.expect(!state.finishBatch());
+
+    state.beginBatch();
+    try state.observe(alloc, call, correction_t);
+    try state.observe(alloc, call, "ordinary valid result");
+    try state.observe(alloc, call, correction_s);
+    try std.testing.expectEqual(@as(usize, 2), state.current.items.len);
+    try std.testing.expect(state.finishBatch());
 }
 
 test "turn permission recovery binds approval exactly and deduplicates static wrappers" {

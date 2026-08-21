@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const question_answer = @import("../agent/question_answer.zig");
 const config_runtime = @import("../config/config_runtime.zig");
 const model_capabilities = @import("../config/model_capabilities.zig");
+const model_provider = @import("../config/model_provider.zig");
 const assistant_presentation = @import("../agent/assistant_presentation.zig");
 const tool_presentation = @import("../agent/runtime/tool_presentation.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
@@ -12,6 +13,7 @@ const host_target = @import("../hosts/target.zig");
 const diff = @import("../output/diff.zig");
 const diagnostics = @import("../workspace/diagnostics.zig");
 const app_lifecycle = @import("app_lifecycle.zig");
+const provider_runtime = @import("provider_runtime.zig");
 const input_completion_runtime = @import("input_completion_runtime.zig");
 const input_queue_runtime = @import("input_queue_runtime.zig");
 const image_attachments = @import("../images/image_attachments.zig");
@@ -335,16 +337,26 @@ pub const ResumeHandoff = struct {
 };
 
 pub const SessionPreferencePatch = struct {
+    provider: ?model_provider.ProviderId = null,
     model: ?[]const u8 = null,
     effort: ?types.ReasoningEffort = null,
     fast_mode: ?bool = null,
 
-    fn userSettingsPatch(self: SessionPreferencePatch) config_runtime.UserSettingsPatch {
-        return .{
-            .model = self.model,
+    pub fn userSettingsPatch(self: SessionPreferencePatch) config_runtime.UserSettingsPatch {
+        var patch = config_runtime.UserSettingsPatch{
+            .provider = self.provider,
             .effort = self.effort,
             .fast_mode = self.fast_mode,
         };
+        if (self.provider) |provider| {
+            switch (provider) {
+                .gateway => patch.model = self.model,
+                .codex => patch.codex_model = self.model,
+            }
+        } else {
+            patch.model = self.model;
+        }
+        return patch;
     }
 };
 
@@ -368,6 +380,7 @@ pub const SessionPicker = struct {
     has_more: bool = false,
     loading_more: bool = false,
     summaries: std.ArrayList(session_store.SessionSummary) = .empty,
+    continuation: ?subagent_resume_admission.ActionableContinuation = null,
     selected: usize = 0,
     window_start: usize = 0,
     scope: SessionPickerScope = .current_workspace,
@@ -378,6 +391,7 @@ pub const SessionPicker = struct {
     pub fn deinit(self: *SessionPicker, alloc: Allocator) void {
         for (self.summaries.items) |*summary| summary.deinit(alloc);
         self.summaries.deinit(alloc);
+        if (self.continuation) |*continuation| continuation.deinit(alloc);
         self.* = .{};
     }
 
@@ -491,7 +505,7 @@ const SessionPickerPageCache = struct {
     active_id: ?[]u8 = null,
     limit: usize = 0,
     loaded_at_ns: i128 = 0,
-    page: session_store.ResumableSessionPage = .{},
+    page: subagent_resume_admission.ActionableSessionPage = .{},
 
     fn deinit(self: *SessionPickerPageCache) void {
         const alloc = std.heap.c_allocator;
@@ -515,19 +529,32 @@ const SessionPickerPageCache = struct {
 
     fn install(
         self: *SessionPickerPageCache,
-        source: *const session_store.ResumableSessionPage,
+        source: *const subagent_resume_admission.ActionableSessionPage,
         active_id: ?[]const u8,
         limit: usize,
         loaded_at_ns: i128,
     ) !void {
         const alloc = std.heap.c_allocator;
+        var owned_active_id = if (active_id) |id| try alloc.dupe(u8, id) else null;
+        errdefer if (owned_active_id) |id| alloc.free(id);
+        var owned_continuation: ?subagent_resume_admission.ActionableContinuation =
+            if (source.continuation) |continuation| .{
+                .updated_at_ms = continuation.updated_at_ms,
+                .id = try alloc.dupe(u8, continuation.id),
+            } else null;
+        errdefer if (owned_continuation) |*continuation| continuation.deinit(alloc);
         var replacement: SessionPickerPageCache = .{
             .ready = true,
-            .active_id = if (active_id) |id| try alloc.dupe(u8, id) else null,
+            .active_id = owned_active_id,
             .limit = limit,
             .loaded_at_ns = loaded_at_ns,
-            .page = .{ .has_more = source.has_more },
+            .page = .{
+                .has_more = source.has_more,
+                .continuation = owned_continuation,
+            },
         };
+        owned_active_id = null;
+        owned_continuation = null;
         errdefer replacement.deinit();
         for (source.summaries.items) |summary| {
             var copied = try session_summary_codec.cloneSessionSummary(alloc, summary);
@@ -559,7 +586,7 @@ fn sessionPickerCacheForScope(
 fn replaceSessionPickerPage(
     picker: *SessionPicker,
     alloc: Allocator,
-    source: *const session_store.ResumableSessionPage,
+    source: *const subagent_resume_admission.ActionableSessionPage,
 ) !void {
     var replacement: std.ArrayList(session_store.SessionSummary) = .empty;
     errdefer {
@@ -648,7 +675,7 @@ const SessionPickerLoad = struct {
         home_dir: []u8,
         workspace_root: []u8,
         request: PageRequest,
-        page: ?session_store.ResumableSessionPage = null,
+        page: ?subagent_resume_admission.ActionableSessionPage = null,
         failure: ?anyerror = null,
 
         fn deinit(self: *Task) void {
@@ -923,13 +950,18 @@ fn tryListResumableIndexPageForScope(
     active_id: ?[]const u8,
     continuation: ?session_store.ResumableSessionContinuation,
     limit: usize,
-) !?session_store.ResumableSessionPage {
-    var scoped = store;
-    scoped.resume_page_limit = limit;
-    return switch (scope) {
-        .current_workspace => try scoped.tryListResumableWorkspaceIndexPage(alloc, active_id, continuation),
-        .all_workspaces => try scoped.tryListResumableIndexPage(alloc, active_id, continuation),
-    };
+) !?subagent_resume_admission.ActionableSessionPage {
+    return subagent_resume_admission.tryListActionableIndexPage(
+        store,
+        alloc,
+        switch (scope) {
+            .current_workspace => .current_workspace,
+            .all_workspaces => .all_workspaces,
+        },
+        active_id,
+        continuation,
+        limit,
+    );
 }
 
 fn listResumablePageForScope(
@@ -939,13 +971,18 @@ fn listResumablePageForScope(
     active_id: ?[]const u8,
     continuation: ?session_store.ResumableSessionContinuation,
     limit: usize,
-) !session_store.ResumableSessionPage {
-    var scoped = store;
-    scoped.resume_page_limit = limit;
-    return switch (scope) {
-        .current_workspace => try scoped.listResumableWorkspacePage(alloc, active_id, continuation),
-        .all_workspaces => try scoped.listResumablePage(alloc, active_id, continuation),
-    };
+) !subagent_resume_admission.ActionableSessionPage {
+    return subagent_resume_admission.listActionablePage(
+        store,
+        alloc,
+        switch (scope) {
+            .current_workspace => .current_workspace,
+            .all_workspaces => .all_workspaces,
+        },
+        active_id,
+        continuation,
+        limit,
+    );
 }
 
 const default_cancelled_command_replay_inline_limit: usize = 64 * 1024;
@@ -1291,6 +1328,7 @@ pub fn Runtime(comptime App: type) type {
 
         pub fn configureStartupPreferences(
             app: *App,
+            provider: model_provider.ProviderId,
             configured_model: []const u8,
             model_source: config_runtime.ModelSource,
             selected_model: []const u8,
@@ -1301,6 +1339,7 @@ pub fn Runtime(comptime App: type) type {
                 app.alloc,
                 &app.session_persistence.workspace_preferences,
                 .{
+                    .provider = provider,
                     .model = @constCast(configured_model),
                     .effort = effort,
                     .fast_mode = fast_mode,
@@ -1787,6 +1826,12 @@ pub fn Runtime(comptime App: type) type {
 
         pub fn startResumedSessionReconciliation(app: *App) void {
             if (comptime @hasField(App, "auth")) {
+                if (comptime @hasDecl(@TypeOf(app.auth), "credentialSource")) {
+                    if (app.auth.credentialSource() == .chatgpt_subscription) {
+                        app.session.usage.clearReconciliationCredential();
+                        return;
+                    }
+                }
                 if (app.auth.apiKey()) |api_key| {
                     app.session.usage.startReconciliation(
                         app.alloc,
@@ -1996,6 +2041,13 @@ pub fn Runtime(comptime App: type) type {
             const now_ns = io_mod.nanoTimestamp();
             if (cache.matches(active_id, limit)) {
                 try replaceSessionPickerPage(picker, app.alloc, &cache.page);
+                const continuation: ?subagent_resume_admission.ActionableContinuation =
+                    if (cache.page.continuation) |value| .{
+                        .updated_at_ms = value.updated_at_ms,
+                        .id = try app.alloc.dupe(u8, value.id),
+                    } else null;
+                if (picker.continuation) |*prior| prior.deinit(app.alloc);
+                picker.continuation = continuation;
                 picker.has_more = cache.page.has_more;
                 picker.load_state = .ready;
                 cache_visible = true;
@@ -2184,8 +2236,17 @@ pub fn Runtime(comptime App: type) type {
             app: *App,
             picker: *SessionPicker,
             task: *const SessionPickerLoad.Task,
-            page: *const session_store.ResumableSessionPage,
+            page: *const subagent_resume_admission.ActionableSessionPage,
         ) !void {
+            var continuation: ?subagent_resume_admission.ActionableContinuation =
+                if (page.continuation) |value| .{
+                    .updated_at_ms = value.updated_at_ms,
+                    .id = try app.alloc.dupe(u8, value.id),
+                } else null;
+            errdefer if (continuation) |value| {
+                var owned = value;
+                owned.deinit(app.alloc);
+            };
             const selected_load_more = task.request.continuation != null and
                 picker.selected == picker.filteredItemCount();
             const previous_filtered_count = picker.filteredItemCount();
@@ -2194,6 +2255,9 @@ pub fn Runtime(comptime App: type) type {
             } else {
                 try picker.appendPage(app.alloc, page.summaries.items);
             }
+            if (picker.continuation) |*prior| prior.deinit(app.alloc);
+            picker.continuation = continuation;
+            continuation = null;
             picker.has_more = page.has_more;
             picker.loading_more = false;
             picker.load_state = .ready;
@@ -2221,7 +2285,8 @@ pub fn Runtime(comptime App: type) type {
                 value
             else
                 return error.SessionStoreUnavailable;
-            const last = picker.summaries.items[picker.summaries.items.len - 1];
+            const continuation = picker.continuation orelse
+                return error.SessionStoreUnavailable;
             const active_id = if (app.session_persistence.writable) |*loaded|
                 loaded.active_id
             else
@@ -2234,10 +2299,7 @@ pub fn Runtime(comptime App: type) type {
                 picker.generation,
                 picker.scope,
                 active_id,
-                .{
-                    .updated_at_ms = last.updated_at_ms,
-                    .id = last.id,
-                },
+                continuation.view(),
                 limit,
             );
 
@@ -2853,6 +2915,7 @@ pub fn Runtime(comptime App: type) type {
                         @constCast(model)
                     else
                         null,
+                    .provider = patch.provider,
                     .effort = patch.effort,
                     .fast_mode = patch.fast_mode,
                 } },
@@ -2943,7 +3006,7 @@ pub fn Runtime(comptime App: type) type {
         /// workspace basename. The active model remains visible as secondary
         /// context, including after a model switch.
         pub fn syncTerminalTitle(app: *App) void {
-            if (comptime !@hasField(App, "selected_model")) return;
+            if (comptime !provider_runtime.supported(App)) return;
             syncTerminalTitleWith(app, terminalTitle(app));
         }
 
@@ -2951,7 +3014,7 @@ pub fn Runtime(comptime App: type) type {
             app: *App,
             provider: host_capability.TerminalTitle,
         ) void {
-            if (comptime !@hasField(App, "selected_model")) return;
+            if (comptime !provider_runtime.supported(App)) return;
             var label_buffer: [terminal_title_label_max_bytes]u8 = undefined;
             var writer: std.Io.Writer = .fixed(&label_buffer);
             const primary = cachedSessionTitle(app) orelse workspaceTerminalTitle(app);
@@ -2960,11 +3023,12 @@ pub fn Runtime(comptime App: type) type {
                 primary,
                 terminal_title_primary_max_bytes,
             ) catch return;
-            if (app.selected_model.items.len > 0) {
+            const selected_model = provider_runtime.model(app);
+            if (selected_model.len > 0) {
                 writer.writeAll(terminal_title_separator) catch return;
                 writeBoundedTerminalTitleComponent(
                     &writer,
-                    app.selected_model.items,
+                    selected_model,
                     terminal_title_model_max_bytes,
                 ) catch return;
             }
@@ -4832,15 +4896,13 @@ pub fn Runtime(comptime App: type) type {
             app: *App,
             preferences: session_codec.DurableSessionPreferences,
         ) !void {
-            app.selected_model.clearRetainingCapacity();
-            try app.selected_model.appendSlice(app.alloc, preferences.model);
+            try provider_runtime.replaceSelection(app, preferences.provider, preferences.model);
             if (app.session_persistence.process_model_override) |model| {
-                app.selected_model.clearRetainingCapacity();
-                try app.selected_model.appendSlice(app.alloc, model);
+                try provider_runtime.replaceModel(app, model);
             }
             try app.worker.syncQueuedPromptModel(
                 std.heap.c_allocator,
-                app.selected_model.items,
+                provider_runtime.model(app),
             );
             app.effort = preferences.effort;
             app.fast_mode = preferences.fast_mode;
@@ -4908,6 +4970,7 @@ fn applyPreferencePatch(
     patch: SessionPreferencePatch,
 ) !void {
     var current = target.* orelse return error.SessionPreferencesUnavailable;
+    if (patch.provider) |provider| current.provider = provider;
     if (patch.model) |model| {
         const replacement = try alloc.dupe(u8, model);
         alloc.free(current.model);
@@ -5568,6 +5631,7 @@ test "js-host resume restores transcript context preferences usage and revision"
     defer app.deinit();
     try Runtime(TestApp).configureStartupPreferences(
         &app,
+        .gateway,
         "startup/model",
         .user_global,
         "startup/model",
@@ -5623,6 +5687,7 @@ test "js-host resume store failures and missing records fall back to fresh sessi
         defer app.deinit();
         try Runtime(TestApp).configureStartupPreferences(
             &app,
+            .gateway,
             "fresh/model",
             .user_global,
             "fresh/model",
@@ -5651,6 +5716,7 @@ test "js-host picker request stays unsupported and starts fresh" {
     defer app.deinit();
     try Runtime(TestApp).configureStartupPreferences(
         &app,
+        .gateway,
         "fresh/model",
         .user_global,
         "fresh/model",
@@ -5675,6 +5741,7 @@ test "js-host completed and interrupted turns propagate revisions preserve owner
     defer app.deinit();
     try Runtime(TestApp).configureStartupPreferences(
         &app,
+        .gateway,
         "fresh/model",
         .user_global,
         "fresh/model",
@@ -5741,6 +5808,7 @@ test "js-host preference changes snapshot the updated session preferences" {
     defer app.deinit();
     try Runtime(TestApp).configureStartupPreferences(
         &app,
+        .gateway,
         "fresh/model",
         .user_global,
         "fresh/model",
@@ -5835,6 +5903,7 @@ fn testPaths(alloc: Allocator, tmp: *std.testing.TmpDir) !struct { home: []u8, w
 fn configureTestPreferences(app: *TestApp) !void {
     try Runtime(TestApp).configureStartupPreferences(
         app,
+        .gateway,
         "configured/model",
         .user_workspace,
         "configured/model",
@@ -7270,6 +7339,7 @@ test "upgrade resume restores active session with the installed version notice" 
     try configureTestPreferences(&app);
     try Runtime(TestApp).configureStartupPreferences(
         &app,
+        .gateway,
         "configured/model",
         .process_override,
         "env/model",
@@ -8746,6 +8816,7 @@ test "fresh interactive session retains one writable schema-v3 handle" {
 
     try Runtime(TestApp).configureStartupPreferences(
         &app,
+        .gateway,
         "configured/model",
         .user_workspace,
         "configured/model",
@@ -9045,8 +9116,8 @@ test "session picker rejects a load more completion after switching to a fresh c
     try Runtime(TestApp).initializePersistence(&app, true);
     try Runtime(TestApp).beginFreshPersistedSession(&app);
 
-    const current_page: session_store.ResumableSessionPage = .{};
-    var all_page: session_store.ResumableSessionPage = .{ .has_more = true };
+    const current_page: subagent_resume_admission.ActionableSessionPage = .{};
+    var all_page: subagent_resume_admission.ActionableSessionPage = .{ .has_more = true };
     defer all_page.deinit(alloc);
     try all_page.summaries.append(alloc, .{
         .id = try alloc.dupe(u8, "foreign-session"),
@@ -9472,7 +9543,7 @@ test "session picker keeps stale cached rows ready when refresh fails" {
     try Runtime(TestApp).initializePersistence(&app, true);
     try Runtime(TestApp).beginFreshPersistedSession(&app);
 
-    var cached_page: session_store.ResumableSessionPage = .{};
+    var cached_page: subagent_resume_admission.ActionableSessionPage = .{};
     defer cached_page.deinit(alloc);
     try cached_page.summaries.append(alloc, .{
         .id = try alloc.dupe(u8, "cached-session"),
@@ -9691,6 +9762,53 @@ test "renameActiveSession persists the title to the sidecar and session index" {
     defer display.deinit(alloc);
     try std.testing.expect(display.present);
     try std.testing.expectEqualStrings("deploy pipeline fix", display.title);
+}
+
+const ReconciliationOriginUsage = struct {
+    started: usize = 0,
+    cleared: usize = 0,
+
+    fn startReconciliation(self: *@This(), _: Allocator, _: []const u8) void {
+        self.started += 1;
+    }
+
+    fn clearReconciliationCredential(self: *@This()) void {
+        self.cleared += 1;
+    }
+};
+
+const ReconciliationOriginAuth = struct {
+    source: types.CredentialSource,
+
+    fn credentialSource(self: *const @This()) ?types.CredentialSource {
+        return self.source;
+    }
+
+    fn apiKey(_: *const @This()) ?[]const u8 {
+        return "origin-bound-token";
+    }
+};
+
+const ReconciliationOriginApp = struct {
+    alloc: Allocator = std.testing.allocator,
+    auth: ReconciliationOriginAuth,
+    session: struct { usage: ReconciliationOriginUsage = .{} } = .{},
+};
+
+test "resumed ChatGPT sessions never start Gateway usage reconciliation" {
+    var chatgpt = ReconciliationOriginApp{
+        .auth = .{ .source = .chatgpt_subscription },
+    };
+    Runtime(ReconciliationOriginApp).startResumedSessionReconciliation(&chatgpt);
+    try std.testing.expectEqual(@as(usize, 0), chatgpt.session.usage.started);
+    try std.testing.expectEqual(@as(usize, 1), chatgpt.session.usage.cleared);
+
+    var gateway = ReconciliationOriginApp{
+        .auth = .{ .source = .ai_gateway_api_key },
+    };
+    Runtime(ReconciliationOriginApp).startResumedSessionReconciliation(&gateway);
+    try std.testing.expectEqual(@as(usize, 1), gateway.session.usage.started);
+    try std.testing.expectEqual(@as(usize, 0), gateway.session.usage.cleared);
 }
 
 test "ensureCachedSessionTitle derives from the first prompt and then freezes" {

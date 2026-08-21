@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const agent_stream_provider = @import("../agent/stream_provider.zig");
 const auth_runtime = @import("../auth/auth_runtime.zig");
 const oauth_transport = @import("../auth/oauth_transport.zig");
+const host_mod = @import("../hosts/host.zig");
 const command_contract = @import("../execution/command_contract.zig");
 const command_environment = @import("../execution/command_environment.zig");
 const background_process_provider = @import(
@@ -66,6 +67,7 @@ const web_fetch_runtime = @import("web_fetch_runtime.zig");
 const web_search_contract = @import("web_search_contract.zig");
 const web_fetch_artifacts = @import("../session/web_fetch_artifacts.zig");
 const types = @import("../shared/types.zig");
+const model_provider = @import("../config/model_provider.zig");
 const worker_runtime = @import("../agent/worker_runtime.zig");
 const context_contract = @import("../workspace/context_contract.zig");
 const test_builtin_tools = if (builtin.is_test)
@@ -135,7 +137,10 @@ pub const Context = struct {
     agent_stream_provider: agent_stream_provider.Provider = agent_stream_provider.unavailable_provider,
     gateway_team: ?[]const u8 = null,
     credential_source: ?types.CredentialSource = null,
+    account_id: ?[]const u8 = null,
+    provider: model_provider.ProviderId = .gateway,
     oauth_transport: oauth_transport.Provider = oauth_transport.unavailable_provider,
+    secret_store: host_mod.SecretStore = host_mod.unavailable_secret_store,
     model: []const u8,
     permission_review_turn: ?permission_auto_classifier.ReviewTurnContext = null,
     root_user_intent_context: []const u8 = "",
@@ -298,7 +303,15 @@ fn registeredToolSpec(ctx: Context, name: []const u8) ?*const tool_specs.ToolSpe
     return ctx.tool_registry.lookup(name);
 }
 
+fn providerDisablesTool(provider: model_provider.ProviderId, name: []const u8) bool {
+    return std.mem.eql(u8, name, "vision") and
+        !model_provider.usesGatewayAuxiliaries(provider);
+}
+
 pub fn validateToolCall(ctx: Context, arena: Allocator, call: ToolCall) !tool_contracts.ToolCallValidationResult {
+    if (providerDisablesTool(ctx.provider, call.name)) {
+        return .{ .failure = try arena.dupe(u8, "Unsupported tool: vision") };
+    }
     const spec = registeredToolSpec(ctx, call.name) orelse {
         return switch (try tool_mcp_runtime.validateAdvertisedDynamicTool(.{
             .is_registered_tool = false,
@@ -328,6 +341,9 @@ pub fn validateToolCall(ctx: Context, arena: Allocator, call: ToolCall) !tool_co
 }
 
 pub fn checkToolAvailability(ctx: Context, arena: Allocator, call: ToolCall) !?[]const u8 {
+    if (providerDisablesTool(ctx.provider, call.name)) {
+        return try arena.dupe(u8, "Unsupported tool: vision");
+    }
     return tool_dispatch.localToolAvailabilityFailureForCall(
         typedDispatchContext(ctx, arena),
         ctx.tool_registry,
@@ -995,6 +1011,7 @@ fn executeVisionRequest(
     const config: vision_executor.Config = .{
         .stream_provider = state.runtime.agent_stream_provider,
         .api_key = state.runtime.api_key,
+        .credential_source = state.runtime.credential_source,
         .gateway_team = state.runtime.gateway_team,
         .session_id = state.runtime.lifecycle_scope.session_id,
         .retry_count = state.runtime.gateway_retry_count,
@@ -1733,6 +1750,7 @@ fn executeSubagentProvider(
         .root_user_messages = ctx.root_user_messages,
         .root_user_evidence_complete = ctx.root_user_evidence_complete,
         .defaults = .{
+            .provider = ctx.provider,
             .model = ctx.model,
             .effort = ctx.effort,
             .fast_mode = ctx.fast_mode,
@@ -2118,6 +2136,7 @@ const TestRuntime = struct {
     max_command_output_bytes: usize = 64 * 1024,
     max_tool_result_bytes: usize = 64 * 1024,
     api_key: []const u8 = "",
+    provider: model_provider.ProviderId = .gateway,
     gateway_team: ?[]const u8 = null,
     gateway_retry_count: usize = 0,
     gateway_chat_url: []const u8 = "",
@@ -2167,6 +2186,7 @@ const TestRuntime = struct {
             .api_key = self.api_key,
             .agent_stream_provider = self.agent_stream_provider,
             .gateway_team = self.gateway_team,
+            .provider = self.provider,
             .model = self.model,
             .gateway_retry_count = self.gateway_retry_count,
             .gateway_chat_url = self.gateway_chat_url,
@@ -8521,6 +8541,35 @@ fn executeVisionPathTargetsForTest(
         .advertised_dynamic_tool_names = &.{},
         .max_tool_result_bytes = rt.max_tool_result_bytes,
     });
+}
+
+test "Codex vision calls fail before provider access" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const catalog = try makeVisionCatalog(alloc, tmp.dir, 1);
+    defer types.freeImageAttachmentSlice(alloc, catalog);
+    const provider_json = try visionProviderSuccess(alloc, &.{1});
+    defer alloc.free(provider_json);
+    const responses = [_]VisionGatewayResponse{.{ .content = provider_json }};
+    var fixture = VisionGatewayFixture{ .alloc = alloc, .responses = &responses };
+    defer fixture.deinit();
+    var rt = TestRuntime{
+        .provider = .codex,
+        .agent_stream_provider = fixture.provider(),
+        .tool_registry = .{ .tools = vision_test_registry_tools[0..] },
+        .session_allocator = alloc,
+    };
+    defer rt.deinit(alloc);
+    const args = try visionArgs(alloc, &.{1}, "Read the image");
+    defer alloc.free(args);
+
+    const result = try executeVisionForTest(&rt, alloc, args, catalog);
+    defer alloc.free(@constCast(result.model_output));
+
+    try std.testing.expectEqual(tool_contracts.ToolExecutionStatus.failure, result.status);
+    try std.testing.expectEqualStrings("Unsupported tool: vision", result.model_output);
+    try std.testing.expectEqual(@as(usize, 0), fixture.call_count);
 }
 
 fn visionRequestAllocationCount(args_json: []const u8) !usize {

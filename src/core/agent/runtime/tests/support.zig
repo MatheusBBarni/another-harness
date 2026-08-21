@@ -525,6 +525,9 @@ pub const FakeAgentRuntimeDeps = struct {
     execute_timeout_started_ms: std.ArrayList(?i64) = .empty,
     permission_target: []const u8 = "/tmp/workspace/file.txt",
     resolve_permission_target: bool = false,
+    tool_display_target: ?[]const u8 = null,
+    tool_display_target_after_execute: ?[]const u8 = null,
+    tool_display_target_resolve_count: usize = 0,
     swap_link_on_permission: ?[]const u8 = null,
     swap_link_target_on_permission: ?[]const u8 = null,
     swap_link_on_execute_name: ?[]const u8 = null,
@@ -622,6 +625,7 @@ pub const FakeAgentRuntimeDeps = struct {
     credential_refresh_sources: std.ArrayList(types.CredentialSource) = .empty,
     credential_refresh_modes: std.ArrayList(runtime_deps.CredentialRefreshMode) = .empty,
     credential_refresh_error: ?anyerror = null,
+    last_credential_refresh_expected_account: ?[]const u8 = null,
     enable_interactive_notices: bool = false,
     enable_recovery_checkpoint: bool = false,
     recovery_checkpoints: std.ArrayList(session_codec.RecoveryCheckpoint) = .empty,
@@ -711,6 +715,7 @@ pub const FakeAgentRuntimeDeps = struct {
             .check_tool_availability = checkToolAvailability,
             .request_tool_permission = requestPermission,
             .request_sandbox_widening = requestSandboxWidening,
+            .resolve_tool_action_display_target = resolveToolActionDisplayTarget,
             .describe_tool_action = describeAction,
             .describe_tool_action_completed = describeCompleted,
             .describe_tool_action_denied = describeDenied,
@@ -786,10 +791,11 @@ pub const FakeAgentRuntimeDeps = struct {
         return model_capabilities.capabilitiesForModel(model);
     }
 
-    fn refreshGatewayCredential(raw: *anyopaque, alloc: Allocator, source: types.CredentialSource, mode: runtime_deps.CredentialRefreshMode) !?[]u8 {
+    fn refreshGatewayCredential(raw: *anyopaque, alloc: Allocator, source: types.CredentialSource, mode: runtime_deps.CredentialRefreshMode, expected_account_id: ?[]const u8) !?[]u8 {
         const self: *FakeAgentRuntimeDeps = @ptrCast(@alignCast(raw));
         try self.credential_refresh_sources.append(self.alloc, source);
         try self.credential_refresh_modes.append(self.alloc, mode);
+        self.last_credential_refresh_expected_account = expected_account_id;
         if (self.credential_refresh_error) |err| return err;
         if (self.credential_refresh_index >= self.credential_refresh_tokens.len) return null;
         const token = self.credential_refresh_tokens[self.credential_refresh_index];
@@ -1289,12 +1295,25 @@ pub const FakeAgentRuntimeDeps = struct {
         return authorization;
     }
 
-    fn describeAction(_: *anyopaque, arena: Allocator, call: ToolCall, _: ?[]const u8, _: []const []const u8) ![]const u8 {
-        return std.fmt.allocPrint(arena, "start {s}", .{call.name});
+    fn resolveToolActionDisplayTarget(raw: *anyopaque, arena: Allocator, _: ToolCall) !?[]const u8 {
+        const self: *FakeAgentRuntimeDeps = @ptrCast(@alignCast(raw));
+        self.tool_display_target_resolve_count += 1;
+        const value = self.tool_display_target orelse return null;
+        return try arena.dupe(u8, value);
     }
 
-    fn describeCompleted(_: *anyopaque, arena: Allocator, call: ToolCall, _: ?[]const u8, _: []const []const u8) ![]const u8 {
-        return std.fmt.allocPrint(arena, "done {s}", .{call.name});
+    fn describeAction(_: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, _: []const []const u8) ![]const u8 {
+        return if (display_target) |target|
+            std.fmt.allocPrint(arena, "start {s} {s}", .{ call.name, target })
+        else
+            std.fmt.allocPrint(arena, "start {s}", .{call.name});
+    }
+
+    fn describeCompleted(_: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, _: []const []const u8) ![]const u8 {
+        return if (display_target) |target|
+            std.fmt.allocPrint(arena, "done {s} {s}", .{ call.name, target })
+        else
+            std.fmt.allocPrint(arena, "done {s}", .{call.name});
     }
 
     fn describeDenied(_: *anyopaque, arena: Allocator, call: ToolCall, _: ?[]const u8, label: []const u8, _: []const []const u8) ![]const u8 {
@@ -1494,6 +1513,9 @@ pub const FakeAgentRuntimeDeps = struct {
             result.sandbox_scope_required == null)
         {
             _ = self.successful_effect_count.fetchAdd(1, .seq_cst);
+        }
+        if (self.tool_display_target_after_execute) |target| {
+            self.tool_display_target = target;
         }
         return result;
     }

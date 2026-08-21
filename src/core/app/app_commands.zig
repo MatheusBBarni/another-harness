@@ -29,6 +29,7 @@ const mcp_command_provider = @import("../mcp/command_provider.zig");
 const mcp_runtime = @import("../mcp/mcp_runtime.zig");
 const app_mcp_runtime = @import("app_mcp_runtime.zig");
 const model_cache_runtime = @import("model_cache_runtime.zig");
+const provider_runtime = @import("provider_runtime.zig");
 const permissions = @import("../permissions/permissions.zig");
 const session_permission_state = @import("../permissions/session_permission_state.zig");
 const sandbox = @import("../permissions/sandbox.zig");
@@ -334,6 +335,7 @@ pub fn Handlers(comptime App: type) type {
                 .manage_images = commandManageImages,
                 .handle_model = commandHandleModel,
                 .show_models = commandShowModels,
+                .handle_provider = commandHandleProvider,
                 .handle_permissions = commandHandlePermissions,
                 .handle_allowlist = commandHandleAllowlist,
                 .show_stats = commandShowStats,
@@ -568,15 +570,28 @@ pub fn Handlers(comptime App: type) type {
             }
         }
 
-        fn commandLogout(ctx: *anyopaque) !void {
+        fn commandLogout(ctx: *anyopaque, rest: []const u8) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
             if (comptime @hasDecl(App, "runLogoutCommand")) {
-                try app.runLogoutCommand();
+                try app.runLogoutCommand(rest);
             } else {
                 try app.writeDomainNotice(.{
                     .topic = "auth",
                     .tone = .@"error",
                     .body = "logout is not available in this runtime",
+                }, true);
+            }
+        }
+
+        fn commandHandleProvider(ctx: *anyopaque, rest: []const u8) !void {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            if (comptime @hasDecl(App, "runProviderCommand")) {
+                try app.runProviderCommand(rest);
+            } else {
+                try app.writeDomainNotice(.{
+                    .topic = "provider",
+                    .tone = .@"error",
+                    .body = "provider switching is not available in this runtime",
                 }, true);
             }
         }
@@ -1627,6 +1642,10 @@ pub fn Handlers(comptime App: type) type {
             } else "";
             var snapshot = app.creditsProvider().fetch(app.alloc, .{
                 .credential = app.auth.apiKey(),
+                .credential_source = if (comptime @hasDecl(@TypeOf(app.auth), "credentialSource"))
+                    app.auth.credentialSource()
+                else
+                    null,
                 .tenant = app.auth.gatewayTeam(),
                 .model = selected_model,
             });
@@ -1871,7 +1890,7 @@ fn buildTraceReport(app: anytype) ![]u8 {
     try out.writer.print("version: {s} ({s})\n", .{ App.app_version, build_options.git_commit });
     try out.writer.print("platform: {s}/{s}\n", .{ @tagName(builtin.os.tag), @tagName(builtin.cpu.arch) });
     try out.writer.print("build: {s}\n", .{@tagName(builtin.mode)});
-    try out.writer.print("model: {s}\n", .{app.selected_model.items});
+    try out.writer.print("model: {s}\n", .{provider_runtime.model(app)});
     if (app.fast_mode) try out.writer.writeAll("fast_mode: on\n");
     const perm_label = permissions.permissionModeLabel(app.permission_engine.mode);
     try out.writer.print("permission_mode: {s}\n", .{perm_label});
@@ -3382,11 +3401,11 @@ fn handleNotificationsCommand(app: anytype, rest: []const u8) !void {
 pub fn settingsCatalogSnapshot(app: anytype) settings_catalog.Snapshot {
     const App = @TypeOf(app.*);
     var snapshot: settings_catalog.Snapshot = .{};
-    if (comptime @hasField(App, "selected_model")) snapshot.model = app.selected_model.items;
+    if (comptime provider_runtime.supported(App)) snapshot.model = provider_runtime.model(app);
     if (comptime @hasField(App, "effort")) snapshot.effort = app.effort.displayLabel();
     if (comptime @hasField(App, "fast_mode")) snapshot.fast_mode = app.fast_mode;
-    if (comptime @hasDecl(App, "resolvedModelCapabilities") and @hasField(App, "selected_model")) {
-        const capabilities = app.resolvedModelCapabilities(app.selected_model.items);
+    if (comptime @hasDecl(App, "resolvedModelCapabilities") and provider_runtime.supported(App)) {
+        const capabilities = app.resolvedModelCapabilities(provider_runtime.model(app));
         snapshot.reasoning_efforts = capabilities.reasoning_efforts;
         snapshot.supports_fast_mode = capabilities.supports_fast_mode;
     }
@@ -3534,12 +3553,12 @@ pub fn applySettingsCatalogChange(app: anytype, change: settings_catalog.Change)
         .effort => {
             const effort = types.ReasoningEffort.parseDisplayLabel(change.value) orelse
                 return error.InvalidSettingsCatalogValue;
-            const capabilities = app.resolvedModelCapabilities(app.selected_model.items);
+            const capabilities = app.resolvedModelCapabilities(provider_runtime.model(app));
             if (!model_capabilities.reasoningEffortSupported(capabilities, effort)) {
                 const message = try std.fmt.allocPrint(
                     app.alloc,
                     "{s} is not available for {s}",
-                    .{ effort.displayLabel(), app.selected_model.items },
+                    .{ effort.displayLabel(), provider_runtime.model(app) },
                 );
                 defer app.alloc.free(message);
                 try app.writeDomainNotice(.{ .topic = "effort", .tone = .neutral, .body = message }, true);

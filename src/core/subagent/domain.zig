@@ -3,6 +3,7 @@ const mcp_access = @import("../mcp/access_policy.zig");
 const session_permission_state = @import("../permissions/session_permission_state.zig");
 const session_layout = @import("../session/session_layout.zig");
 const types = @import("../shared/types.zig");
+const model_provider = @import("../config/model_provider.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -339,6 +340,7 @@ pub const AdmissionSnapshot = struct {
     parent_id: []u8,
     source_id: []u8,
     model: []u8,
+    provider: model_provider.ProviderId = .gateway,
     effort: types.ReasoningEffort,
     permission_mode: types.PermissionMode = .yolo,
     sandbox_backend: types.BackendKind,
@@ -392,6 +394,7 @@ pub const AdmissionSnapshot = struct {
             .parent_id = parent_id,
             .source_id = source_id,
             .model = model,
+            .provider = self.provider,
             .effort = self.effort,
             .permission_mode = self.permission_mode,
             .sandbox_backend = self.sandbox_backend,
@@ -410,6 +413,7 @@ pub const AdmissionInput = struct {
     parent_id: []const u8,
     source_id: []const u8,
     model: []const u8,
+    provider: model_provider.ProviderId = .gateway,
     effort: types.ReasoningEffort,
     permission_mode: types.PermissionMode = .yolo,
     sandbox_backend: types.BackendKind,
@@ -488,6 +492,7 @@ pub fn captureAdmission(
         .parent_id = parent_id,
         .source_id = source_id,
         .model = model,
+        .provider = input.provider,
         .effort = input.effort,
         .permission_mode = input.permission_mode,
         .sandbox_backend = input.sandbox_backend,

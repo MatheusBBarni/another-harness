@@ -426,6 +426,31 @@ function createLinkedSkillsMenuFixture() {
   return { home, workspace, stderrPath };
 }
 
+function createLinkedMetadataSkillsMenuFixture() {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "fx-linked-skill-metadata-menu-")));
+  workDirs.push(root);
+  const home = join(root, "home");
+  const workspace = join(root, "workspace");
+  const source = join(workspace, "skill-source", "linked-leaf");
+  const candidate = join(workspace, ".codex", "skills", "linked-leaf");
+  const stderrPath = join(root, "stderr.log");
+  mkdirSync(join(home, ".fx"), { recursive: true });
+  mkdirSync(source, { recursive: true });
+  mkdirSync(candidate, { recursive: true });
+  writeFileSync(join(home, ".fx", "settings.json"), "{}\n");
+  writeFileSync(
+    join(source, "SKILL.md"),
+    "---\nname: linked-leaf\ndescription: linked metadata skill\n---\n\nLINKED_METADATA_BODY\n",
+  );
+  symlinkSync(
+    "../../../skill-source/linked-leaf/SKILL.md",
+    join(candidate, "SKILL.md"),
+    "file",
+  );
+  writeFileSync(stderrPath, "");
+  return { home, workspace, stderrPath };
+}
+
 function createModelsMenuFixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "fx-models-menu-")));
   workDirs.push(root);
@@ -630,6 +655,57 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       expect(gateway.requests).toHaveLength(1);
       expect(gatewayPromptText(gateway.requests[0]!.body)).toContain(
         "LINKED_MENU_BODY",
+      );
+      expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");
+
+      await session.sendText("/quit");
+      expect(await session.waitForSessionEnd(TIMEOUT)).toBe(true);
+      session = null;
+    },
+    TEST_TIMEOUT,
+  );
+
+  test(
+    "linked skill metadata is visible and usable from the skills menu",
+    async () => {
+      const fixture = createLinkedMetadataSkillsMenuFixture();
+      gateway = startFakeGateway([
+        fakeGatewayFinalText("LINKED_METADATA_COMPLETE"),
+      ]);
+      session = await TmuxSession.create({
+        cwd: fixture.workspace,
+        env: {
+          HOME: fixture.home,
+          AI_GATEWAY_API_KEY: "fake-linked-metadata-key",
+          VERCEL_OIDC_TOKEN: undefined,
+          FX_GATEWAY_BASE_URL: gateway.baseUrl,
+          FX_GATEWAY_CHAT_URL: gateway.chatUrl,
+          FX_MODEL: FAKE_GATEWAY_MODEL,
+          FX_AUTO_UPGRADE: "0",
+        },
+        width: 120,
+        height: 32,
+        stderrPath: fixture.stderrPath,
+      });
+      await session.waitForComposer(10_000);
+      expect(await session.capturePane()).not.toContain("discovery issue");
+
+      await session.sendText("/skills");
+      const menu = await waitForSkillsMenu(session, 1);
+      expect(menu.join("\n")).toContain("linked-leaf");
+      expect(menu.join("\n")).toContain("Codex · Workspace");
+      await session.sendKeys("Enter");
+      await session.waitForPane(
+        (pane) => composerContains(pane, "linked-leaf"),
+        5_000,
+      );
+      await session.sendLiteralText(" apply it");
+      await session.sendKeys("Enter");
+      await session.waitForText("LINKED_METADATA_COMPLETE", 10_000);
+
+      expect(gateway.requests).toHaveLength(1);
+      expect(gatewayPromptText(gateway.requests[0]!.body)).toContain(
+        "LINKED_METADATA_BODY",
       );
       expect(readFileSync(fixture.stderrPath, "utf8")).toBe("");
 
@@ -892,7 +968,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       ).toBe(71);
       expect(closedComposerRow).toBe(73);
       await session.sendLiteralText("/");
-      await session.waitForText("Commands 39", 5_000);
+      await session.waitForText("Commands 40", 5_000);
       const afterSlash = await capture("after-slash");
       expect(visibleTranscriptTailRow(afterSlash)).toBe(62);
       expect(composerRow(afterSlash)).toBe(64);
@@ -1391,7 +1467,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       await session.waitForComposer(10_000);
 
       await session.sendText("/help");
-      let grid = await waitForHelpMenu(session, 39);
+      let grid = await waitForHelpMenu(session, 40);
       let pane = grid.join("\n");
       expect(pane).not.toContain("𝒇x");
       expect(pane).not.toContain("Run /help for commands");
@@ -1411,11 +1487,11 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       expect(pane).not.toContain("/clear");
 
       await session.sendKeys("C-u");
-      await waitForHelpMenu(session, 39);
+      await waitForHelpMenu(session, 40);
       await session.sendKeys("Down");
       await session.sendKeys("Enter");
       pane = await session.waitForPane(
-        (current) => hasEmptyComposer(current) && !current.includes("Commands 39"),
+        (current) => hasEmptyComposer(current) && !current.includes("Commands 40"),
         5_000,
       );
       expect(composerContains(pane, "/clear")).toBe(false);
@@ -1424,7 +1500,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
 
       await session.sendKeys("C-u");
       await session.sendText("/help");
-      await waitForHelpMenu(session, 39);
+      await waitForHelpMenu(session, 40);
       await session.sendLiteralText("additional directories");
       await waitForHelpMenu(session, 1);
       await session.sendKeys("Enter");
@@ -1441,7 +1517,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
 
       await session.sendKeys("C-u");
       await session.sendText("/help");
-      await waitForHelpMenu(session, 39);
+      await waitForHelpMenu(session, 40);
       await session.sendLiteralText("no command can match this query");
       await session.waitForText("No commands found.", 5_000);
       await session.sendKeys("Escape");
@@ -1639,7 +1715,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       await session.waitForComposer(10_000);
 
       await session.sendText("/help");
-      let pane = await session.waitForText("Commands 39", 5_000);
+      let pane = await session.waitForText("Commands 40", 5_000);
       expect(pane).toContain("/help");
       expect(pane).not.toContain("● /help");
       await session.sendKeys("Escape");
@@ -3387,7 +3463,7 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
       await session.waitForComposer(10_000);
 
       await session.sendLiteralText("/");
-      await session.waitForText("Commands 39", 5_000);
+      await session.waitForText("Commands 40", 5_000);
 
       for (let i = 0; i < 5; i += 1) {
         await session.sendKeys("Down");

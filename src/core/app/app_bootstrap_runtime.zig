@@ -1,5 +1,6 @@
 const std = @import("std");
 const app_lifecycle = @import("app_lifecycle.zig");
+const provider_runtime = @import("provider_runtime.zig");
 const app_input_runtime = @import("app_input_runtime.zig");
 const app_permission_runtime = @import("app_permission_runtime.zig");
 const app_render_runtime = @import("app_render_runtime.zig");
@@ -8,6 +9,7 @@ const app_session_runtime = @import("app_session_runtime.zig");
 const auth_runtime = @import("../auth/auth_runtime.zig");
 const credentials = @import("../auth/credentials.zig");
 const config_runtime = @import("../config/config_runtime.zig");
+const model_provider = @import("../config/model_provider.zig");
 const host = @import("../hosts/host.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const record_tape = @import("../workspace/record_tape.zig");
@@ -41,6 +43,7 @@ fn BootstrapDeps(comptime App: type) type {
         const BootstrapInteractiveAppFn = *const fn (app_lifecycle.BootstrapConfig) anyerror!app_lifecycle.StartupState;
         const ConfigureSessionPreferencesFn = *const fn (
             *App,
+            model_provider.ProviderId,
             []const u8,
             config_runtime.ModelSource,
             []const u8,
@@ -136,6 +139,7 @@ pub fn Runtime(comptime App: type) type {
 
         fn configureSessionPreferencesDefault(
             app: *App,
+            provider: model_provider.ProviderId,
             configured_model: []const u8,
             model_source: config_runtime.ModelSource,
             selected_model: []const u8,
@@ -144,6 +148,7 @@ pub fn Runtime(comptime App: type) type {
         ) !void {
             try app_session_runtime.Runtime(App).configureStartupPreferences(
                 app,
+                provider,
                 configured_model,
                 model_source,
                 selected_model,
@@ -216,9 +221,17 @@ pub fn Runtime(comptime App: type) type {
                 startup.stored_key_status,
                 startup.credential_onboarding_skipped,
             );
+            if (comptime @hasDecl(@TypeOf(app.auth), "refreshChatGptSourceInventory")) {
+                app.auth.refreshChatGptSourceInventory(app.alloc) catch |err| {
+                    debug_trace.logf("auth", "startup ChatGPT inventory refresh failed err={s}", .{@errorName(err)});
+                };
+            } else {
+                app.auth.refreshSourceInventory(app.alloc) catch |err| {
+                    debug_trace.logf("auth", "startup source inventory refresh failed err={s}", .{@errorName(err)});
+                };
+            }
             const startup_auth_view = app.auth.view();
             if (startup_auth_view.active_source == null and !startup_auth_view.onboarding_skipped) {
-                try app.auth.refreshSourceInventory(app.alloc);
                 app.auth.openOnboardingPicker(app.alloc);
             }
             if (comptime @hasField(App, "terminal_input_runtime") and @hasField(App, "terminal")) {
@@ -252,14 +265,20 @@ pub fn Runtime(comptime App: type) type {
                 );
             }
 
-            const selected_model = startup.takeSelectedModel();
+            var selected_model = startup.takeSelectedModel();
             defer if (selected_model.len > 0) app.alloc.free(selected_model);
-            try app.selected_model.appendSlice(app.alloc, selected_model);
+            if (comptime @hasField(App, "provider_selection")) {
+                app.provider_selection.adoptOwned(startup.provider, &selected_model);
+            } else {
+                try provider_runtime.replaceModel(app, selected_model);
+            }
+            const active_model = provider_runtime.model(app);
             try deps.configure_session_preferences(
                 app,
+                startup.provider,
                 startup.configured_model,
                 startup.model_source,
-                selected_model,
+                active_model,
                 startup.effort,
                 startup.fast_mode,
             );
@@ -769,6 +788,7 @@ fn welcomeMessageForTest(alloc: Allocator) ![]u8 {
 
 fn configureSessionPreferencesForTest(
     _: *TestApp,
+    _: model_provider.ProviderId,
     configured_model: []const u8,
     model_source: config_runtime.ModelSource,
     selected_model: []const u8,

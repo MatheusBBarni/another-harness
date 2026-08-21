@@ -970,7 +970,7 @@ describe("filesystem path handling", () => {
         (body) => {
           const resultOutput = toolResultOutput(body, "write_large_review");
           expect(resultOutput).toContain('"reason":"auto_denied"');
-          expect(resultOutput).toContain("Permission denied by auto mode classifier");
+          expect(resultOutput).toContain("Blocked by automatic safety policy");
           return finalText("large reviewed write blocked");
         },
       ], { classifierDecision: "ask" });
@@ -1483,7 +1483,7 @@ describe("filesystem path handling", () => {
   );
 
   test(
-    "external delete_file review receives exact action and canonical target",
+    "external delete_file replans before review and preserves the target",
     async () => {
       const root = createIsolatedRoot();
       try {
@@ -1491,17 +1491,23 @@ describe("filesystem path handling", () => {
         mkdirSync(desktop, { recursive: true });
         const target = join(desktop, "test.txt");
         writeFileSync(target, "delete\n");
-        const gateway = startFakeGateway(firstCallToolResponses({
-          id: "delete_external_1",
-          name: "delete_file",
-          input: {
-            path: target,
+        const gateway = startFakeGateway([
+          (body) => {
+            expect(body).toContain("Execute the requested file tool once.");
+            expect(existsSync(target)).toBe(true);
+            return toolCall("delete_external_1", "delete_file", {
+              path: target,
+            });
           },
-          expectedResultRequest: [target],
-          expectedResultOutput: [target],
-          finalMessage: "classified external delete complete",
-          beforeToolCall: () => expect(existsSync(target)).toBe(true),
-        }));
+          (body) => {
+            const resultOutput = toolResultOutput(body, "delete_external_1");
+            expect(body).toContain(target);
+            expect(resultOutput).toContain("auto_denied");
+            expect(resultOutput).toContain("Blocked by automatic safety policy");
+            expect(existsSync(target)).toBe(true);
+            return finalText("external delete replanned");
+          },
+        ], { classifierDecision: "allow" });
         try {
           const result = await runFx(
             [
@@ -1519,28 +1525,12 @@ describe("filesystem path handling", () => {
           );
           const json = parseFxJson(result);
           expect(gateway.requests).toHaveLength(2);
-          expect(gateway.classifierRequests).toHaveLength(1);
+          expect(gateway.classifierRequests).toHaveLength(0);
           expect(gateway.remainingResponseCount()).toBe(0);
-          expect(gateway.classifierRequests[0]!.body).toContain(
-            "Execute the requested file tool once.",
-          );
-          expect(gateway.classifierRequests[0]!.body).toContain(
-            "action: tool",
-          );
-          expect(gateway.classifierRequests[0]!.body).toContain(
-            "tool: delete_file",
-          );
-          expect(gateway.classifierRequests[0]!.body).toContain(
-            `target[target]: ${target}`,
-          );
-          expect(gateway.classifierRequests[0]!.body).toContain(
-            `arguments_json: {\\\"path\\\":\\\"${target}`,
-          );
           expect(json.tool_calls).toEqual([
-            { name: "delete_file", status: "success" },
+            { name: "delete_file", status: "error" },
           ]);
-          expect(occurrenceCount(result.stderr, `Deleting ${target}\n`)).toBe(1);
-          expect(existsSync(target)).toBe(false);
+          expect(readFileSync(target, "utf8")).toBe("delete\n");
         } finally {
           gateway.stop();
         }

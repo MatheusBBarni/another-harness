@@ -30,7 +30,7 @@ USE_FLAGS = (
     "-pgo-kind=pgo-instr-use-pipeline",
     "-pgo-cold-func-opt=minsize",
     "-profile-summary-cutoff-cold=600000",
-    "-passes=default<O2>",
+    "-passes=default<O2>,mergefunc,iroutliner",
 )
 
 BENCHMARK_USE_FLAGS = (
@@ -38,7 +38,7 @@ BENCHMARK_USE_FLAGS = (
     "-pgo-kind=pgo-instr-use-pipeline",
     "-pgo-cold-func-opt=minsize",
     "-profile-summary-cutoff-cold=990000",
-    "-passes=default<O2>",
+    "-passes=default<O2>,mergefunc,iroutliner",
 )
 
 CANDIDATE_SIGNING_PAGE_SIZE = 16 * 1024

@@ -9,6 +9,7 @@ const types = @import("../shared/types.zig");
 const sandbox = @import("../permissions/sandbox.zig");
 const workspace_access = @import("../workspace/workspace_access.zig");
 const settings_store = @import("settings_store.zig");
+const model_provider = @import("model_provider.zig");
 const update_target = @import("../upgrade/update_target.zig");
 pub const context_limits = @import("context_limits.zig");
 
@@ -37,6 +38,8 @@ pub const Paths = struct {
 
 pub const Settings = struct {
     model: ?[]u8 = null,
+    provider: ?model_provider.ProviderId = null,
+    codex_model: ?[]u8 = null,
     permission_mode: ?types.PermissionMode = null,
     credential_source: ?types.CredentialSource = null,
     yolo_acknowledged: ?bool = null,
@@ -67,6 +70,7 @@ pub const Settings = struct {
 
     pub fn deinit(self: *Settings, alloc: Allocator) void {
         if (self.model) |value| alloc.free(value);
+        if (self.codex_model) |value| alloc.free(value);
         if (self.input_appearance) |value| alloc.free(value);
         if (self.maxxing_mode) |value| alloc.free(value);
         if (self.sandbox) |value| alloc.free(value);
@@ -105,6 +109,8 @@ pub const ModelSource = ConfigSource;
 
 pub const ConfigSources = struct {
     model: ConfigSource = .compiled_default,
+    provider: ConfigSource = .compiled_default,
+    codex_model: ConfigSource = .compiled_default,
     permission_mode: ConfigSource = .compiled_default,
     effort: ConfigSource = .compiled_default,
     fast_mode: ConfigSource = .compiled_default,
@@ -542,6 +548,8 @@ fn hasLegacyWorkspacePreferences(root: std.json.Value) bool {
 fn isProfileOnlySettingKey(key: []const u8) bool {
     inline for (&.{
         "model",
+        "provider",
+        "codex_model",
         "effort",
         "fast_mode",
         "input_appearance",
@@ -586,6 +594,8 @@ fn appendIgnoredProjectProfileSettingDiagnostics(
 
 fn updateConfigSources(sources: *ConfigSources, settings: Settings, source: ConfigSource) void {
     if (settings.model != null) sources.model = source;
+    if (settings.provider != null) sources.provider = source;
+    if (settings.codex_model != null) sources.codex_model = source;
     if (settings.permission_mode != null) sources.permission_mode = source;
     if (settings.effort != null) sources.effort = source;
     if (settings.fast_mode != null) sources.fast_mode = source;
@@ -1327,6 +1337,18 @@ fn parseProfileOnlyFields(
         settings.model = try alloc.dupe(u8, value.string);
     }
 
+    if (root.object.get("provider")) |provider_value| {
+        if (provider_value != .string) return error.InvalidProviderType;
+        settings.provider = model_provider.parse(provider_value.string) orelse
+            return error.InvalidProviderValue;
+    }
+
+    if (root.object.get("codex_model")) |model_value| {
+        if (model_value != .string) return error.InvalidCodexModelType;
+        settings_store.validateModel(model_value.string) catch return error.InvalidCodexModelValue;
+        settings.codex_model = try alloc.dupe(u8, model_value.string);
+    }
+
     if (root.object.get("permission_mode")) |permission_mode_value| {
         const value = permission_mode_value;
         if (value != .string) return error.InvalidPermissionModeType;
@@ -1512,6 +1534,12 @@ fn mergeSettings(target: *Settings, incoming: *Settings, alloc: Allocator) void 
         if (target.model) |current| alloc.free(current);
         target.model = value;
         incoming.model = null;
+    }
+    if (incoming.provider) |value| target.provider = value;
+    if (incoming.codex_model) |value| {
+        if (target.codex_model) |current| alloc.free(current);
+        target.codex_model = value;
+        incoming.codex_model = null;
     }
     if (incoming.permission_mode) |value| target.permission_mode = value;
     if (incoming.credential_source) |value| target.credential_source = value;
@@ -2053,6 +2081,17 @@ test "max_agent_steps absence and explicit values resolve distinctly" {
     defer positive.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 50), positive.max_agent_steps.?);
     try std.testing.expectEqual(@as(usize, 50), agent_steps.resolveMaxAgentSteps(positive.max_agent_steps, 25));
+}
+
+test "provider settings keep independent Gateway and Codex models" {
+    var settings = try parseSettingsJson(
+        std.testing.allocator,
+        "{\"provider\":\"codex\",\"model\":\"gateway/model\",\"codex_model\":\"gpt-5.4-mini\"}",
+    );
+    defer settings.deinit(std.testing.allocator);
+    try std.testing.expectEqual(model_provider.ProviderId.codex, settings.provider.?);
+    try std.testing.expectEqualStrings("gateway/model", settings.model.?);
+    try std.testing.expectEqualStrings("gpt-5.4-mini", settings.codex_model.?);
 }
 
 test "max_agent_steps explicit zero survives serialization round trip" {

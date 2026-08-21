@@ -18,6 +18,7 @@ const command_output_content = @import("../tooling/command_output_content.zig");
 const paste_blocks = @import("../input/pasted_blocks.zig");
 const entity_spans = @import("../shared/entity_spans.zig");
 const types = @import("../shared/types.zig");
+const model_provider = @import("../config/model_provider.zig");
 const assistant_presentation = @import("assistant_presentation.zig");
 
 pub const AgentTurnSettings = struct {
@@ -60,9 +61,11 @@ pub const QueuedPrompt = struct {
     images: []types.ImageAttachment,
     authorized_image_catalog: []types.ImageAttachment = &.{},
     model: []u8,
+    provider: model_provider.ProviderId = .gateway,
     api_key: []u8,
     gateway_team: ?[]u8 = null,
     credential_source: ?types.CredentialSource = null,
+    account_id: ?[]u8 = null,
     permission_mode: types.PermissionMode,
     sandbox_backend: sandbox.BackendKind = .none,
     history: []types.HistoryTurn,
@@ -1957,6 +1960,7 @@ pub fn freeQueuedPrompt(alloc: std.mem.Allocator, prompt: QueuedPrompt) void {
     alloc.free(prompt.model);
     secret.zeroAndFree(alloc, prompt.api_key);
     if (prompt.gateway_team) |team| alloc.free(team);
+    if (prompt.account_id) |account_id| alloc.free(account_id);
     types.freeHistoryTurnSlice(alloc, prompt.history);
     if (prompt.root_user_intent_context.len > 0) alloc.free(prompt.root_user_intent_context);
     types.freePermissionGrantSlice(alloc, prompt.grants);

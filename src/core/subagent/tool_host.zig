@@ -21,6 +21,7 @@ const session_codec = @import("../session/session_codec.zig");
 const session_store = @import("../session/session_store.zig");
 const mcp_access = @import("../mcp/access_policy.zig");
 const mode_registry = @import("../modes/mode_registry.zig");
+const model_provider = @import("../config/model_provider.zig");
 const permissions = @import("../permissions/permissions.zig");
 const session_permission_state = @import("../permissions/session_permission_state.zig");
 const tool_dispatch = @import("../tooling/tool_dispatch.zig");
@@ -103,6 +104,7 @@ fn recoveryStateAfterFinish(outcome: RecoveryFinishOutcome) RecoveryState {
 pub const BackgroundRecoveryError = error{ThreadSpawnFailed};
 
 pub const Defaults = struct {
+    provider: model_provider.ProviderId,
     model: []const u8,
     effort: types.ReasoningEffort,
     fast_mode: bool = false,
@@ -341,6 +343,7 @@ pub const Runtime = struct {
             },
             .live_authority = &self.authority_resolver,
             .approval_registry = &self.approvals,
+            .retirement_root_id = self.root_id,
             .notification_clock = .{
                 .now_fn = notificationNow,
             },
@@ -379,6 +382,18 @@ pub const Runtime = struct {
     ) ![]u8 {
         if (command.* == .inspect) {
             return self.executeModelInspection(alloc, command.*, options);
+        }
+        if (command.* == .create and
+            !try self.callerMayCreate(alloc, options.caller_id))
+        {
+            return boundedFailureAlloc(
+                alloc,
+                options.invocation_id,
+                null,
+                "invalid_state",
+                false,
+                options.max_result_bytes,
+            );
         }
         if (!try self.admitModelCommand(
             alloc,
@@ -735,6 +750,33 @@ pub const Runtime = struct {
             command.create.configuration.permission_mode = admitted;
         }
         return true;
+    }
+
+    fn callerMayCreate(
+        self: *Runtime,
+        alloc: Allocator,
+        caller_id: []const u8,
+    ) error{OutOfMemory}!bool {
+        if (std.mem.eql(u8, caller_id, self.root_id)) return true;
+        var capability = self.sessions.openSubagentControlCapabilityReadOnly(
+            alloc,
+            caller_id,
+            self.manager.options.child_store,
+        ) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => false,
+        };
+        defer capability.deinit();
+        const store = control_store.Store{
+            .capability = &capability,
+            .expected_child_id = caller_id,
+        };
+        var record = (store.loadOptional(alloc) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => false,
+        }) orelse return false;
+        defer record.deinit(alloc);
+        return record.mode != .one_off;
     }
 
     /// Typed human adapter for the same canonical command/effect path used by
@@ -1225,9 +1267,11 @@ pub const Runtime = struct {
             self.root_id,
             timestamp_ms,
         ) catch |err| {
+            self.requestRetirementSweep(timestamp_ms);
             self.finishRecoveryLocked(.failed);
             return err;
         };
+        self.requestRetirementSweep(timestamp_ms);
         self.finishRecoveryLocked(if (report.fullyReconciled())
             .fully_reconciled
         else
@@ -1279,6 +1323,23 @@ pub const Runtime = struct {
 
     pub fn recoveryState(self: *const Runtime) RecoveryState {
         return self.recovery_state.load(.acquire);
+    }
+
+    pub fn requestRetirementSweep(self: *Runtime, timestamp_ms: i64) void {
+        if (comptime builtin.single_threaded) return;
+        self.owner.requestRetirementSweep(timestamp_ms) catch |err| {
+            debug_trace.logf(
+                "subagent",
+                "retirement sweep wake failed root_id={s} outcome={s}",
+                .{ self.root_id, @errorName(err) },
+            );
+            return;
+        };
+        debug_trace.logf(
+            "subagent",
+            "retirement sweep requested root_id={s}",
+            .{self.root_id},
+        );
     }
 
     fn backgroundRecoveryMain(self: *Runtime, timestamp_ms: i64) void {
@@ -1463,7 +1524,8 @@ pub const Runtime = struct {
                 ),
                 .close => {},
             },
-            .inspect, .relationship, .configure => {},
+            .relationship => self.requestRetirementSweep(context.timestamp_ms),
+            .inspect, .configure => {},
         };
         return result;
     }
@@ -2175,6 +2237,7 @@ fn freshChildState(
         .updated_at_ms = now,
         .conversation_language = defaults.conversation_language,
         .preferences = .{
+            .provider = defaults.provider,
             .model = model,
             .effort = create.configuration.effort orelse defaults.effort,
             .fast_mode = defaults.fast_mode,
@@ -2183,6 +2246,31 @@ fn freshChildState(
         .total_input_tokens = 0,
         .total_output_tokens = 0,
     };
+}
+
+test "fresh child state persists its provider with the model" {
+    const alloc = std.testing.allocator;
+    var command = try domain.validateCommand(alloc, .{ .create = .{
+        .name = "codex-child",
+        .mode = .persistent,
+    } });
+    defer command.deinit(alloc);
+    var state = try freshChildState(
+        alloc,
+        "01J00000000000000000000000",
+        "/tmp/workspace",
+        command.create,
+        .{
+            .provider = .codex,
+            .model = "gpt-5.6-sol",
+            .effort = types.ReasoningEffort.literal("high"),
+            .conversation_language = session.ConversationLanguage.literal("en"),
+        },
+    );
+    defer state.deinit(alloc);
+
+    try std.testing.expectEqual(model_provider.ProviderId.codex, state.preferences.provider);
+    try std.testing.expectEqualStrings("gpt-5.6-sol", state.preferences.model);
 }
 
 fn reservationWasCommitted(
@@ -2319,6 +2407,7 @@ fn captureAdmission(
         .parent_id = request.parent_id,
         .source_id = request.source_id,
         .model = request.preferences.model,
+        .provider = request.preferences.provider,
         .effort = request.preferences.effort,
         .permission_mode = snapshot.permission_mode,
         .sandbox_backend = snapshot.sandbox_backend,
@@ -2914,6 +3003,7 @@ fn testOptions(caller_id: []const u8, invocation_id: []const u8) ExecuteOptions 
         .caller_id = caller_id,
         .invocation_id = invocation_id,
         .defaults = .{
+            .provider = .gateway,
             .model = "test/model",
             .effort = types.ReasoningEffort.literal("high"),
             .conversation_language = session.ConversationLanguage.literal("en"),
@@ -2927,12 +3017,78 @@ fn testHumanOptions(invocation_id: []const u8) HumanCommandOptions {
     return .{
         .invocation_id = invocation_id,
         .defaults = .{
+            .provider = .gateway,
             .model = "test/model",
             .effort = types.ReasoningEffort.literal("high"),
             .conversation_language = session.ConversationLanguage.literal("en"),
         },
         .timestamp_ms = 10,
     };
+}
+
+test "one off caller cannot create before identity or child allocation" {
+    const alloc = std.testing.allocator;
+    const root_id = "01J00000000000000000000000";
+    const caller_id = "01J00000000000000000000001";
+    var env = try TestEnvironment.init(alloc);
+    defer env.deinit(alloc);
+    try env.createSession(alloc, root_id);
+    try env.createSession(alloc, caller_id);
+    var test_authority = TestAuthority{ .root_id = root_id };
+    const host = try Runtime.create(
+        alloc,
+        &env.store,
+        root_id,
+        test_authority.resolver(),
+        .{},
+    );
+    defer host.deinit();
+
+    var caller_create = try domain.validateCommand(alloc, .{ .create = .{
+        .name = "temporary caller",
+        .mode = .one_off,
+        .prompt = "temporary work",
+    } });
+    defer caller_create.deinit(alloc);
+    var caller_created = try host.manager.execute(alloc, caller_create, .{
+        .actor_id = root_id,
+        .operation_id = "create-one-off-caller",
+        .created_child_id = caller_id,
+        .timestamp_ms = 1,
+    });
+    defer caller_created.deinit(alloc);
+    try std.testing.expect(caller_created == .receipt);
+
+    var nested_create = try domain.validateCommand(alloc, .{ .create = .{
+        .name = "must not exist",
+        .mode = .persistent,
+    } });
+    defer nested_create.deinit(alloc);
+    const rejected = try host.execute(
+        alloc,
+        &nested_create,
+        testOptions(caller_id, "one-off-nested-create"),
+    );
+    defer alloc.free(rejected);
+    try std.testing.expect(std.mem.find(u8, rejected, "invalid_state") != null);
+
+    var root_capability = try env.store.openSubagentControlCapabilityReadOnly(
+        alloc,
+        root_id,
+        .{},
+    );
+    defer root_capability.deinit();
+    const operations = create_store.Store{
+        .capability = &root_capability,
+        .expected_root_id = root_id,
+    };
+    try std.testing.expect((try operations.loadOptional(alloc)) == null);
+
+    var nested = try host.manager.snapshot(alloc, .{
+        .root_id = caller_id,
+    });
+    defer nested.deinit(alloc);
+    try std.testing.expectEqual(@as(usize, 0), nested.snapshot.nodes.len);
 }
 
 test "model child permissions inherit and reject elevation before persistence" {

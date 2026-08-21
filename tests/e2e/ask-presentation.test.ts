@@ -212,6 +212,7 @@ describe("fx ask presentation", () => {
       "case :\"$PATH\": in *:\"$HOME/profile-bin\":*) printf 'path-user:';; *) printf 'path-clean:';; esac; " +
       "if alias fx_profile_alias >/dev/null 2>&1; then fx_profile_alias; else printf no-alias; fi; printf ':'; " +
       "if command -v fx_profile_function >/dev/null; then fx_profile_function; else printf no-function; fi";
+    const nestedExecMarker = join(root.workspace, "nested-no-save-ran");
     const gateway = startFakeGateway([
       fakeGatewayToolCall("terminal-omitted", "terminal", {
         action: "exec",
@@ -232,6 +233,12 @@ describe("fx ask presentation", () => {
         command: "printf should-not-start",
         return_when: { kind: "exit" },
         wait_ceiling_ms: 8_000,
+      }),
+      fakeGatewayToolCall("terminal-nested-exec", "terminal", {
+        request: {
+          action: "exec",
+          command: `printf nested > ${JSON.stringify(nestedExecMarker)}`,
+        },
       }),
       fakeGatewayToolCall("terminal-neighbor-exec", "terminal", {
         action: "exec",
@@ -261,9 +268,10 @@ describe("fx ask presentation", () => {
       { name: "terminal", status: "success" },
       { name: "terminal", status: "success" },
       { name: "terminal", status: "error" },
+      { name: "terminal", status: "error" },
       { name: "terminal", status: "success" },
     ]);
-    expect(gateway.requests).toHaveLength(6);
+    expect(gateway.requests).toHaveLength(7);
 
     const firstRequest = JSON.parse(gateway.requests[0]!.body) as {
       tools: Array<{
@@ -322,7 +330,13 @@ describe("fx ask presentation", () => {
     );
     expect(gateway.requests[4]!.body).not.toContain("authority_denied");
     expect(gateway.requests[4]!.body).not.toContain("tool_permission_denied");
-    expect(gateway.requests[5]!.body).toContain("neighbor-exec");
+    expect(gateway.requests[5]!.body).toContain(
+      "terminal arguments must match the advertised action schema",
+    );
+    expect(gateway.requests[5]!.body).not.toContain("tool_permission_denied");
+    expect(gateway.requests[5]!.body).toContain('"request"');
+    expect(existsSync(nestedExecMarker)).toBe(false);
+    expect(gateway.requests[6]!.body).toContain("neighbor-exec");
     expect(
       existsSync(join(root.home, ".fx", "terminal-host", "host.json")),
     ).toBe(false);
@@ -366,7 +380,9 @@ describe("fx ask presentation", () => {
 
       expect(result.code).toBe(0);
       expect(result.stdout).toBe("Ask public terminal complete.\n");
-      expect(result.stderr).toContain("Using terminal start");
+      expect(result.stderr).toContain("Starting printf ASK_PUBLIC_TERMINAL_TMUX");
+      expect(result.stderr).not.toContain("Using terminal");
+      expect(result.stderr).not.toContain("Preparing command");
       expect(result.stderr).not.toContain("failed");
       expect(gateway.requests).toHaveLength(2);
       expect(gateway.requests[1]!.body).toContain(toolCallId);

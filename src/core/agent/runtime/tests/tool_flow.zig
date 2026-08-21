@@ -65,6 +65,8 @@ const VisionAgentToolRuntime = test_support.VisionAgentToolRuntime;
 
 const fixture_tools_json =
     "[{\"type\":\"function\",\"name\":\"read_file\",\"description\":\"Read a file\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}]";
+const terminal_nested_tools_json =
+    "[{\"type\":\"function\",\"name\":\"terminal\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"request\":{\"oneOf\":[{\"type\":\"object\"}]}},\"required\":[\"request\"],\"additionalProperties\":false}}]";
 
 fn makeOwnedVisionCatalog(
     alloc: std.mem.Allocator,
@@ -494,7 +496,7 @@ fn expectPermissionDeniedToolResult(gateway: *const FakeGateway, index: usize, t
 fn expectedPermissionDeniedMessage(reason: types.ToolPermissionDenialReason) ?[]const u8 {
     return switch (reason) {
         .user_denied => "Permission denied by user",
-        .auto_denied => "Permission denied by auto mode classifier",
+        .auto_denied => "Blocked by automatic safety policy",
         .policy_denied, .permission_required => null,
     };
 }
@@ -1017,6 +1019,122 @@ test "accepted automatic review remains internal before ordinary tool execution"
     try std.testing.expect(
         !hooks.lifecycle_events.items[0].authoritative_started.place_after_current_transcript,
     );
+}
+
+test "borrowed nested terminal completion is flat before authority execution and memory" {
+    const alloc = std.testing.allocator;
+    const flat_arguments = "{\"action\":\"exec\",\"command\":\"printf done\"}";
+    const calls = [_]ToolCall{toolCall(
+        "call_nested_terminal",
+        "terminal",
+        "{\"request\":{\"action\":\"exec\",\"command\":\"printf done\"}}",
+    )};
+    const completions = [_]FakeCompletion{
+        .{ .tool_calls = &calls },
+        .{ .content = "Final" },
+    };
+    var gateway = FakeGateway.init(alloc, &completions);
+    defer gateway.deinit();
+    var hooks = FakeAgentRuntimeDeps.init(alloc);
+    defer hooks.deinit();
+    hooks.permission_decisions = &.{.once};
+    var fixture = PromptFixture{};
+    var config = fixture.config();
+    config.gateway_tools_json = terminal_nested_tools_json;
+
+    try runFakePrompt(&gateway, &hooks, config, fixture.job());
+
+    try std.testing.expectEqual(@as(usize, 1), hooks.executed_names.items.len);
+    try std.testing.expectEqualStrings("terminal", hooks.executed_names.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), hooks.execute_authority_scopes.items.len);
+    try std.testing.expectEqualStrings(flat_arguments, hooks.last_validated_arguments.?);
+    try std.testing.expectEqualStrings(flat_arguments, hooks.last_permission_arguments.?);
+    try std.testing.expectEqualStrings(flat_arguments, hooks.last_executed_arguments.?);
+    try std.testing.expectEqual(@as(usize, 1), hooks.history_turns.items.len);
+    const execution = hooks.history_turns.items[0].assistant.execution;
+    try std.testing.expectEqual(@as(usize, 1), execution.tool_steps.len);
+    try std.testing.expectEqualStrings(
+        flat_arguments,
+        execution.tool_steps[0].tool_calls[0].arguments_json,
+    );
+}
+
+test "terminal lifecycle resolves one display target before execution" {
+    const alloc = std.testing.allocator;
+    const calls = [_]ToolCall{toolCall(
+        "inspect_call",
+        "terminal",
+        "{\"action\":\"inspect\",\"session_id\":\"terminal-cold-session\"}",
+    )};
+    const completions = [_]FakeCompletion{
+        .{ .tool_calls = &calls },
+        .{ .content = "done" },
+    };
+    var gateway = FakeGateway.init(alloc, &completions);
+    defer gateway.deinit();
+    var hooks = FakeAgentRuntimeDeps.init(alloc);
+    defer hooks.deinit();
+    hooks.tool_display_target = "session terminal-cold-session";
+    hooks.tool_display_target_after_execute = "npm run dev";
+    hooks.exec_plans = &.{.{ .result = .{
+        .status = .success,
+        .model_output = "{}",
+    } }};
+    const PermissionFixture = struct {
+        fn request(
+            _: *anyopaque,
+            _: std.mem.Allocator,
+            _: ToolCall,
+            _: permission_auto_classifier.ReviewTurnContext,
+            _: types.PermissionMode,
+            _: []const PermissionGrant,
+            _: ?runtime_tool_contracts.LiveToolAuthority,
+            _: ?runtime_tool_contracts.LivePermissionRevalidation,
+            _: []const []const u8,
+        ) !command_admission.PermissionOutcome {
+            return .{
+                .decision = .once,
+                .execution_authority = .ordinary,
+                .human_approval = .once,
+            };
+        }
+    };
+    var permission_fixture = PermissionFixture{};
+    hooks.permission_request_override = .{
+        .context = &permission_fixture,
+        .request_fn = PermissionFixture.request,
+    };
+    var fixture = PromptFixture{};
+    var config = fixture.config();
+    config.gateway_tools_json = terminal_nested_tools_json;
+
+    try runFakePrompt(&gateway, &hooks, config, fixture.job());
+
+    try std.testing.expectEqual(@as(usize, 1), hooks.tool_display_target_resolve_count);
+    var active_count: usize = 0;
+    var completed_count: usize = 0;
+    for (hooks.lifecycle_events.items) |event| switch (event) {
+        .progress => |progress| {
+            if (!std.mem.eql(u8, progress.id.call_id, "inspect_call")) continue;
+            try std.testing.expectEqualStrings(
+                "start terminal session terminal-cold-session",
+                progress.text,
+            );
+            active_count += 1;
+        },
+        .terminal => |terminal| {
+            if (!std.mem.eql(u8, terminal.id.call_id, "inspect_call")) continue;
+            try std.testing.expectEqualStrings(
+                "done terminal session terminal-cold-session",
+                terminal.outcome.summary,
+            );
+            completed_count += 1;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 1), active_count);
+    try std.testing.expectEqual(@as(usize, 1), completed_count);
+    try std.testing.expectEqualStrings("npm run dev", hooks.tool_display_target.?);
 }
 
 test "automatic review does not reposition deferred web fetch lifecycle" {

@@ -692,6 +692,74 @@ describe.skipIf(!tmuxAvailable())("config persistence", () => {
   );
 
   test(
+    "configured effort and Fast are visible before model catalog resolves",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "fx-startup-preferences-"));
+      let releaseCatalog: (() => void) | null = null;
+      const catalogRelease = new Promise<void>((resolve) => {
+        releaseCatalog = resolve;
+      });
+      const gateway = startFakeGateway([], {
+        models: async () => {
+          await catalogRelease;
+          return [{
+            id: "anthropic/claude-opus-4.8",
+            type: "language",
+            released: 1,
+            tags: ["fast", "tool-use"],
+            reasoning_options: [{ type: "effort", values: ["high", "xhigh"] }],
+            pricing: {
+              fast: { input: "0.1", output: "0.2" },
+            },
+          }];
+        },
+      });
+      try {
+        const home = join(root, "home");
+        const workspace = join(root, "workspace");
+        const stderrPath = join(root, "stderr.log");
+        mkdirSync(join(home, ".fx"), { recursive: true, mode: 0o700 });
+        mkdirSync(workspace);
+        writeFileSync(
+          join(home, ".fx", "settings.json"),
+          JSON.stringify({
+            model: "anthropic/claude-opus-4.8",
+            permission_mode: "auto",
+            effort: "xhigh",
+            fast_mode: true,
+          }) + "\n",
+          { mode: 0o600 },
+        );
+
+        session = await TmuxSession.create({
+          cwd: realpathSync(workspace),
+          env: {
+            ...NO_AUTH,
+            HOME: home,
+            FX_AUTO_UPGRADE: "0",
+            FX_E2E_GATEWAY_MODELS_URL: `${gateway.baseUrl}/coding-agent/v1/models`,
+          },
+          stderrPath,
+        });
+        const pane = await session.waitForText("auto · opus 4.8", TIMEOUT);
+        expect(pane).toContain("auto · opus 4.8 · xhigh · ⚡︎");
+        releaseCatalog?.();
+        releaseCatalog = null;
+
+        await session.sendText("/quit");
+        await session.waitForSessionEnd(TIMEOUT);
+        session = null;
+        expect(readFileSync(stderrPath, "utf8")).toBe("");
+      } finally {
+        releaseCatalog?.();
+        gateway.stop();
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+
+  test(
     "Fast command rejects a tag-only intrinsic Fast alias",
     async () => {
       const root = mkdtempSync(join(tmpdir(), "fx-fast-unsupported-"));

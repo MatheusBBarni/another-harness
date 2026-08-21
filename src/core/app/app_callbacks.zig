@@ -7,6 +7,7 @@ const auth_runtime = @import("../auth/auth_runtime.zig");
 const credentials = @import("../auth/credentials.zig");
 const model_capabilities = @import("../config/model_capabilities.zig");
 const input_completion_runtime = @import("input_completion_runtime.zig");
+const provider_runtime = @import("provider_runtime.zig");
 const core_input_runtime = @import("../input/runtime.zig");
 const app_worker_runtime = @import("app_worker_runtime.zig");
 const app_session_runtime = @import("app_session_runtime.zig");
@@ -286,6 +287,10 @@ pub fn Bindings(comptime App: type) type {
                 .check_tool_availability = agentCheckToolAvailability,
                 .request_tool_permission = agentRequestToolPermission,
                 .request_prepared_file_mutation_permission = agentRequestPreparedFileMutationPermission,
+                .resolve_tool_action_display_target = if (comptime @hasDecl(App, "resolveToolActionDisplayTarget"))
+                    agentResolveToolActionDisplayTarget
+                else
+                    null,
                 .describe_tool_action = agentDescribeToolAction,
                 .describe_tool_action_completed = agentDescribeToolActionCompleted,
                 .describe_tool_action_denied = agentDescribeToolActionDenied,
@@ -361,13 +366,15 @@ pub fn Bindings(comptime App: type) type {
             alloc: std.mem.Allocator,
             source: credentials.Source,
             mode: auth_runtime.CredentialRefreshMode,
+            expected_account_id: ?[]const u8,
         ) !?[]u8 {
             const app: *App = @ptrCast(@alignCast(raw_ctx));
-            return auth_runtime.refreshFxLoginToken(
+            return auth_runtime.refreshCredentialTokenForAccount(
                 app.auth.oauthTransport(),
                 alloc,
                 source,
                 mode,
+                expected_account_id,
             );
         }
 
@@ -579,12 +586,16 @@ pub fn Bindings(comptime App: type) type {
             const app: *App = @ptrCast(@alignCast(ctx));
             if (comptime @hasField(App, "session_persistence")) {
                 const host = app_session_runtime.Runtime(App).subagentHost(app) orelse return;
-                parent_delivery_projector.acknowledge(
+                const retirement_ready = parent_delivery_projector
+                    .acknowledgeWithRetirementSignal(
                     arena,
                     host.sessions,
                     host.manager.options.child_store,
                     acknowledgements,
                 );
+                if (retirement_ready) {
+                    host.requestRetirementSweep(io_mod.milliTimestamp());
+                }
             }
         }
 
@@ -651,19 +662,24 @@ pub fn Bindings(comptime App: type) type {
             return app.checkToolAvailability(arena, call);
         }
 
-        fn agentDescribeToolAction(ctx: *anyopaque, arena: Allocator, call: ToolCall, file_display_path: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
+        fn agentResolveToolActionDisplayTarget(ctx: *anyopaque, arena: Allocator, call: ToolCall) !?[]const u8 {
             const app: *App = @ptrCast(@alignCast(ctx));
-            return app.describeToolActionWithAdvertised(arena, call, file_display_path, advertised_dynamic_tool_names);
+            return app.resolveToolActionDisplayTarget(arena, call);
         }
 
-        fn agentDescribeToolActionCompleted(ctx: *anyopaque, arena: Allocator, call: ToolCall, file_display_path: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
+        fn agentDescribeToolAction(ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
             const app: *App = @ptrCast(@alignCast(ctx));
-            return app.describeToolActionCompletedWithAdvertised(arena, call, file_display_path, advertised_dynamic_tool_names);
+            return app.describeToolActionWithAdvertised(arena, call, display_target, advertised_dynamic_tool_names);
         }
 
-        fn agentDescribeToolActionDenied(ctx: *anyopaque, arena: Allocator, call: ToolCall, file_display_path: ?[]const u8, label: []const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
+        fn agentDescribeToolActionCompleted(ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
             const app: *App = @ptrCast(@alignCast(ctx));
-            return app.describeToolActionDeniedWithAdvertised(arena, call, file_display_path, label, advertised_dynamic_tool_names);
+            return app.describeToolActionCompletedWithAdvertised(arena, call, display_target, advertised_dynamic_tool_names);
+        }
+
+        fn agentDescribeToolActionDenied(ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, label: []const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
+            const app: *App = @ptrCast(@alignCast(ctx));
+            return app.describeToolActionDeniedWithAdvertised(arena, call, display_target, label, advertised_dynamic_tool_names);
         }
 
         fn agentPermissionTargetForCall(ctx: *anyopaque, arena: Allocator, call: ToolCall, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
@@ -1072,7 +1088,7 @@ pub fn Bindings(comptime App: type) type {
         fn workerBridgeOpenModelPicker(ctx: *anyopaque) !void {
             const app: *App = @ptrCast(@alignCast(ctx));
             if (comptime @hasField(App, "input_runtime") and
-                @hasField(App, "selected_model") and
+                provider_runtime.supported(App) and
                 @hasDecl(App, "modelCompletions"))
             {
                 try input_completion_runtime.CompletionRuntime(App).openCurrentModelPicker(app);

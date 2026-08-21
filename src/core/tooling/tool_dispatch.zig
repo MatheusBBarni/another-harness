@@ -362,6 +362,7 @@ pub const LabelArgKind = enum {
     action,
     query,
     selector,
+    session_id,
 };
 
 pub const PermissionTargetKind = core_permissions.PermissionTargetKind;
@@ -588,6 +589,7 @@ fn labelValueForKind(kind: LabelArgKind, args: std.json.ObjectMap) ?[]const u8 {
         .action => optionalStringArg(args, "action"),
         .query => optionalStringArg(args, "query"),
         .selector => optionalStringArg(args, "selector"),
+        .session_id => optionalStringArg(args, "session_id"),
     };
 }
 

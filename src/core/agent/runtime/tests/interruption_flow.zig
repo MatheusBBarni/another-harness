@@ -259,7 +259,7 @@ test "processQueuedPrompt cancellation after valid tool finish settles streamed 
     });
 }
 
-test "processQueuedPrompt in-stream cancellation settles every provisional start" {
+test "processQueuedPrompt in-stream cancellation settles every eligible provisional start" {
     const alloc = std.testing.allocator;
     const calls = [_]ToolCall{
         toolCall("call_command", "terminal", "{}"),
@@ -283,7 +283,6 @@ test "processQueuedPrompt in-stream cancellation settles every provisional start
     try std.testing.expectEqual(@as(usize, 1), hooks.interrupted_event_count);
     try std.testing.expectEqual(@as(usize, 1), hooks.finish_event_count);
     try expectToolTerminalsBeforeTurnFinished(&hooks, &.{
-        .{ .call_id = "call_command", .kind = .cancelled },
         .{ .call_id = "call_read", .kind = .cancelled },
     });
 }

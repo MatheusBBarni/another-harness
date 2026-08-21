@@ -4,11 +4,13 @@ const session_usage = @import("session_usage.zig");
 const session_permission_state = @import("../permissions/session_permission_state.zig");
 const types = @import("../shared/types.zig");
 const captured_command = @import("../tooling/captured_command.zig");
+const model_provider = @import("../config/model_provider.zig");
 
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 pub const DurableSessionPreferences = struct {
+    provider: model_provider.ProviderId = .gateway,
     model: []u8,
     effort: types.ReasoningEffort,
     fast_mode: bool,
@@ -20,6 +22,7 @@ pub const DurableSessionPreferences = struct {
 
     pub fn dupe(self: DurableSessionPreferences, alloc: Allocator) !DurableSessionPreferences {
         return .{
+            .provider = self.provider,
             .model = try alloc.dupe(u8, self.model),
             .effort = self.effort,
             .fast_mode = self.fast_mode,
@@ -44,6 +47,7 @@ pub const RecoveryCheckpoint = struct {
     action: types.ModelRecoveryAction,
     tool_state: RecoveryToolState = .none,
     route_model: []u8,
+    route_provider: model_provider.ProviderId = .gateway,
     requested_fast_mode: bool,
     fast_mode: bool,
     max_provider_attempts: usize,
@@ -76,6 +80,7 @@ pub const RecoveryCheckpoint = struct {
             .action = self.action,
             .tool_state = self.tool_state,
             .route_model = route_model,
+            .route_provider = self.route_provider,
             .requested_fast_mode = self.requested_fast_mode,
             .fast_mode = self.fast_mode,
             .max_provider_attempts = self.max_provider_attempts,
@@ -568,9 +573,11 @@ fn writeState(writer: *std.Io.Writer, state: DurableSessionState) !void {
     try writeJsonString(writer, state.preferences.model);
     try writer.writeAll(",\"effort\":");
     try writeJsonString(writer, state.preferences.effort.label());
-    try writer.print(",\"fast_mode\":{s}}},\"history\":[", .{
+    try writer.print(",\"fast_mode\":{s},\"provider\":", .{
         if (state.preferences.fast_mode) "true" else "false",
     });
+    try writeJsonString(writer, @tagName(state.preferences.provider));
+    try writer.writeAll("},\"history\":[");
     for (state.history, 0..) |turn, i| {
         if (i > 0) try writer.writeByte(',');
         try writeHistoryTurn(writer, turn);
@@ -713,6 +720,8 @@ pub fn writeRecoveryCheckpoint(writer: *std.Io.Writer, checkpoint: RecoveryCheck
     try writeJsonString(writer, @tagName(checkpoint.tool_state));
     try writer.writeAll(",\"route_model\":");
     try writeDurableBytes(writer, checkpoint.route_model);
+    try writer.writeAll(",\"route_provider\":");
+    try writeJsonString(writer, @tagName(checkpoint.route_provider));
     try writer.print(",\"requested_fast_mode\":{s},\"fast_mode\":{s},\"max_provider_attempts\":{d},\"consumed_provider_attempts\":{d},\"outstanding_reservation\":{s}}}", .{
         if (checkpoint.requested_fast_mode) "true" else "false",
         if (checkpoint.fast_mode) "true" else "false",
@@ -757,6 +766,13 @@ fn decodeStateImpl(alloc: Allocator, source: *std.Io.Reader, limits: DecodeLimit
         return error.InvalidDurableField;
     try expectKey(&json_reader, alloc, "fast_mode");
     const fast_mode = try readBool(&json_reader);
+    var provider: model_provider.ProviderId = .gateway;
+    if (try json_reader.peekNextTokenType() != .object_end) {
+        try expectKey(&json_reader, alloc, "provider");
+        const provider_raw = try readStringOwned(&json_reader, alloc, 16);
+        defer alloc.free(provider_raw);
+        provider = model_provider.parse(provider_raw) orelse return error.InvalidDurableField;
+    }
     try expectToken(try json_reader.next(), .object_end);
 
     try expectKey(&json_reader, alloc, "history");
@@ -865,6 +881,7 @@ fn decodeStateImpl(alloc: Allocator, source: *std.Io.Reader, limits: DecodeLimit
         .updated_at_ms = updated_at_ms,
         .conversation_language = conversation_language,
         .preferences = .{
+            .provider = provider,
             .model = model,
             .effort = effort,
             .fast_mode = fast_mode,
@@ -883,22 +900,42 @@ fn decodeStateImpl(alloc: Allocator, source: *std.Io.Reader, limits: DecodeLimit
 }
 
 pub fn parseRecoveryCheckpoint(alloc: Allocator, value: std.json.Value) !RecoveryCheckpoint {
-    const object = try exactObject(value, &.{
-        "version",
-        "turn_id",
-        "user",
-        "assistant_source",
-        "execution",
-        "cause",
-        "action",
-        "tool_state",
-        "route_model",
-        "requested_fast_mode",
-        "fast_mode",
-        "max_provider_attempts",
-        "consumed_provider_attempts",
-        "outstanding_reservation",
-    });
+    const raw_object = try requireObject(value);
+    const object = if (raw_object.get("route_provider") != null)
+        try exactObject(value, &.{
+            "version",
+            "turn_id",
+            "user",
+            "assistant_source",
+            "execution",
+            "cause",
+            "action",
+            "tool_state",
+            "route_model",
+            "route_provider",
+            "requested_fast_mode",
+            "fast_mode",
+            "max_provider_attempts",
+            "consumed_provider_attempts",
+            "outstanding_reservation",
+        })
+    else
+        try exactObject(value, &.{
+            "version",
+            "turn_id",
+            "user",
+            "assistant_source",
+            "execution",
+            "cause",
+            "action",
+            "tool_state",
+            "route_model",
+            "requested_fast_mode",
+            "fast_mode",
+            "max_provider_attempts",
+            "consumed_provider_attempts",
+            "outstanding_reservation",
+        });
     const version = try requireU64(object, "version");
     if (version != 1) return error.InvalidDurableField;
     const user = try parseUserTurn(alloc, object.get("user") orelse return error.InvalidSessionFormat);
@@ -926,6 +963,10 @@ pub fn parseRecoveryCheckpoint(alloc: Allocator, value: std.json.Value) !Recover
         .tool_state = std.meta.stringToEnum(RecoveryToolState, try requireString(object, "tool_state")) orelse
             return error.InvalidDurableField,
         .route_model = route_model,
+        .route_provider = if (object.get("route_provider")) |provider_value| blk: {
+            if (provider_value != .string) return error.InvalidDurableField;
+            break :blk model_provider.parse(provider_value.string) orelse return error.InvalidDurableField;
+        } else .gateway,
         .requested_fast_mode = try requireBool(object, "requested_fast_mode"),
         .fast_mode = try requireBool(object, "fast_mode"),
         .max_provider_attempts = max_provider_attempts,
@@ -2976,6 +3017,7 @@ fn expectStateEqual(expected: DurableSessionState, actual: DurableSessionState) 
     try std.testing.expectEqual(expected.updated_at_ms, actual.updated_at_ms);
     try std.testing.expectEqualStrings(expected.conversation_language.view(), actual.conversation_language.view());
     try std.testing.expectEqualStrings(expected.preferences.model, actual.preferences.model);
+    try std.testing.expectEqual(expected.preferences.provider, actual.preferences.provider);
     try std.testing.expectEqual(expected.preferences.effort, actual.preferences.effort);
     try std.testing.expectEqual(expected.preferences.fast_mode, actual.preferences.fast_mode);
     try std.testing.expectEqual(expected.context_history_start, actual.context_history_start);
@@ -3211,7 +3253,8 @@ test "recovery checkpoint round trips while legacy state stays absent" {
         .cause = .response_interrupted,
         .action = .continuing_response,
         .tool_state = .confirmed,
-        .route_model = @constCast("openai/gpt-test"),
+        .route_model = @constCast("gpt-5.4-mini"),
+        .route_provider = .codex,
         .requested_fast_mode = true,
         .fast_mode = true,
         .max_provider_attempts = 10,
@@ -3226,7 +3269,8 @@ test "recovery checkpoint round trips while legacy state stays absent" {
         .updated_at_ms = 2,
         .conversation_language = session.ConversationLanguage.literal("en"),
         .preferences = .{
-            .model = @constCast("openai/gpt-test"),
+            .provider = .codex,
+            .model = @constCast("gpt-5.4-mini"),
             .effort = .auto,
             .fast_mode = false,
         },
@@ -3250,6 +3294,8 @@ test "recovery checkpoint round trips while legacy state stays absent" {
     try std.testing.expectEqual(types.ModelRecoveryCause.response_interrupted, restored.cause);
     try std.testing.expectEqual(types.ModelRecoveryAction.continuing_response, restored.action);
     try std.testing.expectEqual(RecoveryToolState.confirmed, restored.tool_state);
+    try std.testing.expectEqual(model_provider.ProviderId.codex, restored.route_provider);
+    try std.testing.expectEqual(model_provider.ProviderId.codex, decoded.preferences.provider);
     try std.testing.expect(restored.requested_fast_mode);
     try std.testing.expect(restored.fast_mode);
     try std.testing.expectEqual(@as(usize, 4), restored.consumed_provider_attempts);
@@ -3260,6 +3306,7 @@ test "recovery checkpoint round trips while legacy state stays absent" {
     var legacy_source = std.Io.Reader.fixed(legacy);
     var legacy_state = try decodeState(alloc, &legacy_source, .{});
     defer legacy_state.deinit(alloc);
+    try std.testing.expectEqual(model_provider.ProviderId.gateway, legacy_state.preferences.provider);
     try std.testing.expectEqual(@as(?RecoveryCheckpoint, null), legacy_state.recovery_checkpoint);
 }
 

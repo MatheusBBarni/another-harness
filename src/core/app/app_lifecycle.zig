@@ -8,6 +8,7 @@ const host = @import("../hosts/host.zig");
 const oauth_transport = @import("../auth/oauth_transport.zig");
 const input_appearance = @import("../config/input_appearance.zig");
 const model_capabilities = @import("../config/model_capabilities.zig");
+const model_provider = @import("../config/model_provider.zig");
 const debug_trace = @import("../shared/debug_trace.zig");
 const record_tape = @import("../workspace/record_tape.zig");
 const workspace_access = @import("../workspace/workspace_access.zig");
@@ -121,6 +122,7 @@ pub const StartupState = struct {
     credential: ?credentials.Credential = null,
     credential_onboarding_skipped: bool = false,
     stored_key_status: credentials.StoredKeyReadStatus = .not_attempted,
+    provider: model_provider.ProviderId = .gateway,
     selected_model: []u8 = &.{},
     configured_model: []u8 = &.{},
     model_source: config_runtime.ModelSource = .compiled_default,
@@ -216,6 +218,7 @@ pub const StartupState = struct {
 
 pub const StartupStatus = struct {
     workspace_root: []u8,
+    provider: model_provider.ProviderId = .gateway,
     selected_model: []const u8,
     owned_selected_model: ?[]u8 = null,
     auth: auth_runtime.StatusSnapshot = .{},
@@ -318,14 +321,21 @@ pub fn loadStartupStatus(
     defer detailed.deinit(alloc);
     const settings = &detailed.settings;
 
-    const selected_model = try loadStartupStatusModel(alloc, default_model, settings.model);
+    const configured_selection = try configuredProviderSelection(default_model, settings);
+    const selected_model = try loadStartupStatusModel(alloc, configured_selection.model, null);
     errdefer if (selected_model.owned) |model| alloc.free(model);
 
-    var auth_status = try auth_runtime.loadStatusSnapshot(alloc, secret_store, settings.credential_source);
+    var auth_status = try auth_runtime.loadStatusSnapshotForProvider(
+        alloc,
+        secret_store,
+        configured_selection.provider,
+        settings.credential_source,
+    );
     errdefer auth_status.deinit(alloc);
 
     const result = StartupStatus{
         .workspace_root = workspace_root,
+        .provider = configured_selection.provider,
         .selected_model = selected_model.value,
         .owned_selected_model = selected_model.owned,
         .auth = auth_status,
@@ -391,16 +401,25 @@ fn loadStartupStateFromOwnedWorkspace(
         false,
     );
 
-    state.configured_model = try alloc.dupe(u8, settings.model orelse default_model);
+    const configured_selection = try configuredProviderSelection(default_model, settings);
+    state.provider = configured_selection.provider;
+    state.configured_model = try alloc.dupe(u8, configured_selection.model);
     state.model_source = detailed.model_source orelse .compiled_default;
-    state.selected_model = try loadInitialModel(alloc, default_model, settings.model);
+    state.selected_model = try loadInitialModel(alloc, configured_selection.model, null);
     if (hasProcessModelOverride()) state.model_source = .process_override;
     state.config_diagnostics = detailed.diagnostics;
     detailed.diagnostics = &.{};
     state.prompt_history_enabled = settings.prompt_history_enabled orelse true;
     state.prompt_history_store_allowed = detailed.prompt_history_store_allowed;
     if (credential_mode) |mode| {
-        const resolution = try credentials.resolvePreferring(alloc, transport, secret_store, mode, settings.credential_source);
+        const resolution = try credentials.resolveForProvider(
+            alloc,
+            transport,
+            secret_store,
+            mode,
+            state.provider,
+            settings.credential_source,
+        );
         state.credential = resolution.credential;
         state.stored_key_status = resolution.stored_key_status;
     }
@@ -1095,10 +1114,48 @@ fn loadAgentStepLimit(fallback: usize, configured: ?usize) usize {
     );
 }
 
+fn configuredProviderSelection(
+    default_model: []const u8,
+    settings: *const config_runtime.Settings,
+) !model_provider.ProviderSelection {
+    const provider = settings.provider orelse .gateway;
+    const model = switch (provider) {
+        .gateway => settings.model orelse default_model,
+        .codex => settings.codex_model orelse return error.CodexModelNotSelected,
+    };
+    return .{ .provider = provider, .model = model };
+}
+
 fn initialModelId(default_model: []const u8, configured: ?[]const u8) []const u8 {
     const model = io_mod.getenv("FX_MODEL") orelse return configured orelse default_model;
     const trimmed = std.mem.trim(u8, model, " \t\r\n");
     return if (trimmed.len > 0) trimmed else configured orelse default_model;
+}
+
+test "startup provider chooses only its provider-scoped model" {
+    const gateway_settings = config_runtime.Settings{
+        .model = @constCast("gateway/model"),
+        .provider = .gateway,
+        .codex_model = @constCast("gpt-model"),
+    };
+    const gateway = try configuredProviderSelection("default/model", &gateway_settings);
+    try std.testing.expectEqual(model_provider.ProviderId.gateway, gateway.provider);
+    try std.testing.expectEqualStrings("gateway/model", gateway.model);
+
+    const codex_settings = config_runtime.Settings{
+        .model = @constCast("gateway/model"),
+        .provider = .codex,
+        .codex_model = @constCast("gpt-model"),
+    };
+    const codex = try configuredProviderSelection("default/model", &codex_settings);
+    try std.testing.expectEqual(model_provider.ProviderId.codex, codex.provider);
+    try std.testing.expectEqualStrings("gpt-model", codex.model);
+
+    const missing_codex = config_runtime.Settings{ .provider = .codex };
+    try std.testing.expectError(
+        error.CodexModelNotSelected,
+        configuredProviderSelection("default/model", &missing_codex),
+    );
 }
 
 fn loadInitialModel(alloc: Allocator, default_model: []const u8, configured: ?[]const u8) ![]u8 {

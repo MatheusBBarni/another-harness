@@ -3,6 +3,7 @@ const std_builtin = @import("builtin");
 const command_admission = @import("../core/permissions/command_admission.zig");
 const auth_runtime = @import("../core/auth/auth_runtime.zig");
 const credentials = @import("../core/auth/credentials.zig");
+const model_provider = @import("../core/config/model_provider.zig");
 const host = @import("../core/hosts/host.zig");
 const host_target = @import("../core/hosts/target.zig");
 const io_mod = @import("../core/shared/io.zig");
@@ -204,15 +205,18 @@ const AcpContext = struct {
 
     fn toolContext(self: *AcpContext) tool_runtime.Context {
         const session = if (self.state.active_session) |*active| active else unreachable;
-        self.state.web_search_runtime.configure(.{
-            .api_key = session.api_key,
-            .gateway_team = self.state.gateway_team,
-            .worker_model = session.model,
-            .gateway_retry_count = self.state.cfg.gateway_retry_count,
-            .gateway_chat_url = self.state.cfg.gateway_chat_url,
-            .usage = &session.session_rt.usage,
-            .usage_allocator = self.state.alloc,
-        });
+        const gateway_features_allowed = model_provider.usesGatewayAuxiliaries(session.provider);
+        if (gateway_features_allowed) {
+            self.state.web_search_runtime.configure(.{
+                .api_key = session.api_key,
+                .gateway_team = self.state.gateway_team,
+                .worker_model = session.model,
+                .gateway_retry_count = self.state.cfg.gateway_retry_count,
+                .gateway_chat_url = self.state.cfg.gateway_chat_url,
+                .usage = &session.session_rt.usage,
+                .usage_allocator = self.state.alloc,
+            });
+        }
         var tc: tool_runtime.Context = .{
             .workspace_root = self.state.workspace_root,
             .access_scope = self.state.workspace_access.scope(self.state.workspace_root),
@@ -224,9 +228,12 @@ const AcpContext = struct {
             .max_command_output_bytes = self.state.cfg.max_command_output_bytes,
             .max_tool_result_bytes = session.max_tool_result_bytes,
             .api_key = session.api_key,
-            .agent_stream_provider = self.state.cfg.gateway_provider.agent_stream,
+            .agent_stream_provider = server.streamProviderFor(self.state, session.provider),
             .credential_source = session.credential_source,
+            .account_id = session.account_id,
+            .provider = session.provider,
             .oauth_transport = self.state.cfg.gateway_provider.oauth_transport,
+            .secret_store = self.state.cfg.secret_store,
             .gateway_team = self.state.gateway_team,
             .model = session.model,
             .gateway_retry_count = self.state.cfg.gateway_retry_count,
@@ -240,7 +247,10 @@ const AcpContext = struct {
             .permission_grants = session.session_grants,
             .permission_rules = session.permission_rules,
             .tool_registry = self.toolRegistry(),
-            .permission_reviewer_provider = self.state.cfg.permission_reviewer_provider,
+            .permission_reviewer_provider = switch (session.provider) {
+                .gateway => self.state.cfg.permission_reviewer_provider,
+                .codex => self.state.cfg.codex_permission_reviewer_provider,
+            },
             .auto_classifier = self.auto_classifier,
             .subagent_host = self.state.subagent_host,
             .subagent_caller_id = session.session_id,
@@ -275,7 +285,7 @@ const AcpContext = struct {
             .web_fetch_artifact_store = session.session_rt.webFetchArtifactStore(),
             .web_fetch_artifact_error = session.session_rt.webFetchArtifactError(),
             .web_search_runtime_ready = false,
-            .web_search_backend = self.state.web_search_runtime.dispatchBackend(),
+            .web_search_backend = if (gateway_features_allowed) self.state.web_search_runtime.dispatchBackend() else null,
             .model_capability_resolver = .{
                 .ctx = @ptrCast(self),
                 .resolve_fn = resolveModelCapabilities,
@@ -435,6 +445,15 @@ pub fn handlePrompt(
     const session = if (state.active_session) |*active| active else return .{
         .rpc_error = no_active_session_rpc_error,
     };
+    if (!try server.selectCredentialForProvider(state, session.provider)) {
+        return .{ .rpc_error = .{
+            .code = ErrorCode.invalid_request,
+            .message = if (session.provider == .codex)
+                credentials.missing_chatgpt_credential_message
+            else
+                credentials.missing_credential_message,
+        } };
+    }
 
     const params = msg.params_raw orelse return .{
         .rpc_error = .{
@@ -566,6 +585,8 @@ pub fn handlePrompt(
         .model = session.model,
         .api_key = @constCast(session.api_key),
         .credential_source = session.credential_source,
+        .account_id = if (session.account_id) |account_id| @constCast(account_id) else null,
+        .provider = session.provider,
         .gateway_team = state.gateway_team,
         .permission_mode = captured_permission_mode,
         .sandbox_backend = captured_sandbox_backend,
@@ -678,6 +699,16 @@ pub fn runSubagentChild(
     return subagent_agent_adapter.run(.{
         .host = subagent_host,
         .tool_context = ctx.toolContext(),
+        .provider_routes = .{
+            .gateway = .{
+                .agent_stream_provider = server.streamProviderFor(state, .gateway),
+                .permission_reviewer_provider = state.cfg.permission_reviewer_provider,
+            },
+            .codex = .{
+                .agent_stream_provider = server.streamProviderFor(state, .codex),
+                .permission_reviewer_provider = state.cfg.codex_permission_reviewer_provider,
+            },
+        },
         .system_prompt = state.cfg.prompt_policy.system_prompt,
         .model_prompt_overlay = state.cfg.prompt_policy.modelPromptOverlay(admission.model),
         .skills_prompt_section = bounded_skills.text,
@@ -942,7 +973,7 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
     const session = if (ctx.state.active_session) |*active| active else unreachable;
     return .{
         .ctx = @ptrCast(ctx),
-        .agent_stream_provider = ctx.state.cfg.gateway_provider.agent_stream,
+        .agent_stream_provider = server.streamProviderFor(ctx.state, ctx.state.active_session.?.provider),
         .flush_assistant_stream_per_content_chunk = host_target.is_wasm,
         .tool_registry = ctx.toolRegistry(),
         .context_registry = ctx.state.cfg.context_registry,
@@ -957,6 +988,7 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
         .request_tool_permission = requestToolPermissionOutcomeWithRequest,
         .request_prepared_file_mutation_permission = requestPreparedFileMutationPermissionOutcomeForRuntime,
         .request_sandbox_widening = requestSandboxWideningForRuntime,
+        .resolve_tool_action_display_target = resolveToolActionDisplayTarget,
         .describe_tool_action = describeToolAction,
         .describe_tool_action_completed = describeToolActionCompleted,
         .describe_tool_action_denied = describeToolActionDenied,
@@ -981,6 +1013,7 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
         .push_context_notice = pushContextNotice,
         .push_command_output_complete = pushCommandOutputComplete,
         .push_http_error = pushHttpError,
+        .refresh_gateway_credential = refreshGatewayCredential,
         .available_model_capabilities = availableModelCapabilities,
         .resolve_model_capabilities = resolveModelCapabilities,
         .format_tool_execution_error = formatToolExecutionError,
@@ -988,6 +1021,23 @@ fn agentRuntimeDeps(ctx: *AcpContext) agent_runtime.AgentRuntimeDeps {
         .usage = &session.session_rt.usage,
         .usage_allocator = ctx.state.alloc,
     };
+}
+
+fn refreshGatewayCredential(
+    raw: *anyopaque,
+    alloc: Allocator,
+    source: types.CredentialSource,
+    mode: auth_runtime.CredentialRefreshMode,
+    expected_account_id: ?[]const u8,
+) !?[]u8 {
+    const ctx: *AcpContext = @ptrCast(@alignCast(raw));
+    return server.refreshModelCredential(
+        @ptrCast(ctx.state),
+        alloc,
+        source,
+        mode,
+        expected_account_id,
+    );
 }
 
 fn persistUsageCheckpoint(
@@ -1118,12 +1168,16 @@ fn acknowledgeParentTurnContext(
 ) void {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
     const subagent_host = ctx.state.subagent_host orelse return;
-    parent_delivery_projector.acknowledge(
+    const retirement_ready = parent_delivery_projector
+        .acknowledgeWithRetirementSignal(
         arena,
         subagent_host.sessions,
         subagent_host.manager.options.child_store,
         acknowledgements,
     );
+    if (retirement_ready) {
+        subagent_host.requestRetirementSweep(io_mod.milliTimestamp());
+    }
 }
 
 fn appendStaticContext(raw_ctx: *anyopaque, arena: Allocator, messages: *std.ArrayList(ChatMessage)) !void {
@@ -1348,32 +1402,43 @@ fn writePermissionOption(
     try writer.writeByte('}');
 }
 
-fn describeToolAction(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, file_display_path: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
+fn describeToolAction(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
     return tool_presentation.formatPlainAction(arena, .{
         .tool_registry = ctx.toolRegistry(),
         .call = call,
-        .file_display_path = file_display_path,
+        .display_target = display_target,
         .is_available_dynamic_mcp_tool = lifecycleDynamicMcpToolAvailable(ctx, call.name, advertised_dynamic_tool_names),
     });
 }
 
-fn describeToolActionCompleted(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, file_display_path: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
+fn resolveToolActionDisplayTarget(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall) !?[]const u8 {
+    const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
+    return tool_presentation.resolveTerminalDisplayTarget(
+        arena,
+        ctx.toolRegistry(),
+        ctx.state.workspace_root,
+        &ctx.state.terminal_client,
+        call,
+    );
+}
+
+fn describeToolActionCompleted(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
     return tool_presentation.formatPlainAction(arena, .{
         .tool_registry = ctx.toolRegistry(),
         .call = call,
-        .file_display_path = file_display_path,
+        .display_target = display_target,
         .is_available_dynamic_mcp_tool = lifecycleDynamicMcpToolAvailable(ctx, call.name, advertised_dynamic_tool_names),
     });
 }
 
-fn describeToolActionDenied(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, file_display_path: ?[]const u8, label: []const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
+fn describeToolActionDenied(raw_ctx: *anyopaque, arena: Allocator, call: ToolCall, display_target: ?[]const u8, label: []const u8, advertised_dynamic_tool_names: []const []const u8) ![]const u8 {
     const ctx: *AcpContext = @ptrCast(@alignCast(raw_ctx));
     const action = try tool_presentation.formatPlainAction(arena, .{
         .tool_registry = ctx.toolRegistry(),
         .call = call,
-        .file_display_path = file_display_path,
+        .display_target = display_target,
         .is_available_dynamic_mcp_tool = lifecycleDynamicMcpToolAvailable(ctx, call.name, advertised_dynamic_tool_names),
     });
     return std.fmt.allocPrint(arena, "{s}: {s}", .{ label, action });
@@ -2420,10 +2485,21 @@ pub fn mapToolKind(tool_name: []const u8) acp_types.ToolCallKind {
 }
 
 fn describeToolTitle(registry: tool_dispatch.Registry, arena: Allocator, call: ToolCall) ![]const u8 {
-    if (registry.lookup(call.name)) |tool| {
-        return std.fmt.allocPrint(arena, "{s}", .{tool.action_label});
+    if (tool_dispatch.toolCallPresentation(arena, registry, call)) |presentation| {
+        return std.fmt.allocPrint(arena, "{s}", .{presentation.action_label});
     }
     return std.fmt.allocPrint(arena, "{s}", .{call.name});
+}
+
+test "ACP terminal title uses the call-aware action label" {
+    const alloc = std.testing.allocator;
+    const title = try describeToolTitle(builtin_tools.registry, alloc, .{
+        .id = "close",
+        .name = "terminal",
+        .arguments_json = "{\"action\":\"close\",\"session_id\":\"terminal-a\",\"close_policy\":\"graceful\"}",
+    });
+    defer alloc.free(title);
+    try std.testing.expectEqualStrings("Closing", title);
 }
 
 test "ACP lifecycle action preserves dynamic MCP availability boundaries" {
@@ -3325,6 +3401,8 @@ fn initTestAcpState(alloc: Allocator, workspace_root: []const u8, mode: Permissi
     errdefer alloc.free(session_id);
     const model = try alloc.dupe(u8, "test-model");
     errdefer alloc.free(model);
+    const api_key = try alloc.dupe(u8, "test-api-key");
+    errdefer alloc.free(api_key);
 
     const selected_backend: sandbox.BackendKind = .none;
     const cfg = testServerConfig();
@@ -3333,6 +3411,8 @@ fn initTestAcpState(alloc: Allocator, workspace_root: []const u8, mode: Permissi
         .cfg = cfg,
         .writer = jsonrpc.Writer.init(),
         .workspace_root = owned_workspace,
+        .api_key = api_key,
+        .credential_source = .ai_gateway_api_key,
         .sandbox_backend = selected_backend,
         .web_search_runtime = @import("../core/tooling/web_search_runtime.zig").Runtime.init(.{
             .provider = cfg.gateway_provider.web_search,
@@ -3342,7 +3422,8 @@ fn initTestAcpState(alloc: Allocator, workspace_root: []const u8, mode: Permissi
             .model = model,
             .mode = "normal",
             .workspace_root = owned_workspace,
-            .api_key = "",
+            .api_key = api_key,
+            .credential_source = .ai_gateway_api_key,
             .agent_step_limit = 4,
             .max_tool_result_bytes = 1024 * 1024,
             .fast_mode = false,
@@ -3889,6 +3970,21 @@ test "ACP prompt projection configures web search then blocks native execution" 
     try std.testing.expectEqualStrings(state.cfg.gateway_chat_url, state.web_search_runtime.gateway_chat_url);
     try std.testing.expectEqual(.failure, execution.status);
     try std.testing.expectEqual(@as(usize, 0), provider_state.calls);
+}
+
+test "ACP ChatGPT route removes Gateway-backed auxiliary capabilities" {
+    const alloc = std.testing.allocator;
+    var state = try initTestAcpState(alloc, "/tmp/workspace", .auto);
+    defer state.deinit();
+    state.active_session.?.credential_source = .chatgpt_subscription;
+    state.active_session.?.provider = .codex;
+    state.active_session.?.api_key = "chatgpt-secret";
+    var ctx = AcpContext{ .alloc = alloc, .state = &state, .session_id = "session_1" };
+
+    const tool_ctx = ctx.toolContext();
+    try std.testing.expect(tool_ctx.web_search_backend == null);
+    try std.testing.expect(tool_ctx.permission_reviewer_provider == null);
+    try std.testing.expect(!tool_ctx.auto_classifier.enabled());
 }
 
 test "ACP default user commands require configured authority or review" {

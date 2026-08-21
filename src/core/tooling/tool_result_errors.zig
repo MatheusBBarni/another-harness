@@ -173,7 +173,7 @@ fn toolPermissionDeniedJsonOptionalRequest(
 fn permissionDeniedMessage(tool_name: []const u8, reason: types.ToolPermissionDenialReason) []const u8 {
     return switch (reason) {
         .user_denied => "Permission denied by user",
-        .auto_denied => "Permission denied by auto mode classifier",
+        .auto_denied => "Blocked by automatic safety policy",
         .policy_denied => if (is_network_tool(tool_name))
             "Network or browser access was denied by configured policy"
         else
@@ -197,7 +197,7 @@ fn permissionDeniedSuggestion(
         .auto_denied => if (action_bound_request_available)
             "The tool did not run. Do not retry it unchanged. Use a materially different safe action, or ask the user through ask_user_question with the exact approval_request_id. Generic question text cannot authorize the action."
         else
-            "The tool did not run. Do not retry unchanged or ask the user for approval. Replan autonomously with a materially different safe action or an existing deterministic safe tool; fx will use its human approval channel after bounded recovery.",
+            "The tool did not run. Do not retry unchanged. Replan autonomously with a materially different safe action or explain the blocker and stop.",
         .policy_denied => "The tool did not run. Do not retry unchanged; explain the configured policy blocker or use an allowed alternative.",
         .permission_required => "The tool did not run. Noninteractive mode cannot show an approval prompt. Rerun interactively to approve, or configure a narrow permission rule before retrying.",
     };
@@ -478,10 +478,10 @@ test "tool permission denied JSON explains policy and headless blockers" {
     defer web_search.deinit();
 
     const auto_error = auto_denied.value.object.get("error").?.object;
-    try std.testing.expectEqualStrings("Permission denied by auto mode classifier", auto_error.get("message").?.string);
+    try std.testing.expectEqualStrings("Blocked by automatic safety policy", auto_error.get("message").?.string);
     try std.testing.expectEqualStrings("auto_denied", auto_error.get("reason").?.string);
     try std.testing.expectEqualStrings(
-        "The tool did not run. Do not retry unchanged or ask the user for approval. Replan autonomously with a materially different safe action or an existing deterministic safe tool; fx will use its human approval channel after bounded recovery.",
+        "The tool did not run. Do not retry unchanged. Replan autonomously with a materially different safe action or explain the blocker and stop.",
         auto_error.get("suggestion").?.string,
     );
     try std.testing.expectEqual(

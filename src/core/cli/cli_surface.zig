@@ -4,16 +4,21 @@ const io_mod = @import("../shared/io.zig");
 const app_lifecycle = @import("../app/app_lifecycle.zig");
 const background_record_liveness = @import("../background/background_record_liveness.zig");
 const background_store = @import("../background/background_store.zig");
+const chatgpt_oauth = @import("../auth/chatgpt_oauth.zig");
 const acp_runner = @import("acp_runner.zig");
 const cli_ask = @import("cli_ask.zig");
 const cli_replay = @import("cli_replay.zig");
 const command_specs = @import("../slash_commands/command_specs.zig");
 const collections = @import("../shared/collections.zig");
 const config_runtime = @import("../config/config_runtime.zig");
+const credentials = @import("../auth/credentials.zig");
+const model_provider = @import("../config/model_provider.zig");
 const devbox_executor = @import("../execution/devbox_executor.zig");
+const debug_trace = @import("../shared/debug_trace.zig");
 const doctor_runtime = @import("doctor_runtime.zig");
 const gateway_provider = @import("../gateway/gateway_provider.zig");
 const model_catalog = @import("../gateway/model_catalog.zig");
+const agent_stream_provider = @import("../agent/stream_provider.zig");
 const background_process_provider = @import(
     "../execution/background_process_provider.zig",
 );
@@ -23,6 +28,7 @@ const host = @import("../hosts/host.zig");
 const login_flow = @import("../auth/login_flow.zig");
 const login_provider = @import("../auth/login_provider.zig");
 const oauth_transport = @import("../auth/oauth_transport.zig");
+const provider_catalog = @import("../auth/provider_catalog.zig");
 const secret = @import("../auth/secret.zig");
 const output_contracts = @import("../output/output_contracts.zig");
 const permission_auto_classifier = @import("../permissions/auto_classifier.zig");
@@ -63,6 +69,7 @@ pub const Command = union(enum) {
     status: []const [:0]const u8,
     permissions: []const [:0]const u8,
     models: []const [:0]const u8,
+    provider: []const [:0]const u8,
     doctor: []const [:0]const u8,
     background: []const [:0]const u8,
     teams: []const [:0]const u8,
@@ -172,6 +179,9 @@ pub const Config = struct {
     gateway_retry_count: usize,
     gateway_chat_url: []const u8,
     gateway_provider: gateway_provider.Provider,
+    codex_agent_stream: ?agent_stream_provider.Provider = null,
+    codex_cli_model_catalog: ?gateway_provider.CliModelCatalogProvider = null,
+    codex_model_catalog: ?model_catalog.Provider = null,
     background_process_provider: background_process_provider.Provider =
         background_process_provider.unavailable_provider,
     url_opener: host.UrlOpener,
@@ -194,11 +204,30 @@ pub const Config = struct {
     acp_runner: acp_runner.Runner,
     devbox_provider: ?devbox_executor.Provider = null,
     permission_reviewer_provider: ?permission_auto_classifier.Provider = null,
+    codex_permission_reviewer_provider: ?permission_auto_classifier.Provider = null,
 };
 
 const LocalSurfaceOptions = struct {
     format: output_contracts.OutputFormat = .text,
 };
+
+fn parseLoginProvider(rest: []const [:0]const u8) !?provider_catalog.Id {
+    if (rest.len == 0) return null;
+    if (rest.len != 1) return error.InvalidLoginProviderArgs;
+    return provider_catalog.parse(rest[0]) orelse error.InvalidLoginProviderArgs;
+}
+
+fn selectCatalogModel(
+    entries: []const model_catalog.ModelCatalogEntry,
+    saved: ?[]const u8,
+) ?[]const u8 {
+    if (saved) |candidate| {
+        for (entries) |entry| {
+            if (std.mem.eql(u8, entry.id, candidate)) return entry.id;
+        }
+    }
+    return if (entries.len > 0) entries[0].id else null;
+}
 
 const UpgradeOptions = struct {
     format: output_contracts.OutputFormat = .text,
@@ -456,6 +485,7 @@ pub fn parse(command_catalog: CommandCatalog, args: []const [:0]const u8) Comman
         'p' => {
             if (command_specs.matchesTopLevel(command_catalog, command, .pr)) return .{ .pr = args[1..] };
             if (command_specs.matchesTopLevel(command_catalog, command, .permissions)) return .{ .permissions = args[1..] };
+            if (command_specs.matchesTopLevel(command_catalog, command, .provider)) return .{ .provider = args[1..] };
         },
         'r' => {
             if (command_specs.matchesTopLevel(command_catalog, command, .@"resume")) return .{ .resume_session = .{ .args = args[1..] } };
@@ -698,6 +728,8 @@ fn runNonInteractiveWithDeps(
                 .gateway_chat_url = cfg.gateway_provider.chat_url.resolve(cfg.gateway_chat_url),
                 .gateway_models_path = cfg.models_path,
                 .gateway_provider = cfg.gateway_provider,
+                .codex_agent_stream = cfg.codex_agent_stream,
+                .codex_model_catalog = cfg.codex_model_catalog,
                 .background_process_provider = cfg.background_process_provider,
                 .secret_store = cfg.secret_store,
                 .prompt_policy = cfg.prompt_policy,
@@ -713,6 +745,7 @@ fn runNonInteractiveWithDeps(
                 .mode_registry = cfg.mode_registry,
                 .devbox_provider = cfg.devbox_provider,
                 .permission_reviewer_provider = cfg.permission_reviewer_provider,
+                .codex_permission_reviewer_provider = cfg.codex_permission_reviewer_provider,
                 .context_limit_overrides = global_args.modifiers.context_limit_overrides,
                 .additional_directories = global_args.modifiers.additional_directories,
                 .saved_directories_suppressed = global_args.modifiers.saved_directories_suppressed,
@@ -725,13 +758,30 @@ fn runNonInteractiveWithDeps(
         .issue => |rest| return runGithubWorkflow(alloc, rest, cfg, global_args.modifiers, deps, .issue),
         .login => |rest| {
             const provider = login_provider.parseLoginProvider(rest) catch {
-                try writeStderr(deps, "usage: fx login [grok|vercel]\n");
+                try writeStderr(deps, "usage: fx login [grok|vercel|codex]\n");
                 return .handled_failure;
             };
+            if (provider == .codex) {
+                chatgpt_oauth.runLogin(
+                    alloc,
+                    cfg.gateway_provider.oauth_transport,
+                    cfg.url_opener,
+                ) catch |err| {
+                    const message = switch (err) {
+                        error.ChatGptLoginTimedOut => "fx login: Codex authorization expired; run fx login codex again\n",
+                        error.ChatGptAuthorizationFailed => "fx login: Codex authorization denied\n",
+                        else => "fx login: failed to sign in with Codex\n",
+                    };
+                    try writeStderr(deps, message);
+                    return .handled_failure;
+                };
+                return .handled_success;
+            }
             const login_result = switch (provider) {
                 .picker => login_flow.runLoginPicker(alloc, cfg.gateway_provider.oauth_transport, cfg.url_opener),
                 .vercel => login_flow.runLogin(alloc, cfg.gateway_provider.oauth_transport, cfg.url_opener),
                 .grok => login_flow.runGrokLogin(alloc, cfg.gateway_provider.oauth_transport, cfg.url_opener),
+                .codex => unreachable,
             };
             login_result catch |err| {
                 const message = switch (err) {
@@ -746,9 +796,29 @@ fn runNonInteractiveWithDeps(
             return .handled_success;
         },
         .logout => |rest| {
-            if (rest.len != 0) {
-                try writeStderr(deps, "usage: fx logout\n");
+            const logout_provider = login_provider.parseLoginProvider(rest) catch {
+                try writeStderr(deps, "usage: fx logout [vercel|grok|codex]\n");
                 return .handled_failure;
+            };
+            if (logout_provider == .codex) {
+                const outcome = chatgpt_oauth.logout() catch {
+                    try writeStderr(deps, "fx logout: failed to durably remove saved Codex login\n");
+                    return .handled_failure;
+                };
+                return switch (outcome) {
+                    .deleted => result: {
+                        try writeStdout(deps, "Signed out of Codex.\n");
+                        break :result .handled_success;
+                    },
+                    .missing => result: {
+                        try writeStdout(deps, "No Codex login session found.\n");
+                        break :result .handled_success;
+                    },
+                    .deleted_not_durable => result: {
+                        try writeStderr(deps, "fx logout: failed to durably remove saved Codex login\n");
+                        break :result .handled_failure;
+                    },
+                };
             }
             const result = login_flow.logout(alloc, cfg.gateway_provider.oauth_transport) catch |err| switch (err) {
                 error.SessionDeleteFailed => {
@@ -787,6 +857,107 @@ fn runNonInteractiveWithDeps(
                 try writeStderr(deps, message);
                 return .handled_failure;
             };
+            return .handled_success;
+        },
+        .provider => |rest| {
+            if (rest.len != 1) {
+                try writeStderr(deps, "usage: fx provider <gateway|codex>\n");
+                return .handled_failure;
+            }
+            const target = model_provider.parse(rest[0]) orelse {
+                try writeStderr(deps, "fx provider: expected gateway or codex\n");
+                return .handled_failure;
+            };
+            const workspace_root = try io_mod.realpathAlloc(alloc, ".");
+            defer alloc.free(workspace_root);
+            var settings = config_runtime.loadMergedSettings(alloc, workspace_root) catch |err| {
+                try writeStderr(deps, "fx provider: could not load settings\n");
+                debug_trace.logf("config", "provider selection settings load failed err={s}", .{@errorName(err)});
+                return .handled_failure;
+            };
+            defer settings.deinit(alloc);
+            if ((settings.provider orelse .gateway) == target) {
+                try writeStdout(deps, if (target == .codex) "Codex is already selected.\n" else "Gateway is already selected.\n");
+                return .handled_success;
+            }
+
+            var resolution = try credentials.resolveForProvider(
+                alloc,
+                cfg.gateway_provider.oauth_transport,
+                cfg.secret_store,
+                .refresh_if_needed,
+                target,
+                settings.credential_source,
+            );
+            defer if (resolution.credential) |*credential| credential.deinit(alloc);
+            if (resolution.credential == null and target == .codex) {
+                chatgpt_oauth.runLogin(alloc, cfg.gateway_provider.oauth_transport, cfg.url_opener) catch |err| {
+                    debug_trace.logf("auth", "provider selection Codex login failed err={s}", .{@errorName(err)});
+                    try writeStderr(deps, "fx provider: Codex login failed\n");
+                    return .handled_failure;
+                };
+                resolution = try credentials.resolveForProvider(
+                    alloc,
+                    cfg.gateway_provider.oauth_transport,
+                    cfg.secret_store,
+                    .refresh_if_needed,
+                    target,
+                    settings.credential_source,
+                );
+            }
+            const credential = if (resolution.credential) |*value| value else {
+                try writeStderr(deps, if (target == .codex)
+                    "fx provider: run fx login codex first\n"
+                else
+                    "fx provider: configure a Gateway credential first\n");
+                return .handled_failure;
+            };
+            const catalog_provider = if (target == .codex)
+                cfg.codex_model_catalog orelse {
+                    try writeStderr(deps, "fx provider: Codex model catalog is unavailable\n");
+                    return .handled_failure;
+                }
+            else
+                cfg.gateway_provider.model_catalog;
+            const fetch_result = model_catalog.fetchWithPublicFallback(catalog_provider, alloc, .{
+                .access = credentials.catalogAccessAt(credential.*, io_mod.milliTimestamp()),
+                .endpoint = cfg.models_path,
+                .view = .picker,
+            });
+            var loaded = switch (fetch_result) {
+                .loaded => |loaded| loaded,
+                .failed => |failure| {
+                    debug_trace.logf("catalog", "provider selection catalog failed provider={s} category={s}", .{ @tagName(target), @tagName(failure.failure.category) });
+                    const message = try std.fmt.allocPrint(
+                        alloc,
+                        "fx provider: could not load the target model catalog ({s})\n",
+                        .{@tagName(failure.failure.category)},
+                    );
+                    defer alloc.free(message);
+                    try writeStderr(deps, message);
+                    return .handled_failure;
+                },
+            };
+            defer model_catalog.freeModelCatalog(alloc, &loaded.catalog);
+            const saved_model = if (target == .codex) settings.codex_model else settings.model;
+            const selected_model = selectCatalogModel(loaded.catalog.items, saved_model) orelse {
+                try writeStderr(deps, "fx provider: target model catalog is empty\n");
+                return .handled_failure;
+            };
+            var attempt = config_runtime.attemptUserPreferences(alloc, if (target == .codex)
+                .{ .provider = target, .codex_model = selected_model }
+            else
+                .{ .provider = target, .model = selected_model });
+            defer attempt.deinit(alloc);
+            switch (attempt) {
+                .failure => |failure| {
+                    debug_trace.logf("config", "provider selection persistence failed err={s}", .{@errorName(failure.err)});
+                    try writeStderr(deps, "fx provider: failed to save provider selection\n");
+                    return .handled_failure;
+                },
+                .outcome => {},
+            }
+            try writeStdout(deps, if (target == .codex) "Provider set to Codex.\n" else "Provider set to Gateway.\n");
             return .handled_success;
         },
         .setup => |rest| {
@@ -864,7 +1035,14 @@ fn runNonInteractiveWithDeps(
             try writeConfigDiagnostics(alloc, deps, startup.config_diagnostics);
 
             const catalog_access = startup.modelCatalogAccess();
-            const loaded = switch (cfg.gateway_provider.cli_model_catalog.fetch(alloc, .{
+            const catalog_provider = if (startup.provider == .codex)
+                cfg.codex_cli_model_catalog orelse {
+                    try writeStderr(deps, "fx models: Codex model catalog is unavailable\n");
+                    return .handled_failure;
+                }
+            else
+                cfg.gateway_provider.cli_model_catalog;
+            const loaded = switch (catalog_provider.fetch(alloc, .{
                 .access = catalog_access,
                 .endpoint = cfg.models_path,
             })) {
@@ -898,6 +1076,7 @@ fn runNonInteractiveWithDeps(
 
             const text = try (output_contracts.ModelListSnapshot{
                 .ids = ids.items,
+                .provider = startup.provider,
                 .private_models_hidden = loaded.provenance.access.private_models_may_be_hidden,
                 .public_only_reason = loaded.provenance.access.public_only_reason,
             }).render(alloc, opts.format);
@@ -1268,6 +1447,7 @@ fn runNonInteractiveWithDeps(
 
             var snapshot = cfg.gateway_provider.credits.fetch(alloc, .{
                 .credential = startup.apiKey(),
+                .credential_source = if (startup.credential) |credential| credential.source else null,
                 .tenant = startup.gatewayTeam(),
                 .model = startup.selected_model,
             });
@@ -1707,6 +1887,7 @@ fn statusSnapshotFromStartupWithBuild(
 ) output_contracts.StatusSnapshot {
     return .{
         .model = startup.selected_model,
+        .provider = startup.provider,
         .auth = startup.auth,
         .auth_help = startup.auth.missingHelp(.cli),
         .permission_mode = permissionModeForSnapshot(startup.permission_mode),
@@ -1737,6 +1918,7 @@ fn doctorSnapshotFromRuntime(snapshot: doctor_runtime.Snapshot) output_contracts
     return .{
         .workspace_root = snapshot.workspace_root,
         .model = snapshot.model,
+        .provider = snapshot.provider,
         .auth = snapshot.auth,
         .permission_mode = permissionModeForSnapshot(snapshot.permission_mode),
         .agent_step_limit = snapshot.agent_step_limit,
@@ -2675,6 +2857,8 @@ fn workflowConfig(cfg: Config) @import("cli_ask.zig").Config {
         .gateway_chat_url = cfg.gateway_provider.chat_url.resolve(cfg.gateway_chat_url),
         .gateway_models_path = cfg.models_path,
         .gateway_provider = cfg.gateway_provider,
+        .codex_agent_stream = cfg.codex_agent_stream,
+        .codex_model_catalog = cfg.codex_model_catalog,
         .background_process_provider = cfg.background_process_provider,
         .secret_store = cfg.secret_store,
         .prompt_policy = cfg.prompt_policy,
@@ -2691,6 +2875,7 @@ fn workflowConfig(cfg: Config) @import("cli_ask.zig").Config {
         .load_mcp_runtime = cfg.load_mcp_runtime,
         .devbox_provider = cfg.devbox_provider,
         .permission_reviewer_provider = cfg.permission_reviewer_provider,
+        .codex_permission_reviewer_provider = cfg.codex_permission_reviewer_provider,
     };
 }
 

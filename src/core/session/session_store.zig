@@ -853,15 +853,50 @@ pub const Store = struct {
         alloc: Allocator,
         loaded: *LoadedWritableSession,
     ) PristineDiscardDisposition {
-        defer loaded.deinit(alloc);
-        if (self.canonical_root.mode != .writable or
-            !std.mem.eql(u8, self.workspace_root, loaded.state.workspace_root) or
-            !isPristineStartedSession(loaded))
-        {
+        if (!isPristineStartedSession(loaded)) {
+            loaded.deinit(alloc);
             debug_trace.logf(
                 "session",
                 "event=pristine_session_discard disposition=retained reason=guard_failed",
                 .{},
+            );
+            return .retained;
+        }
+        return self.deleteWriterOwnedSession(
+            alloc,
+            loaded,
+            "pristine_session_discard",
+        );
+    }
+
+    /// Consumes an exact writable session on every return. Policy checks such
+    /// as terminal one-off admission remain with the caller that owns them.
+    pub fn deleteCommittedSession(
+        self: Store,
+        alloc: Allocator,
+        loaded: *LoadedWritableSession,
+    ) PristineDiscardDisposition {
+        return self.deleteWriterOwnedSession(
+            alloc,
+            loaded,
+            "committed_session_delete",
+        );
+    }
+
+    fn deleteWriterOwnedSession(
+        self: Store,
+        alloc: Allocator,
+        loaded: *LoadedWritableSession,
+        event_name: []const u8,
+    ) PristineDiscardDisposition {
+        defer loaded.deinit(alloc);
+        if (self.canonical_root.mode != .writable or
+            !std.mem.eql(u8, self.workspace_root, loaded.state.workspace_root))
+        {
+            debug_trace.logf(
+                "session",
+                "event={s} disposition=retained reason=guard_failed",
+                .{event_name},
             );
             return .retained;
         }
@@ -872,32 +907,32 @@ pub const Store = struct {
         ) catch |err| {
             debug_trace.logf(
                 "session",
-                "event=pristine_session_discard disposition=retained reason=store_root_unverified err={s}",
-                .{@errorName(err)},
+                "event={s} disposition=retained reason=store_root_unverified err={s}",
+                .{ event_name, @errorName(err) },
             );
             return .retained;
         };
         if (!writer_belongs_to_store) {
             debug_trace.logf(
                 "session",
-                "event=pristine_session_discard disposition=retained reason=store_root_mismatch",
-                .{},
+                "event={s} disposition=retained reason=store_root_mismatch",
+                .{event_name},
             );
             return .retained;
         }
         const lifecycle = if (loaded.commit_lifecycle) |*value| value else {
             debug_trace.logf(
                 "session",
-                "event=pristine_session_discard disposition=retained reason=cache_lifecycle_unavailable",
-                .{},
+                "event={s} disposition=retained reason=cache_lifecycle_unavailable",
+                .{event_name},
             );
             return .retained;
         };
         const sessions = &(self.canonical_root.sessions orelse {
             debug_trace.logf(
                 "session",
-                "event=pristine_session_discard disposition=indeterminate stage=sessions_root",
-                .{},
+                "event={s} disposition=indeterminate stage=sessions_root",
+                .{event_name},
             );
             return .indeterminate;
         });
@@ -911,24 +946,24 @@ pub const Store = struct {
         ) catch |err| {
             debug_trace.logf(
                 "session",
-                "event=pristine_session_discard disposition=indeterminate stage=cache_pending err={s}",
-                .{@errorName(err)},
+                "event={s} disposition=indeterminate stage=cache_pending err={s}",
+                .{ event_name, @errorName(err) },
             );
             return .indeterminate;
         };
         sessions.dir.deleteTree(io_mod.getIo(), loaded.active_id) catch |err| {
             debug_trace.logf(
                 "session",
-                "event=pristine_session_discard disposition=indeterminate stage=delete err={s}",
-                .{@errorName(err)},
+                "event={s} disposition=indeterminate stage=delete err={s}",
+                .{ event_name, @errorName(err) },
             );
             return .indeterminate;
         };
         io_mod.syncVerifiedDir(sessions.dir) catch |err| {
             debug_trace.logf(
                 "session",
-                "event=pristine_session_discard disposition=indeterminate stage=sync err={s}",
-                .{@errorName(err)},
+                "event={s} disposition=indeterminate stage=sync err={s}",
+                .{ event_name, @errorName(err) },
             );
             return .indeterminate;
         };
@@ -938,15 +973,15 @@ pub const Store = struct {
         ) catch |err| {
             debug_trace.logf(
                 "session",
-                "event=pristine_session_discard disposition=indeterminate stage=deferred_token_cleanup err={s}",
-                .{@errorName(err)},
+                "event={s} disposition=indeterminate stage=deferred_token_cleanup err={s}",
+                .{ event_name, @errorName(err) },
             );
             return .indeterminate;
         };
         debug_trace.logf(
             "session",
-            "event=pristine_session_discard disposition=discarded",
-            .{},
+            "event={s} disposition=discarded",
+            .{event_name},
         );
         return .discarded;
     }
@@ -6379,6 +6414,34 @@ test "pristine discard refuses resumed and committed writers" {
         return error.TestExpectedEqual;
     defer latest.deinit(alloc);
     try std.testing.expectEqualStrings(committed_state.id, latest.session_id);
+}
+
+test "committed session deletion consumes its exact writer" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var ctx = try initTempStore(alloc, &tmp);
+    defer ctx.deinit(alloc);
+
+    var state = try testDurableState(alloc, "delete-committed", ctx.workspace);
+    defer state.deinit(alloc);
+    var writable = try ctx.store.startWritableSession(alloc, state);
+    _ = try writable.appendEvent(
+        alloc,
+        .{ .preferences_changed = .{ .fast_mode = true } },
+        20,
+        .retry_expected_tail,
+        .{},
+    );
+
+    try std.testing.expectEqual(
+        PristineDiscardDisposition.discarded,
+        ctx.store.deleteCommittedSession(alloc, &writable),
+    );
+    try std.testing.expectError(
+        error.SessionNotFound,
+        ctx.store.loadReadOnly(alloc, state.id),
+    );
 }
 
 test "pristine discard refuses a writer from a different Store root" {

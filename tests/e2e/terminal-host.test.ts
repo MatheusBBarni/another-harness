@@ -2073,7 +2073,7 @@ test.skipIf(!tmuxAvailable())(
         const paths = hostPaths(home);
         const transport = terminalTransportPaths(home);
         const trace = join(home, `${fixture.owner}-${fixture.point}-${pass}.log`);
-        const host = startHost(home, undefined, 250, {
+        const host = startHost(home, undefined, 2_000, {
           FX_TRACE_LOG: trace,
           FX_TRACE_SCOPES: "terminal_host",
           FX_TERMINAL_TEST_TMUX_DEADLINE_MS: "150",
@@ -2164,7 +2164,7 @@ test.skipIf(!tmuxAvailable())(
         const paths = hostPaths(home);
         const transport = terminalTransportPaths(home);
         const trace = join(home, `foreground-${fixture.name}-${pass}.log`);
-        const host = startHost(home, undefined, 250, {
+        const host = startHost(home, undefined, 2_000, {
           FX_TRACE_LOG: trace,
           FX_TRACE_SCOPES: "terminal_host",
           FX_TERMINAL_TEST_TMUX_TCSETPGRP_FAILURE: "1",

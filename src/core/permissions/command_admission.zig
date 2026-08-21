@@ -128,8 +128,14 @@ pub const DefaultApproval = union(enum) {
 pub fn defaultForRunCommand(
     alloc: std.mem.Allocator,
     command_ctx: CommandContext,
+    permission_mode: types.PermissionMode,
 ) DefaultApproval {
-    if (command_ctx.environment.requiresShellRoute()) {
+    const requires_shell_authority = switch (command_ctx.environment) {
+        .user => true,
+        .clean => permission_mode != .auto,
+        .legacy, .workspace_clean => false,
+    };
+    if (requires_shell_authority) {
         return .{ .approval_required = .dynamic_shell };
     }
     var admission = command_effect.plan(
@@ -156,7 +162,7 @@ test "normalized default emits direct-only only for a direct plan" {
         .resolved_backend = .none,
         .target_os = .macos,
     };
-    const direct = defaultForRunCommand(std.testing.allocator, direct_ctx);
+    const direct = defaultForRunCommand(std.testing.allocator, direct_ctx, .ask);
     switch (direct) {
         .direct_only => |fingerprint| try std.testing.expect(fingerprint.matches(direct_ctx)),
         .approval_required => return error.TestExpectedDirectOnly,
@@ -171,7 +177,7 @@ test "normalized default emits direct-only only for a direct plan" {
     };
     try std.testing.expectEqual(
         command_effect.ApprovalReason.filesystem_write,
-        defaultForRunCommand(std.testing.allocator, write_ctx).approval_required,
+        defaultForRunCommand(std.testing.allocator, write_ctx, .ask).approval_required,
     );
 }
 
@@ -184,8 +190,36 @@ test "explicit user environment always requires shell authority" {
         .target_os = .macos,
         .environment = .{ .user = "/bin/zsh" },
     };
+    for ([_]types.PermissionMode{ .auto, .ask }) |permission_mode| {
+        try std.testing.expectEqual(
+            command_effect.ApprovalReason.dynamic_shell,
+            defaultForRunCommand(std.testing.allocator, user_ctx, permission_mode).approval_required,
+        );
+    }
+}
+
+test "explicit clean environment is direct only in automatic mode" {
+    const clean_ctx = CommandContext{
+        .command = "pwd",
+        .resolved_cwd = "/workspace",
+        .background = false,
+        .resolved_backend = .none,
+        .target_os = .macos,
+        .environment = .{ .clean = "/bin/zsh" },
+    };
+    const automatic = defaultForRunCommand(std.testing.allocator, clean_ctx, .auto);
+    switch (automatic) {
+        .direct_only => |fingerprint| try std.testing.expect(fingerprint.matches(clean_ctx)),
+        .approval_required => return error.TestExpectedDirectOnly,
+    }
     try std.testing.expectEqual(
         command_effect.ApprovalReason.dynamic_shell,
-        defaultForRunCommand(std.testing.allocator, user_ctx).approval_required,
+        defaultForRunCommand(std.testing.allocator, clean_ctx, .ask).approval_required,
+    );
+    var write_ctx = clean_ctx;
+    write_ctx.command = "touch created.txt";
+    try std.testing.expectEqual(
+        command_effect.ApprovalReason.filesystem_write,
+        defaultForRunCommand(std.testing.allocator, write_ctx, .auto).approval_required,
     );
 }

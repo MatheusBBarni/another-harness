@@ -141,12 +141,16 @@ function classifierTrustContext(body: string): string {
   return evidence.slice(start, end);
 }
 
-function subagentCreateCall(toolCallId: string, prompt: string) {
+function subagentCreateCall(
+  toolCallId: string,
+  prompt: string,
+  mode: "one_off" | "persistent" = "one_off",
+) {
   return gatewayToolCall("subagent", {
     command: {
       create: {
         name: "bounded-child",
-        mode: "one_off",
+        mode,
         prompt,
       },
     },
@@ -1352,7 +1356,7 @@ describe("effect-aware command permissions", () => {
   );
 
   test.skipIf(!tmuxAvailable())(
-    "TUI yolo user-profile command keeps its provisional row before following transcript text",
+    "TUI yolo user-profile command waits for authoritative arguments after streamed text",
     async () => {
       const root = createIsolatedRoot();
       const streamText = "DIRECT_NO_NOTICE_STREAM_TEXT";
@@ -1398,7 +1402,9 @@ describe("effect-aware command permissions", () => {
       const completedIndex = scrollback.indexOf("● Ran");
       const streamTextIndex = scrollback.indexOf(streamText);
       expect(completedIndex).toBeGreaterThanOrEqual(0);
-      expect(streamTextIndex).toBeGreaterThan(completedIndex);
+      expect(streamTextIndex).toBeGreaterThanOrEqual(0);
+      expect(completedIndex).toBeGreaterThan(streamTextIndex);
+      expect(scrollback).not.toContain("Preparing command");
       expect(scrollback).not.toContain("Auto agent approved this request");
       expect(gateway.requests).toHaveLength(2);
       expect(gateway.classifierRequests).toHaveLength(0);
@@ -4372,7 +4378,7 @@ describe("effect-aware command permissions", () => {
         }, "nested_create_1");
       };
       const gateway = startFakeGateway([
-        subagentCreateCall("root_create_1", childPrompt),
+        subagentCreateCall("root_create_1", childPrompt, "persistent"),
         route,
         route,
         route,
@@ -5073,7 +5079,7 @@ describe("effect-aware command permissions", () => {
             command: {
               create: {
                 name: "interactive-approval-child",
-                mode: "one_off",
+                mode: "persistent",
                 prompt: childPrompt,
                 permission_mode: "ask",
               },
@@ -5124,11 +5130,11 @@ describe("effect-aware command permissions", () => {
       );
       expect(existsSync(markerPath)).toBe(false);
       const childDeadline = Date.now() + TIMEOUT;
-      while (subagentState(root, childId) !== "completed" &&
+      while (subagentState(root, childId) !== "idle" &&
              Date.now() < childDeadline) {
         await Bun.sleep(20);
       }
-      expect(subagentState(root, childId)).toBe("completed");
+      expect(subagentState(root, childId)).toBe("idle");
       const stored = JSON.parse(readFileSync(
         join(root.home, ".fx", "sessions", childId, "subagent", "communication.json"),
         "utf8",

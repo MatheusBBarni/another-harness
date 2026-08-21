@@ -1261,7 +1261,7 @@ async function runCanonicalLifecycleFixture(
     reachedFinal = settled.matched;
     if (reachedFinal) {
       await session.sendText("/help");
-      const help = await waitForPaneOrDone(session, "Commands 39", donePath);
+      const help = await waitForPaneOrDone(session, "Commands 40", donePath);
       helpVisible = help.matched;
       requestCountAfterHelp = queuedGateway.requests.length;
       if (helpVisible) {
@@ -6518,7 +6518,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
   );
 
   test(
-    "argless streamed terminal start never renders bare Running while held open",
+    "argless streamed terminal start stays in composing activity while held open",
     async () => {
       root = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-run-command-provisional-")));
       const home = join(root, "home");
@@ -6573,9 +6573,11 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const scrollback = await waitForScrollback(
         session,
         (candidate) =>
-          candidate.includes("● Preparing command") &&
+          candidate.includes("Thinking") &&
+          !candidate.includes("● Preparing command") &&
+          !candidate.includes("Using terminal") &&
           !hasBareRunningRow(candidate),
-        "argless terminal provisional row",
+        "terminal composing activity",
       );
 
       expect(stream.cancelled).toBe(false);
@@ -6583,7 +6585,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       expect(session.isPaneAlive()).toBe(true);
       expect(streamingGateway.requests).toHaveLength(1);
       expect(hasBareRunningRow(scrollback)).toBe(false);
-      expect(scrollback).toContain("● Preparing command");
+      expect(scrollback).not.toContain("● Preparing command");
+      expect(scrollback).not.toContain("Using terminal");
+      expect(scrollback).not.toContain("Used terminal");
       expect(scrollback).toContain("Thinking");
       expect(readFileSync(stderrPath, "utf8")).toBe("");
       expect(existsSync(tapePath)).toBe(true);
@@ -6949,6 +6953,9 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       expect(scrollback).toContain("SECOND_CMD_LINE_05");
       expect(scrollback).not.toContain("SECOND_CMD_LINE_06");
       expect(scrollback).not.toContain("SECOND_CMD_LINE_30");
+      expect(scrollback).toContain("Ran printf 'FIRST_CMD_%s\\n' DONE");
+      expect(scrollback).toContain("Ran i=1; while");
+      expect(scrollback).not.toContain("Preparing command");
       expect(scrollback).toContain(
         "│ … 25 lines more (ctrl o to view)",
       );
@@ -6981,11 +6988,8 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
         encoding: "utf8",
       });
       expect(hasBareRunningRow(finalReplay)).toBe(false);
-      const trace = readFileSync(tracePath, "utf8");
-      expect(countOccurrences(trace, "lifecycle_reduced kind=terminal turn_id=1"))
-        .toBeGreaterThanOrEqual(2);
-      expect(countOccurrences(trace, "lifecycle_reduced kind=terminal turn_id=1 records=2"))
-        .toBeGreaterThanOrEqual(2);
+      expect(finalReplay).toContain("Ran printf 'FIRST_CMD_%s\\n' DONE");
+      expect(finalReplay).toContain("Ran i=1; while");
 
       const replayFrames = execFileSync(FX_BIN, ["replay", tapePath, "--frames"], {
         encoding: "utf8",
@@ -7169,7 +7173,7 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
   );
 
   test(
-    "length-truncated tool completion preserves output and terminalizes failed row",
+    "length-truncated terminal completion preserves output without inventing a tool row",
     async () => {
       root = realpathSync(mkdtempSync(join(tmpdir(), "fx-tui-gateway-length-")));
       const home = join(root, "home");
@@ -7200,13 +7204,14 @@ describe.skipIf(!tmuxAvailable())("TUI gateway stream lifecycle", () => {
       const pane = await session.waitForText("did not execute the returned tool calls", TIMEOUT);
 
       expect(pane).toContain("partial output");
-      expect(pane).toContain("● 1 tool call · 1 command · 1 failed");
-      expect(pane).toContain("└ Tool failed");
+      expect(pane).not.toContain("● 1 tool call");
+      expect(pane).not.toContain("Tool failed");
+      expect(pane).not.toContain("Preparing command");
       expect(existsSync(sentinelPath)).toBe(false);
       expect(gateway.requestCount()).toBe(1);
 
       await session.sendText("/help");
-      await session.waitForText("Commands 39", TIMEOUT);
+      await session.waitForText("Commands 40", TIMEOUT);
       expect(gateway.requestCount()).toBe(1);
       await session.sendKeys("Escape");
     },

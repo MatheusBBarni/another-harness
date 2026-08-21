@@ -6,6 +6,7 @@ const vision_contracts = @import("../agent/runtime/vision_contracts.zig");
 const command_admission = @import("../permissions/command_admission.zig");
 const command_environment = @import("../execution/command_environment.zig");
 const command_effect = @import("../shell_command/command_effect.zig");
+const command_policy = @import("command_policy.zig");
 const file_mutation = @import("file_mutation.zig");
 const file_mutation_contract = @import("file_mutation_contract.zig");
 const image_attachments = @import("../images/image_attachments.zig");
@@ -840,6 +841,34 @@ fn reviewerUnavailableOutcome(call: ToolCall) command_admission.PermissionOutcom
     };
 }
 
+const UnresolvedAutoDisposition = enum {
+    replan,
+    review,
+};
+
+fn unresolved_command_disposition(command: []const u8) UnresolvedAutoDisposition {
+    return if (command_policy.destructive_effect_for(command) != null)
+        .replan
+    else
+        .review;
+}
+
+fn unresolved_tool_disposition(kind: tool_dispatch.ExecutorKind) UnresolvedAutoDisposition {
+    return if (kind == .delete_file) .replan else .review;
+}
+
+fn deterministic_auto_replan_outcome(call: ToolCall) command_admission.PermissionOutcome {
+    debug_trace.logf(
+        "permission",
+        "event=deterministic_auto_disposition tool_name={s} source=deterministic_policy disposition=replan reviewer_transport=false call_id={s}",
+        .{ call.name, call.id },
+    );
+    return .{
+        .decision = .deny,
+        .denial_reason = .auto_denied,
+    };
+}
+
 /// Maps every non-allow automatic review to one recoverable denial. A
 /// separately selected human-approval phase bypasses automatic review below.
 fn nonAllowAutoReviewOutcome(
@@ -955,7 +984,12 @@ fn resolveOrdinaryPermissionOutcome(
 ) !command_admission.PermissionOutcome {
     const command_call = try isRunCommandCall(input, arena, call);
     if (command_call) {
-        const default_outcome = defaultRunCommandPermissionOutcome(input, arena, call);
+        const default_outcome = defaultRunCommandPermissionOutcome(
+            input,
+            arena,
+            call,
+            permission_mode,
+        );
         if (default_outcome.execution_authority != null) return default_outcome;
     }
     if (toolApprovalPolicy(input, call.name) == .ask_only) {
@@ -988,6 +1022,11 @@ fn resolveOrdinaryPermissionOutcome(
                     .once,
                     .auto_mode,
                 );
+            }
+            if (!isHumanApprovalPhase(input) and
+                unresolved_command_disposition(command.command) == .replan)
+            {
+                return deterministic_auto_replan_outcome(call);
             }
         }
         return automaticReviewOutcome(
@@ -1291,6 +1330,13 @@ fn requestPermissionOutcomeResolved(
         try reversibleStructuredToolMayBypassAutoReview(input, arena, call))
     {
         return ordinaryPermissionOutcome(.once);
+    }
+    if (permission_mode == .auto and !isHumanApprovalPhase(input)) {
+        if (registeredTool(input, call.name)) |tool| {
+            if (unresolved_tool_disposition(tool.executor_kind) == .replan) {
+                return deterministic_auto_replan_outcome(call);
+            }
+        }
     }
     if (input.host_sandbox_default == .allow_sandboxed and
         try isRunCommandCall(input, arena, call))
@@ -2242,11 +2288,16 @@ fn defaultRunCommandPermissionOutcome(
     input: Input,
     arena: Allocator,
     call: ToolCall,
+    permission_mode: PermissionMode,
 ) command_admission.PermissionOutcome {
     const command_ctx = runCommandContext(input, arena, call) catch {
         return .{ .decision = .permission_required };
     };
-    return switch (command_admission.defaultForRunCommand(arena, command_ctx)) {
+    return switch (command_admission.defaultForRunCommand(
+        arena,
+        command_ctx,
+        permission_mode,
+    )) {
         .direct_only => |fingerprint| .{
             .decision = .once,
             .execution_authority = .{ .run_command = .{ .direct_only = fingerprint } },
@@ -5001,7 +5052,7 @@ test "automatic review receives exact command and mints matching one-call author
     }
 }
 
-test "automatic ask returns to the agent before using a human prompter" {
+test "automatic destructive command replans before reviewer or human prompter" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     var worker: WorkerRuntime = .{};
@@ -5037,18 +5088,173 @@ test "automatic ask returns to the agent before using a human prompter" {
         &.{},
     );
 
-    try std.testing.expectEqual(@as(usize, 1), fake.calls);
+    try std.testing.expectEqual(@as(usize, 0), fake.calls);
     try std.testing.expectEqual(@as(usize, 0), recording.calls);
     try std.testing.expectEqual(ToolPermissionDecision.deny, outcome.decision);
     try std.testing.expectEqual(types.ToolPermissionDenialReason.auto_denied, outcome.denial_reason.?);
     try std.testing.expect(outcome.execution_authority == null);
-    try std.testing.expectEqualStrings(
-        "The command exceeds the user's request.",
-        outcome.auto_review_result.?.rationale,
-    );
+    try std.testing.expect(outcome.auto_review_result == null);
 }
 
-test "automatic ask returns a recoverable denial without a prompter" {
+test "configured allow remains authoritative for a destructive command" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var worker: WorkerRuntime = .{};
+    defer worker.deinit(std.testing.allocator);
+    var background: BackgroundRuntime = .{};
+    defer background.deinit(std.testing.allocator);
+    var fake = FakeAutoClassifier{};
+    var input = testInputWithClassifier(
+        &worker,
+        &background,
+        permission_auto_classifier.Classifier.withOverride(
+            @ptrCast(&fake),
+            FakeAutoClassifier.classify,
+        ),
+    );
+    var rules = [_]types.PermissionRule{.{
+        .permission = @constCast("bash"),
+        .pattern = @constCast("rm -rf public"),
+        .action = .allow,
+    }};
+    input.permission_rules = .{ .rules = &rules };
+
+    const outcome = try requestPermissionOutcome(
+        input,
+        arena_state.allocator(),
+        .{
+            .id = "configured-destructive",
+            .name = "terminal",
+            .arguments_json = "{\"action\":\"exec\",\"command\":\"rm -rf public\"}",
+        },
+        .auto,
+        &.{},
+    );
+
+    try std.testing.expectEqual(ToolPermissionDecision.once, outcome.decision);
+    try std.testing.expectEqual(
+        command_admission.ShellAuthorizationSource.configured_rule,
+        outcome.execution_authority.?.run_command.shell_allowed.source,
+    );
+    try std.testing.expectEqual(@as(usize, 0), fake.calls);
+}
+
+test "delegated command effects remain reviewer owned" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var worker: WorkerRuntime = .{};
+    defer worker.deinit(std.testing.allocator);
+    var background: BackgroundRuntime = .{};
+    defer background.deinit(std.testing.allocator);
+    var fake = FakeAutoClassifier{ .decision = .ask };
+    const input = testInputWithClassifier(
+        &worker,
+        &background,
+        permission_auto_classifier.Classifier.withOverride(
+            @ptrCast(&fake),
+            FakeAutoClassifier.classify,
+        ),
+    );
+
+    for ([_][]const u8{
+        "git checkout feature/repro",
+        "git switch feature/repro",
+        "git pull --ff-only",
+        "rtk rm -rf generated",
+        "printf ok # harmless; rm victim",
+        "cat <<EOF\nrm victim\nEOF",
+        "rm --help",
+        "rm",
+        "rm -f; printf ok",
+        "git rm --dry-run; printf ok",
+        "rm -f < input.txt",
+        "git clean -hf",
+        "git rm -hf tracked.txt",
+        "git reset -hq --hard",
+    }) |command| {
+        const arguments_json = try std.fmt.allocPrint(
+            arena_state.allocator(),
+            "{{\"action\":\"exec\",\"command\":{f}}}",
+            .{std.json.fmt(command, .{})},
+        );
+        const outcome = try requestPermissionOutcome(
+            input,
+            arena_state.allocator(),
+            .{
+                .id = command,
+                .name = "terminal",
+                .arguments_json = arguments_json,
+            },
+            .auto,
+            &.{},
+        );
+        try std.testing.expectEqual(ToolPermissionDecision.deny, outcome.decision);
+        try std.testing.expect(outcome.auto_review_result != null);
+    }
+    try std.testing.expectEqual(@as(usize, 14), fake.calls);
+}
+
+test "automatic delete replans before reviewer" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "workspace");
+    var victim = try tmp.dir.createFile(
+        std.testing.io,
+        "workspace/victim.txt",
+        .{ .truncate = true },
+    );
+    defer victim.close(std.testing.io);
+    try victim.writeStreamingAll(std.testing.io, "keep\n");
+    const workspace = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
+    defer alloc.free(workspace);
+    const target = try std.fs.path.join(alloc, &.{ workspace, "victim.txt" });
+    defer alloc.free(target);
+
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    var worker: WorkerRuntime = .{};
+    defer worker.deinit(alloc);
+    var background: BackgroundRuntime = .{};
+    defer background.deinit(alloc);
+    var fake = FakeAutoClassifier{};
+    var input = testInputWithClassifier(
+        &worker,
+        &background,
+        permission_auto_classifier.Classifier.withOverride(
+            @ptrCast(&fake),
+            FakeAutoClassifier.classify,
+        ),
+    );
+    input.workspace_root = workspace;
+    const arguments_json = try std.fmt.allocPrint(
+        arena_state.allocator(),
+        "{{\"path\":{f}}}",
+        .{std.json.fmt(target, .{})},
+    );
+
+    const outcome = try requestPermissionOutcome(
+        input,
+        arena_state.allocator(),
+        .{
+            .id = "delete-victim",
+            .name = "delete_file",
+            .arguments_json = arguments_json,
+        },
+        .auto,
+        &.{},
+    );
+
+    try std.testing.expectEqual(@as(usize, 0), fake.calls);
+    try std.testing.expectEqual(ToolPermissionDecision.deny, outcome.decision);
+    try std.testing.expectEqual(
+        types.ToolPermissionDenialReason.auto_denied,
+        outcome.denial_reason.?,
+    );
+    try std.testing.expect(outcome.execution_authority == null);
+}
+
+test "automatic reviewer ask returns a recoverable denial without a prompter" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     var worker: WorkerRuntime = .{};
@@ -5076,7 +5282,7 @@ test "automatic ask returns a recoverable denial without a prompter" {
         .{
             .id = "asked",
             .name = "terminal",
-            .arguments_json = "{\"action\":\"exec\",\"command\":\"rm -rf public\"}",
+            .arguments_json = "{\"action\":\"exec\",\"command\":\"touch public\"}",
         },
         .auto,
         &.{},
@@ -5223,6 +5429,45 @@ test "human approval phase bypasses automatic review" {
     try std.testing.expectEqual(@as(usize, 1), recording.calls);
 }
 
+test "human approval phase bypasses deterministic destructive replan" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var worker: WorkerRuntime = .{};
+    defer worker.deinit(std.testing.allocator);
+    var background: BackgroundRuntime = .{};
+    defer background.deinit(std.testing.allocator);
+    var fake = FakeAutoClassifier{ .decision = .ask };
+    var recording = RecordingPrompter{};
+    var input = testInputWithClassifier(
+        &worker,
+        &background,
+        permission_auto_classifier.Classifier.withOverride(
+            @ptrCast(&fake),
+            FakeAutoClassifier.classify,
+        ),
+    );
+    var review_turn = testReviewTurn();
+    review_turn.auto_permission_phase = .human_approval;
+    input.permission_review_turn = review_turn;
+    input.permission_prompter = recording.prompter();
+
+    const approved = try requestPermissionOutcome(
+        input,
+        arena_state.allocator(),
+        .{
+            .id = "destructive-human-approval",
+            .name = "terminal",
+            .arguments_json = "{\"action\":\"exec\",\"command\":\"rm -rf disposable-dir\"}",
+        },
+        .auto,
+        &.{},
+    );
+
+    try std.testing.expectEqual(ToolPermissionDecision.once, approved.decision);
+    try std.testing.expectEqual(@as(usize, 0), fake.calls);
+    try std.testing.expectEqual(@as(usize, 1), recording.calls);
+}
+
 test "configured command authority skips automatic review" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -5303,6 +5548,50 @@ test "configured command authority skips automatic review" {
     );
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
     try std.testing.expectEqual(@as(usize, 1), recording.calls);
+}
+
+test "automatic clean direct command bypasses the reviewer" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var worker: WorkerRuntime = .{};
+    defer worker.deinit(std.testing.allocator);
+    var background: BackgroundRuntime = .{};
+    defer background.deinit(std.testing.allocator);
+    var fake = FakeAutoClassifier{ .decision = .ask };
+    const input = testInputWithClassifier(
+        &worker,
+        &background,
+        permission_auto_classifier.Classifier.withOverride(
+            @ptrCast(&fake),
+            FakeAutoClassifier.classify,
+        ),
+    );
+
+    const outcome = requestPermissionOutcome(
+        input,
+        arena_state.allocator(),
+        .{
+            .id = "clean-direct",
+            .name = "terminal",
+            .arguments_json = "{\"action\":\"exec\",\"command\":\"pwd\",\"profile\":\"clean\"}",
+        },
+        .auto,
+        &.{},
+    ) catch |err| switch (err) {
+        error.MissingLoginShell, error.UnsupportedShell => return error.SkipZigTest,
+        else => return err,
+    };
+
+    try std.testing.expectEqual(ToolPermissionDecision.once, outcome.decision);
+    try std.testing.expectEqual(@as(usize, 0), fake.calls);
+    const authority = outcome.execution_authority orelse return error.TestExpectedEqual;
+    switch (authority.run_command) {
+        .direct_only => |fingerprint| try std.testing.expectEqual(
+            std.meta.Tag(command_environment.Environment).clean,
+            std.meta.activeTag(fingerprint.environment),
+        ),
+        .shell_allowed => return error.TestExpectedDirectOnly,
+    }
 }
 
 test "known reversible auto commands bypass the reviewer" {

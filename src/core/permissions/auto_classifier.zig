@@ -12,7 +12,7 @@ const types = @import("../shared/types.zig");
 pub const tool_name = "permission_decision";
 const max_rationale_bytes: usize = 240;
 const max_review_packet_bytes: usize = 16 * 1024;
-const reviewer_model = "zai/glm-5.2";
+pub const gateway_reviewer_model = "zai/glm-5.2";
 
 pub const Risk = enum {
     low,
@@ -178,6 +178,16 @@ pub const Transport = struct {
         std.Io.Clock.Timestamp,
         *std.atomic.Value(bool),
     ) anyerror!TransportOutcome,
+    build_fn: ?*const fn (
+        *anyopaque,
+        std.mem.Allocator,
+        []const u8,
+        []const u8,
+        []const types.ChatMessage,
+        []const u8,
+        std.Io.Clock.Timestamp,
+        *std.atomic.Value(bool),
+    ) anyerror![]u8 = null,
 
     pub fn send(
         self: Transport,
@@ -229,6 +239,7 @@ pub const Reviewer = struct {
     override_fn: ?OverrideFn = null,
     cancel_flag: ?*std.atomic.Value(bool) = null,
     timeout_ms: u32 = default_timeout_ms,
+    model: []const u8 = gateway_reviewer_model,
 
     pub const default_timeout_ms: u32 = 15_000;
 
@@ -249,6 +260,20 @@ pub const Reviewer = struct {
             .transport = transport,
             .cancel_flag = cancel_flag,
             .timeout_ms = timeout_ms,
+        };
+    }
+
+    pub fn withTransportModel(
+        transport: Transport,
+        cancel_flag: ?*std.atomic.Value(bool),
+        timeout_ms: u32,
+        model: []const u8,
+    ) Reviewer {
+        return .{
+            .transport = transport,
+            .cancel_flag = cancel_flag,
+            .timeout_ms = timeout_ms,
+            .model = model,
         };
     }
 
@@ -284,7 +309,7 @@ pub const Reviewer = struct {
             .{
                 @tagName(review_turn.origin),
                 review_turn.model,
-                reviewer_model,
+                self.model,
                 review_turn.pending_assistant.tool_calls.len,
                 review_turn.current_root_request.len,
                 review_turn.target_call_id,
@@ -337,16 +362,28 @@ pub const Reviewer = struct {
         message_index += 1;
         messages[message_index] = .{ .role = .system, .content = instruction };
 
-        const payload = gateway_json.buildGatewayPendingToolReviewRequestBodyWithMaxOutputTokens(
-            alloc,
-            tools_json,
-            messages,
-            review_turn.target_call_id,
-            .{},
-            2048,
-            deadline,
-            cancel_flag,
-        ) catch |err| return constructionFailure(err);
+        const payload = if (transport.build_fn) |build_fn|
+            build_fn(
+                transport.context,
+                alloc,
+                self.model,
+                tools_json,
+                messages,
+                review_turn.target_call_id,
+                deadline,
+                cancel_flag,
+            ) catch |err| return constructionFailure(err)
+        else
+            gateway_json.buildGatewayPendingToolReviewRequestBodyWithMaxOutputTokens(
+                alloc,
+                tools_json,
+                messages,
+                review_turn.target_call_id,
+                .{},
+                2048,
+                deadline,
+                cancel_flag,
+            ) catch |err| return constructionFailure(err);
         defer alloc.free(payload);
         debug_trace.logf(
             "permission",
@@ -362,7 +399,7 @@ pub const Reviewer = struct {
         );
         var transport_outcome = transport.send(
             alloc,
-            reviewer_model,
+            self.model,
             payload,
             deadline,
             cancel_flag,
@@ -1278,7 +1315,7 @@ test "automatic review serializes the pending call structurally" {
             self.saw_pending_results =
                 std.mem.count(u8, payload, "\"role\":\"tool\"") == 1 and
                 std.mem.count(u8, payload, "Tool call has not executed; it is pending permission review.") == 1;
-            self.saw_reviewer_model = std.mem.eql(u8, model, reviewer_model);
+            self.saw_reviewer_model = std.mem.eql(u8, model, gateway_reviewer_model);
             self.saw_review_settings =
                 std.mem.find(u8, payload, "\"maxOutputTokens\":2048") != null and
                 std.mem.find(u8, payload, "\"toolChoice\":{\"type\":\"required\"}") != null and

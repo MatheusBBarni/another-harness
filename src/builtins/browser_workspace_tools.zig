@@ -82,6 +82,7 @@ fn expectDecodeFailure(arguments_json: []const u8) !void {
 
 test "browser workspace rejects missing action native fields and unknown arguments" {
     try expectDecodeFailure("{\"command\":\"pwd\"}");
+    try expectDecodeFailure("{\"request\":{\"action\":\"exec\",\"command\":\"pwd\"}}");
     try expectDecodeFailure("{\"action\":\"start\",\"command\":\"pwd\"}");
     try expectDecodeFailure("{\"action\":\"exec\",\"command\":\"pwd\",\"cwd\":\"/tmp\"}");
     try expectDecodeFailure("{\"action\":\"exec\",\"command\":\"pwd\",\"profile\":\"clean\"}");
