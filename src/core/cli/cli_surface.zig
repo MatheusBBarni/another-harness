@@ -1269,6 +1269,7 @@ fn runNonInteractiveWithDeps(
             var snapshot = cfg.gateway_provider.credits.fetch(alloc, .{
                 .credential = startup.apiKey(),
                 .tenant = startup.gatewayTeam(),
+                .model = startup.selected_model,
             });
             defer snapshot.deinit(alloc);
             const text = try snapshot.render(alloc, opts.format);
@@ -5153,7 +5154,8 @@ const CreditsProviderProbe = struct {
         self.calls += 1;
         self.saw_expected_input =
             std.mem.eql(u8, input.credential orelse "", "test-key") and
-            std.mem.eql(u8, input.tenant orelse "", "team_123");
+            std.mem.eql(u8, input.tenant orelse "", "team_123") and
+            std.mem.eql(u8, input.model, "test-model");
         if (self.outcome == .failure) {
             return ownedCreditsErrorSnapshot(alloc, "gateway unavailable");
         }

@@ -840,8 +840,8 @@ fn reviewerUnavailableOutcome(call: ToolCall) command_admission.PermissionOutcom
     };
 }
 
-/// Maps every non-allow automatic review to one recoverable denial. Human
-/// approval is reserved for the orchestrator-derived recovery threshold.
+/// Maps every non-allow automatic review to one recoverable denial. A
+/// separately selected human-approval phase bypasses automatic review below.
 fn nonAllowAutoReviewOutcome(
     review: permission_auto_classifier.ParseOutcome,
 ) ?command_admission.PermissionOutcome {
@@ -2267,7 +2267,7 @@ pub fn runCommandContext(
     const cwd = switch (tool.captured_command_host) {
         .workspace_clean => try arena.dupe(u8, input.workspace_root),
         .native => blk: {
-            const cwd_arg = tool_args.optionalStringArg(args, "cwd") orelse ".";
+            const cwd_arg = tool_args.nullablePlaceholderStringArg(args, "cwd") orelse ".";
             break :blk if (std.mem.eql(u8, cwd_arg, "."))
                 try arena.dupe(u8, input.workspace_root)
             else
@@ -2277,7 +2277,7 @@ pub fn runCommandContext(
     const environment_value: command_environment.Environment = switch (tool.captured_command_host) {
         .workspace_clean => .workspace_clean,
         .native => blk: {
-            const profile_raw = tool_args.optionalStringArg(args, "profile");
+            const profile_raw = tool_args.nullablePlaceholderStringArg(args, "profile");
             const profile: ?command_environment.Profile = if (profile_raw) |raw|
                 std.meta.stringToEnum(command_environment.Profile, raw) orelse
                     return error.InvalidCommandProfile
@@ -5285,6 +5285,24 @@ test "configured command authority skips automatic review" {
     );
     try std.testing.expectEqual(@as(usize, 1), fake.calls);
     try std.testing.expectEqual(@as(usize, 0), recording.calls);
+
+    const compound = try requestPermissionOutcome(
+        input,
+        arena_state.allocator(),
+        .{
+            .id = "compound",
+            .name = "terminal",
+            .arguments_json = "{\"action\":\"exec\",\"command\":\"touch configured.txt && printf bypass\"}",
+        },
+        .auto,
+        &.{},
+    );
+    try std.testing.expectEqual(
+        command_admission.ShellAuthorizationSource.interactive_once,
+        compound.execution_authority.?.run_command.shell_allowed.source,
+    );
+    try std.testing.expectEqual(@as(usize, 1), fake.calls);
+    try std.testing.expectEqual(@as(usize, 1), recording.calls);
 }
 
 test "known reversible auto commands bypass the reviewer" {

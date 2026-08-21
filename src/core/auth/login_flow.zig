@@ -737,7 +737,7 @@ pub fn logout(
     var session: ?oauth_session.Session = null;
     var session_load_failed = false;
     defer if (session) |*loaded| loaded.deinit(alloc);
-    const delete_outcome = blk: {
+    const delete_result = blk: {
         var mutation = (oauth_session.beginExistingMutation() catch {
             return LogoutError.SessionDeleteFailed;
         }) orelse return .{ .session_deleted = grok_cleared };
@@ -746,12 +746,13 @@ pub fn logout(
             session_load_failed = true;
             break :load null;
         };
-        break :blk mutation.delete() catch return LogoutError.SessionDeleteFailed;
+        break :blk mutation.delete(alloc) catch oauth_session.DeleteResult{
+            .local_cleanup_failed = true,
+        };
     };
 
-    const local_durability_failed = delete_outcome == .deleted_not_durable;
-    var remote_revocation_failed = session_load_failed or local_durability_failed;
-    if (!local_durability_failed and session != null) {
+    var remote_revocation_failed = session_load_failed;
+    if (session != null) {
         const loaded = session.?;
         revokeLogoutSession(alloc, transport, loaded) catch {
             remote_revocation_failed = true;
@@ -759,8 +760,8 @@ pub fn logout(
     }
 
     return .{
-        .session_deleted = delete_outcome != .missing or grok_cleared,
-        .local_durability_failed = local_durability_failed,
+        .session_deleted = delete_result.session_deleted or grok_cleared,
+        .local_durability_failed = delete_result.local_cleanup_failed,
         .remote_revocation_failed = remote_revocation_failed,
     };
 }

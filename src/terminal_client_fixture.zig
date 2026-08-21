@@ -23,6 +23,7 @@ else
     std.heap.page_allocator;
 const fixture_owner_session_id = "terminal-fixture-owner";
 const fixture_profile_user = "terminal-fixture-profile";
+const protocol_fixture_profile_user = "terminal-fixture";
 const fixture_marker = "authority-reload-ready";
 const fixture_observation_timeout_ms = 120_000;
 
@@ -155,6 +156,15 @@ fn runFixture(
     alloc: Allocator,
     process_provider: background_process_provider.Provider,
 ) !void {
+    if (io_mod.getenv("FX_TERMINAL_CAPABILITY_FIXTURE")) |mode| {
+        if (std.mem.eql(u8, mode, "start")) {
+            return runCapabilityStartFixture(alloc, process_provider);
+        }
+        if (std.mem.eql(u8, mode, "force_close")) {
+            return runCapabilityForceCloseFixture(alloc, process_provider);
+        }
+        return error.InvalidTerminalCapabilityFixtureMode;
+    }
     if (io_mod.getenv("FX_TERMINAL_OUTCOME_FIXTURE")) |mode| {
         if (std.mem.eql(u8, mode, "ordering")) {
             return runOutcomeOrderingFixture(alloc, process_provider);
@@ -190,6 +200,51 @@ fn runFixture(
     try writeCompletionJson(alloc, completion);
 }
 
+fn runCapabilityStartFixture(
+    alloc: Allocator,
+    process_provider: background_process_provider.Provider,
+) !void {
+    const home = io_mod.getenv("HOME") orelse return error.HomeNotSet;
+    var runtime = client.Runtime.init(process_provider);
+    defer runtime.deinit();
+    const correlation_id = contracts.CorrelationId{ .value = 1 };
+    try runtime.admit(alloc, correlation_id, .{ .start = .{ .cwd = home } });
+    var completion = try awaitCompletionFor(&runtime, correlation_id);
+    defer completion.deinit();
+    try writeCompletionJson(alloc, completion);
+}
+
+fn runCapabilityForceCloseFixture(
+    alloc: Allocator,
+    process_provider: background_process_provider.Provider,
+) !void {
+    const home = io_mod.getenv("HOME") orelse return error.HomeNotSet;
+    const terminal_session_id = io_mod.getenv(
+        "FX_TERMINAL_AUTHORITY_SESSION_ID",
+    ) orelse return error.TerminalAuthorityFixtureSessionMissing;
+    var owner = try openFixtureOwnerCapability(alloc, home);
+    defer owner.deinit();
+    var loaded = try store.reloadAuthorityClaim(alloc, &owner, .{
+        .terminal_session_id = terminal_session_id,
+        .principal = authorityFixturePrincipal(home),
+        .actor = .agent,
+        .generation = .{ .value = 1 },
+    });
+    defer loaded.deinit();
+
+    var runtime = client.Runtime.init(process_provider);
+    defer runtime.deinit();
+    const correlation_id = contracts.CorrelationId{ .value = 1 };
+    try runtime.admit(alloc, correlation_id, .{ .close = .{
+        .session_id = terminal_session_id,
+        .policy = .force,
+        .authority = loaded.view(),
+    } });
+    var completion = try awaitCompletionFor(&runtime, correlation_id);
+    defer completion.deinit();
+    try writeCompletionJson(alloc, completion);
+}
+
 fn fixturePreparation(home: []const u8) operation.AuthorityPreparation {
     return .{
         .profile_user = fixture_profile_user,
@@ -217,6 +272,16 @@ fn fixturePrincipal(home: []const u8) contracts.Principal {
         .backend = input.backend,
         .lifetime = input.lifetime,
     };
+}
+
+fn authorityFixturePrincipal(home: []const u8) contracts.Principal {
+    var principal = fixturePrincipal(home);
+    if (io_mod.getenv("FX_TERMINAL_AUTHORITY_FIXTURE_COMPAT")) |value| {
+        if (std.mem.eql(u8, value, "1")) {
+            principal.profile_user = protocol_fixture_profile_user;
+        }
+    }
+    return principal;
 }
 
 fn runAuthorityStartFixture(
@@ -290,7 +355,7 @@ fn runAuthorityReloadFixture(
     defer owner.deinit();
     var loaded = try store.reloadAuthorityClaim(alloc, &owner, .{
         .terminal_session_id = terminal_session_id,
-        .principal = fixturePrincipal(home),
+        .principal = authorityFixturePrincipal(home),
         .actor = .agent,
         .generation = .{ .value = 1 },
     });
@@ -705,6 +770,12 @@ fn writeCompletionJson(alloc: Allocator, completion: client.Completion) !void {
     if (completion.incompatibility) |incompatibility| {
         try output.writer.writeAll(",\"incompatibility\":");
         try std.json.Stringify.value(incompatibility, .{}, &output.writer);
+    }
+    if (completion.missing_capabilities != 0) {
+        try output.writer.print(
+            ",\"missing_capabilities\":{d}",
+            .{completion.missing_capabilities},
+        );
     }
     if (completion.frame) |*frame| {
         switch (frame.message().payload) {

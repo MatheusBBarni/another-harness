@@ -19,6 +19,7 @@ from scripts.pgso.pipeline import (
     instrumentation_argv,
     instrumented_run_argv,
     instrumented_link_argv,
+    link_candidate,
     merge_profile_batch,
     parse_compiler_runtime,
     profile_use_argv,
@@ -245,6 +246,52 @@ class PgsoPipelineTests(unittest.TestCase):
                 "-lc",
             ),
             candidate,
+        )
+
+    def test_candidate_is_resigned_with_16k_pages_after_strip(self) -> None:
+        actions = self.root / "candidate-actions.txt"
+        artifact_tool = self.write_executable(
+            "artifact-tool",
+            """import pathlib,sys
+output = pathlib.Path(sys.argv[sys.argv.index('-o') + 1])
+output.parent.mkdir(parents=True, exist_ok=True)
+output.write_bytes(b'artifact')""",
+        )
+        strip = self.write_executable(
+            "strip-tool",
+            f"""import pathlib,sys
+with pathlib.Path({str(actions)!r}).open('a') as stream:
+    stream.write('strip ' + ' '.join(sys.argv[1:]) + '\\n')""",
+        )
+        codesign = self.write_executable(
+            "codesign-tool",
+            f"""import pathlib,sys
+with pathlib.Path({str(actions)!r}).open('a') as stream:
+    stream.write('codesign ' + ' '.join(sys.argv[1:]) + '\\n')""",
+        )
+        toolchain = dataclasses.replace(
+            self.toolchain,
+            zig=artifact_tool,
+            opt=artifact_tool,
+            llc=artifact_tool,
+            strip=strip,
+            codesign=codesign,
+        )
+        self.paths.profile_use_bitcode.write_bytes(b'profile-use bitcode')
+
+        link_candidate(
+            toolchain,
+            self.paths,
+            require_release_safe_evidence=False,
+        )
+
+        self.assertEqual(
+            [
+                f"strip -S -x {self.paths.candidate_binary}",
+                "codesign --force --sign - --options linker-signed "
+                f"--pagesize 16384 {self.paths.candidate_binary}",
+            ],
+            actions.read_text().splitlines(),
         )
 
     def test_bitcode_hash_must_match_the_original(self) -> None:

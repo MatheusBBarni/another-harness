@@ -751,6 +751,10 @@ describe("filesystem path handling", () => {
     async () => {
       const root = createIsolatedRoot();
       try {
+        writeFileSync(
+          join(root.home, ".fx", "settings.json"),
+          JSON.stringify({ sandbox: "none" }),
+        );
         const cases = [
           { id: "cwd_absolute", cwd: root.external, canonical: root.external },
           { id: "cwd_relative", cwd: "../external", canonical: root.external },

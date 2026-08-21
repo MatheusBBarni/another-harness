@@ -28,11 +28,13 @@ pub const protocol_capability_authority_generations: u64 = 1 << 0;
 pub const protocol_capability_screen_checkpoints: u64 = 1 << 1;
 pub const protocol_capability_tmux_recovery: u64 = 1 << 2;
 pub const protocol_capability_path_outside_workspace_error: u64 = 1 << 3;
+pub const protocol_capability_complete_process_tree_signals: u64 = 1 << 4;
 pub const known_protocol_capabilities: u64 =
     protocol_capability_authority_generations |
     protocol_capability_screen_checkpoints |
     protocol_capability_tmux_recovery |
-    protocol_capability_path_outside_workspace_error;
+    protocol_capability_path_outside_workspace_error |
+    protocol_capability_complete_process_tree_signals;
 
 pub const Action = enum {
     start,
@@ -729,6 +731,36 @@ pub const ActionRequest = union(enum) {
         }
     }
 };
+
+pub fn required_capabilities(request: ActionRequest) u64 {
+    var required = protocol_capability_authority_generations;
+    switch (request) {
+        .start => |start| {
+            required |= protocol_capability_complete_process_tree_signals;
+            if (start.backend == .tmux) {
+                required |= protocol_capability_tmux_recovery;
+            }
+        },
+        .signal => {
+            required |= protocol_capability_complete_process_tree_signals;
+        },
+        .close => |close| {
+            if (close.policy == .force) {
+                required |= protocol_capability_complete_process_tree_signals;
+            }
+        },
+        .read,
+        .screen,
+        .write,
+        .wait,
+        .monitor,
+        .inspect,
+        .list,
+        .resize,
+        => {},
+    }
+    return required;
+}
 
 fn validate_optional_authority_claim(claim: ?AuthorityClaim) error{
     InvalidPrincipal,
@@ -4141,6 +4173,111 @@ test "protocol negotiates current and previous revisions without destructive fal
             .required_capabilities = 1 << 63,
         }).validate(),
     );
+}
+
+test "protocol accepts complete process tree signal capability" {
+    const complete_process_tree_signals: u64 = 1 << 4;
+    try (ProtocolHello{
+        .range = local_protocol_range,
+        .capabilities = complete_process_tree_signals,
+        .required_capabilities = complete_process_tree_signals,
+    }).validate();
+}
+
+test "durable actions derive policy specific protocol capabilities" {
+    const authority = protocol_capability_authority_generations;
+    const complete_signals = protocol_capability_complete_process_tree_signals;
+    const tmux_recovery = protocol_capability_tmux_recovery;
+    const cases = [_]struct {
+        request: ActionRequest,
+        expected: u64,
+    }{
+        .{
+            .request = .{ .start = .{ .cwd = "/" } },
+            .expected = authority | complete_signals,
+        },
+        .{
+            .request = .{ .start = .{ .cwd = "/", .backend = .tmux } },
+            .expected = authority | complete_signals | tmux_recovery,
+        },
+        .{
+            .request = .{ .read = .{
+                .session_id = "terminal-a",
+                .cursor = .{ .segment = 1, .offset = 0 },
+            } },
+            .expected = authority,
+        },
+        .{
+            .request = .{ .screen = .{ .session_id = "terminal-a" } },
+            .expected = authority,
+        },
+        .{
+            .request = .{ .write = .{
+                .session_id = "terminal-a",
+                .lease = .acquire,
+            } },
+            .expected = authority,
+        },
+        .{
+            .request = .{ .wait = .{
+                .session_id = "terminal-a",
+                .return_when = .exit,
+                .safety_ceiling_ms = 1,
+            } },
+            .expected = authority,
+        },
+        .{
+            .request = .{ .monitor = .{
+                .session_id = "terminal-a",
+                .operation = .{ .pause = "monitor-a" },
+            } },
+            .expected = authority,
+        },
+        .{
+            .request = .{ .inspect = .{ .session_id = "terminal-a" } },
+            .expected = authority,
+        },
+        .{
+            .request = .{ .list = .{} },
+            .expected = authority,
+        },
+        .{
+            .request = .{ .resize = .{
+                .session_id = "terminal-a",
+                .dimensions = .{ .rows = 24, .columns = 80 },
+            } },
+            .expected = authority,
+        },
+        .{
+            .request = .{ .signal = .{
+                .session_id = "terminal-a",
+                .signal = .interrupt,
+            } },
+            .expected = authority | complete_signals,
+        },
+        .{
+            .request = .{ .close = .{
+                .session_id = "terminal-a",
+                .policy = .graceful,
+            } },
+            .expected = authority,
+        },
+        .{
+            .request = .{ .close = .{
+                .session_id = "terminal-a",
+                .policy = .force,
+            } },
+            .expected = authority | complete_signals,
+        },
+    };
+
+    for (cases) |case| {
+        try case.request.validate();
+        try std.testing.expectEqual(
+            case.expected,
+            required_capabilities(case.request),
+        );
+    }
 }
 
 test "hello envelopes bridge older incompatible ranges without admitting old actions" {

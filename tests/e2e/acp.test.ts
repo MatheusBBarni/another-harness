@@ -4291,87 +4291,51 @@ describe("acp: model-independent", () => {
   );
 
   test(
-    "ACP routes the post-threshold action through session/request_permission",
+    "ACP completes normally after automatic recovery exhaustion",
     async () => {
-      const cases = [
-        { suffix: "allow", optionId: "allow_once" as const, executes: true },
-        { suffix: "reject", optionId: "reject_once" as const, executes: false },
-      ];
-
-      for (const testCase of cases) {
-        const root = createIsolatedRoot(`fx-acp-auto-threshold-${testCase.suffix}-`);
-        const target = join(root.external, `threshold-${testCase.suffix}.txt`);
-        writeFileSync(target, "before");
-        const fourthCallId = `${testCase.suffix}_threshold_call_4`;
-        const postRejectCallId = "reject_after_human_denial";
-        const postDecisionResponses = testCase.executes
-          ? []
-          : [(body: string) => {
-            expect(acpToolResultText(body, fourthCallId)).toContain("user_denied");
-            return fileToolCall(
-              postRejectCallId,
-              target,
-              "ACP_THRESHOLD_REJECTED_RETRY",
-            );
-          }];
-        const gateway = startFakeGateway([
-          ...Array.from({ length: 4 }, (_, index) => (body: string) => {
-            if (index > 0) expect(body).toContain("auto_denied");
-            if (index === 3) {
-              expect(body).not.toContain('"tools":[]');
-              expect(body).not.toContain('"toolChoice":{"type":"none"}');
-            }
-            return fileToolCall(
-              index === 3 ? fourthCallId : `${testCase.suffix}_threshold_call_${index + 1}`,
-              target,
-              `ACP_THRESHOLD_${testCase.suffix.toUpperCase()}`,
-            );
-          }),
-          ...postDecisionResponses,
-          finalText(`ACP threshold ${testCase.suffix} complete`),
-        ], { classifierDecision: "ask" });
-
-        try {
-          client = await AcpClient.create({
-            cwd: root.workspace,
-            env: fakeGatewayEnv(root, gateway),
-          });
-          client.setPermissionOption(testCase.optionId);
-          await startCodeSession(client);
-          const result = await runPrompt(
-            client,
-            `Write the ACP threshold ${testCase.suffix} fixture.`,
-            TIMEOUT,
+      const root = createIsolatedRoot("fx-acp-auto-recovery-");
+      const target = join(root.external, "recovery.txt");
+      writeFileSync(target, "before");
+      const gateway = startFakeGateway(
+        Array.from({ length: 4 }, (_, index) => (body: string) => {
+          if (index > 0) expect(body).toContain("auto_denied");
+          return fileToolCall(
+            `recovery_call_${index + 1}`,
+            target,
+            "ACP_RECOVERY_MUST_NOT_RUN",
           );
+        }),
+        { classifierDecision: "ask" },
+      );
 
-          const permissions = result.messages.filter(
+      try {
+        client = await AcpClient.create({
+          cwd: root.workspace,
+          env: fakeGatewayEnv(root, gateway),
+        });
+        await startCodeSession(client);
+        const result = await runPrompt(
+          client,
+          "Write the ACP automatic recovery fixture.",
+          TIMEOUT,
+        );
+
+        expect(
+          result.messages.some(
             (message: any) => message.method === "session/request_permission",
-          );
-          expect(permissions).toHaveLength(1);
-          expect(permissions[0]!.params.toolCall.toolCallId).toBe(fourthCallId);
-          expect(gateway.classifierRequests).toHaveLength(testCase.executes ? 1 : 2);
-          expect(gateway.requests).toHaveLength(testCase.executes ? 5 : 6);
-          expect(existsSync(target)).toBe(true);
-          if (testCase.executes) {
-            expect(readFileSync(target, "utf8")).toBe("ACP_THRESHOLD_ALLOW");
-            expect(acpToolResultText(gateway.requests[4]!.body, fourthCallId)).not.toContain(
-              "tool_permission_denied",
-            );
-          } else {
-            expect(readFileSync(target, "utf8")).toBe("before");
-            expect(acpToolResultText(gateway.requests[4]!.body, fourthCallId)).toContain(
-              "user_denied",
-            );
-            expect(acpToolResultText(gateway.requests[5]!.body, postRejectCallId)).toContain(
-              "auto_denied",
-            );
-          }
-          expect(client.stderr).toBe("");
-        } finally {
-          await client?.close();
-          gateway.stop();
-          rmSync(root.root, { recursive: true, force: true });
-        }
+          ),
+        ).toBe(false);
+        expect(JSON.stringify(result.messages)).toContain(
+          "I couldn't continue because the required actions were blocked by automatic safety checks.",
+        );
+        expect(gateway.classifierRequests).toHaveLength(1);
+        expect(gateway.requests).toHaveLength(4);
+        expect(readFileSync(target, "utf8")).toBe("before");
+        expect(client.stderr).toBe("");
+      } finally {
+        await client?.close();
+        gateway.stop();
+        rmSync(root.root, { recursive: true, force: true });
       }
     },
     TIMEOUT,
@@ -4781,6 +4745,11 @@ describe("acp: model-independent", () => {
         expect(JSON.stringify(result.messages)).toContain("ACP needs one detail.");
         expect(JSON.stringify(result.messages)).toContain("ACP recovered normally.");
         expect(JSON.stringify(result.messages)).not.toContain("internal_error");
+        expect(
+          result.messages.some(
+            (message: any) => message.method === "session/request_permission",
+          ),
+        ).toBe(false);
         expect(gateway.requests).toHaveLength(2);
         expect(gateway.requests[1].body).toContain(`"toolCallId":"${malformedCallId}"`);
         expect(gateway.requests[1].body).toContain('"input":{}');

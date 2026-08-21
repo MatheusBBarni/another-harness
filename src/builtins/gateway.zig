@@ -28,6 +28,7 @@ const web_search_provider = @import("../core/tooling/web_search_provider.zig");
 const gateway_schema = @import("../core/tooling/gateway_schema.zig");
 const tool_advertisement = @import("../core/tooling/tool_advertisement.zig");
 const tool_dispatch = @import("../core/tooling/tool_dispatch.zig");
+const grok_billing = @import("../gateway/grok_billing.zig");
 const grok_route = @import("../gateway/grok_route.zig");
 const grok_stream = @import("../gateway/grok_stream.zig");
 const openai_compat = @import("../core/gateway/openai_compat.zig");
@@ -35,6 +36,7 @@ const sort_utils = @import("../core/shared/sort_utils.zig");
 
 const Allocator = std.mem.Allocator;
 const FetchGatewayGetResultFn = *const fn (Allocator, ?[]const u8, []const u8) anyerror!gateway_client.GetResult;
+const FetchGrokBillingFn = *const fn (Allocator, GrokBillingRequest) anyerror!gateway_client.GetResult;
 
 const Request = web_search_contract.ProviderRequest;
 const Response = web_search_contract.ProviderResponse;
@@ -44,6 +46,9 @@ pub const default_model = "zai/glm-5.2";
 pub const default_chat_url = "https://ai-gateway.vercel.sh/v3/ai/language-model";
 pub const models_path = "/coding-agent/v1/models";
 const credits_path = "/coding-agent/v1/credits";
+const grok_billing_credits_url = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
+const grok_client_mode = "cli";
+const grok_client_version = "1.0.4";
 pub const retry_count: usize = 3;
 pub const chat_url_env = "FX_GATEWAY_CHAT_URL";
 pub const default_model_catalog_base_url = "https://ai-gateway.vercel.sh";
@@ -490,6 +495,13 @@ fn streamAgentCompletion(
     };
 }
 
+const GrokBillingRequest = struct {
+    url: []const u8 = grok_billing_credits_url,
+    access_token: []const u8,
+    client_mode: []const u8,
+    client_version: []const u8,
+};
+
 fn fetchCredits(
     _: ?*anyopaque,
     alloc: Allocator,
@@ -497,9 +509,70 @@ fn fetchCredits(
 ) output_contracts.CreditsSnapshot {
     return fetchCreditsWithFetch(
         alloc,
-        input.credential,
-        input.tenant,
+        input,
         gateway_client.fetchGatewayGetResult,
+        fetchGrokBillingResult,
+    );
+}
+
+fn fetchGrokBillingResult(
+    alloc: Allocator,
+    request: GrokBillingRequest,
+) anyerror!gateway_client.GetResult {
+    var client: std.http.Client = .{ .allocator = alloc, .io = io_mod.getIo() };
+    defer client.deinit();
+
+    const auth_header = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.access_token});
+    defer secret.zeroAndFree(alloc, auth_header);
+
+    const extra_headers = [_]std.http.Header{
+        .{ .name = "x-grok-client-mode", .value = request.client_mode },
+        .{ .name = "x-grok-client-version", .value = request.client_version },
+    };
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+
+    const result = try client.fetch(.{
+        .location = .{ .url = request.url },
+        .method = .GET,
+        .headers = .{
+            .authorization = .{ .override = auth_header },
+            .user_agent = .{ .override = "fx-grok" },
+            .accept_encoding = .omit,
+        },
+        .extra_headers = &extra_headers,
+        .response_writer = &out.writer,
+    });
+
+    return .{
+        .status = result.status,
+        .body = try out.toOwnedSlice(),
+    };
+}
+
+fn unusedGrokBillingFetch(
+    _: Allocator,
+    _: GrokBillingRequest,
+) anyerror!gateway_client.GetResult {
+    return error.UnexpectedGrokBillingFetch;
+}
+
+fn fetchCreditsWithGatewayFetch(
+    alloc: Allocator,
+    api_key: ?[]const u8,
+    gateway_team: ?[]const u8,
+    fetch_fn: FetchGatewayGetResultFn,
+) output_contracts.CreditsSnapshot {
+    return fetchCreditsWithFetch(
+        alloc,
+        .{
+            .credential = api_key,
+            .tenant = gateway_team,
+            .model = "",
+        },
+        fetch_fn,
+        unusedGrokBillingFetch,
     );
 }
 
@@ -510,13 +583,42 @@ fn fetchCredits(
 /// team here, so the query value is added for logins only.
 fn fetchCreditsWithFetch(
     alloc: Allocator,
-    api_key: ?[]const u8,
-    gateway_team: ?[]const u8,
-    fetch_fn: FetchGatewayGetResultFn,
+    input: gateway_provider.CreditsLookupInput,
+    gateway_fetch: FetchGatewayGetResultFn,
+    grok_fetch: FetchGrokBillingFn,
 ) output_contracts.CreditsSnapshot {
+    if (grok_route.forModel(input.model) != null) {
+        const grok_credential = input.credential orelse "";
+        if (grok_credential.len == 0) {
+            return grokCreditsErrorSnapshot(alloc, "Run fx login grok.");
+        }
+        var result = grok_fetch(alloc, .{
+            .access_token = grok_credential,
+            .client_mode = grok_client_mode,
+            .client_version = grok_client_version,
+        }) catch {
+            return grokBillingErrorSnapshot(alloc);
+        };
+        defer result.deinit(alloc);
+        if (result.status == .unauthorized or result.status == .forbidden) {
+            const message = grok_billing.renderBillingHttpError(
+                alloc,
+                @intFromEnum(result.status),
+                result.body,
+            ) catch {
+                return grokBillingErrorSnapshot(alloc);
+            };
+            return .{ .origin = .grok, .err_message = message };
+        }
+        if (result.status != .ok) {
+            return grokBillingErrorSnapshot(alloc);
+        }
+        return grokCreditsSnapshotFromBody(alloc, result.body);
+    }
+
     var team_path: ?[]u8 = null;
     defer if (team_path) |path| alloc.free(path);
-    if (gateway_team) |team| {
+    if (input.tenant) |team| {
         if (shared_types.validGatewayTeam(team)) {
             team_path = std.fmt.allocPrint(alloc, "{s}?teamId={s}", .{ credits_path, team }) catch {
                 return creditsErrorSnapshot(alloc, "failed to fetch credits from gateway");
@@ -526,7 +628,7 @@ fn fetchCreditsWithFetch(
         }
     }
 
-    var result = fetch_fn(alloc, api_key, team_path orelse credits_path) catch {
+    var result = gateway_fetch(alloc, input.credential, team_path orelse credits_path) catch {
         return creditsErrorSnapshot(alloc, "failed to fetch credits from gateway");
     };
     defer result.deinit(alloc);
@@ -546,6 +648,54 @@ fn fetchCreditsWithFetch(
     return creditsSnapshotFromJsonValue(alloc, parsed.value) catch {
         return creditsErrorSnapshot(alloc, "invalid JSON response from gateway");
     };
+}
+
+fn grokBillingErrorSnapshot(alloc: Allocator) output_contracts.CreditsSnapshot {
+    return grokCreditsErrorSnapshot(alloc, "failed to fetch grok billing");
+}
+
+fn grokCreditsErrorSnapshot(alloc: Allocator, message: []const u8) output_contracts.CreditsSnapshot {
+    return .{
+        .origin = .grok,
+        .err_message = alloc.dupe(u8, message) catch null,
+    };
+}
+
+fn grokCreditsSnapshotFromBody(alloc: Allocator, body: []const u8) output_contracts.CreditsSnapshot {
+    var billing = grok_billing.parseBilling(alloc, body) catch {
+        return grokBillingErrorSnapshot(alloc);
+    };
+    defer billing.deinit(alloc);
+    return grokCreditsSnapshot(alloc, billing) catch {
+        return grokBillingErrorSnapshot(alloc);
+    };
+}
+
+fn grokCreditsSnapshot(
+    alloc: Allocator,
+    billing: grok_billing.Snapshot,
+) !output_contracts.CreditsSnapshot {
+    var snapshot = output_contracts.CreditsSnapshot{
+        .origin = .grok,
+        .percent = billing.percent,
+        .prepaid_cents = billing.prepaid_cents,
+    };
+    errdefer snapshot.deinit(alloc);
+
+    snapshot.plan = try alloc.dupe(u8, billing.plan);
+    snapshot.used = try std.fmt.allocPrint(
+        alloc,
+        "{d}% {s}",
+        .{ billing.percent, grok_billing.periodLabel(billing.period) },
+    );
+    snapshot.period = try alloc.dupe(u8, grok_billing.periodLabel(billing.period));
+    if (billing.reset_at) |reset_at| {
+        snapshot.reset_at = try alloc.dupe(u8, reset_at);
+    }
+    if (billing.prepaid_cents) |cents| {
+        snapshot.balance = try grok_billing.formatPrepaidDollars(alloc, cents);
+    }
+    return snapshot;
 }
 
 fn creditsSnapshotFromJsonValue(
@@ -1699,6 +1849,19 @@ fn stubFetchCreditsObject(
 
 var captured_credits_path: [256]u8 = undefined;
 var captured_credits_path_len: usize = 0;
+var xai_credits_gateway_calls: usize = 0;
+var xai_credits_grok_calls: usize = 0;
+var xai_credits_url_buf: [128]u8 = undefined;
+var xai_credits_url_len: usize = 0;
+var xai_credits_auth_buf: [128]u8 = undefined;
+var xai_credits_auth_len: usize = 0;
+var xai_credits_mode_buf: [16]u8 = undefined;
+var xai_credits_mode_len: usize = 0;
+var xai_credits_version_buf: [16]u8 = undefined;
+var xai_credits_version_len: usize = 0;
+var grok_billing_http_status: std.http.Status = .ok;
+const grok_billing_leaked_token = "sk-secret-token-value";
+const grok_billing_ok_json = "{\"config\":{\"currentPeriod\":{\"type\":\"USAGE_PERIOD_TYPE_WEEKLY\",\"end\":\"2026-08-24T17:33:48.278812+00:00\"},\"creditUsagePercent\":12.4,\"prepaidBalance\":{\"val\":250}},\"subscription_tier\":\"SuperGrok\"}";
 
 fn stubCaptureCreditsPath(
     alloc: Allocator,
@@ -1737,7 +1900,7 @@ test "built-in credits provider names the team query only when valid" {
     };
     for (cases) |case| {
         captured_credits_path_len = 0;
-        var snapshot = fetchCreditsWithFetch(
+        var snapshot = fetchCreditsWithGatewayFetch(
             std.testing.allocator,
             null,
             case.team,
@@ -1752,7 +1915,7 @@ test "built-in credits provider names the team query only when valid" {
 }
 
 test "built-in credits provider maps fetch failure" {
-    var snapshot = fetchCreditsWithFetch(
+    var snapshot = fetchCreditsWithGatewayFetch(
         std.testing.allocator,
         null,
         null,
@@ -1770,7 +1933,7 @@ test "built-in credits provider maps fetch failure" {
 }
 
 test "built-in credits provider maps Gateway HTTP denial" {
-    var snapshot = fetchCreditsWithFetch(
+    var snapshot = fetchCreditsWithGatewayFetch(
         std.testing.allocator,
         null,
         null,
@@ -1788,7 +1951,7 @@ test "built-in credits provider maps Gateway HTTP denial" {
 }
 
 test "built-in credits provider rejects malformed JSON" {
-    var snapshot = fetchCreditsWithFetch(
+    var snapshot = fetchCreditsWithGatewayFetch(
         std.testing.allocator,
         null,
         null,
@@ -1818,7 +1981,7 @@ test "built-in credits provider rejects non-object JSON" {
 }
 
 test "built-in credits provider returns owned string fields" {
-    var snapshot = fetchCreditsWithFetch(
+    var snapshot = fetchCreditsWithGatewayFetch(
         std.testing.allocator,
         null,
         null,
@@ -1856,6 +2019,349 @@ test "built-in credits provider ignores non-string fields" {
     try std.testing.expect(snapshot.balance == null);
     try std.testing.expect(snapshot.used == null);
     try std.testing.expect(snapshot.plan == null);
+}
+
+test "built-in credits provider sends xai models to grok billing not gateway" {
+    xai_credits_gateway_calls = 0;
+    xai_credits_grok_calls = 0;
+    xai_credits_url_len = 0;
+    xai_credits_auth_len = 0;
+    xai_credits_mode_len = 0;
+    xai_credits_version_len = 0;
+
+    const gatewayFetch = struct {
+        fn fetch(
+            alloc: Allocator,
+            _: ?[]const u8,
+            _: []const u8,
+        ) anyerror!gateway_client.GetResult {
+            _ = alloc;
+            xai_credits_gateway_calls += 1;
+            return error.UnexpectedGatewayCreditsFetch;
+        }
+    }.fetch;
+
+    const grokFetch = struct {
+        fn fetch(
+            alloc: Allocator,
+            request: GrokBillingRequest,
+        ) anyerror!gateway_client.GetResult {
+            xai_credits_grok_calls += 1;
+            xai_credits_url_len = @min(request.url.len, xai_credits_url_buf.len);
+            @memcpy(xai_credits_url_buf[0..xai_credits_url_len], request.url[0..xai_credits_url_len]);
+            const authorization = try std.fmt.allocPrint(alloc, "Bearer {s}", .{request.access_token});
+            defer alloc.free(authorization);
+            xai_credits_auth_len = @min(authorization.len, xai_credits_auth_buf.len);
+            @memcpy(xai_credits_auth_buf[0..xai_credits_auth_len], authorization[0..xai_credits_auth_len]);
+            xai_credits_mode_len = @min(request.client_mode.len, xai_credits_mode_buf.len);
+            @memcpy(xai_credits_mode_buf[0..xai_credits_mode_len], request.client_mode[0..xai_credits_mode_len]);
+            xai_credits_version_len = @min(request.client_version.len, xai_credits_version_buf.len);
+            @memcpy(
+                xai_credits_version_buf[0..xai_credits_version_len],
+                request.client_version[0..xai_credits_version_len],
+            );
+            return .{
+                .status = .ok,
+                .body = try alloc.dupe(u8, "{\"config\":{\"creditUsagePercent\":12},\"subscription_tier\":\"SuperGrok\"}"),
+            };
+        }
+    }.fetch;
+
+    var snapshot = fetchCreditsWithFetch(
+        std.testing.allocator,
+        .{
+            .credential = "grok-access-token",
+            .tenant = "team_123",
+            .model = "xai/grok-4.6",
+        },
+        gatewayFetch,
+        grokFetch,
+    );
+    defer snapshot.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), xai_credits_gateway_calls);
+    try std.testing.expectEqual(@as(usize, 1), xai_credits_grok_calls);
+    try std.testing.expectEqualStrings(
+        "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+        xai_credits_url_buf[0..xai_credits_url_len],
+    );
+    try std.testing.expectEqualStrings("Bearer grok-access-token", xai_credits_auth_buf[0..xai_credits_auth_len]);
+    try std.testing.expectEqualStrings("cli", xai_credits_mode_buf[0..xai_credits_mode_len]);
+    try std.testing.expectEqualStrings("1.0.4", xai_credits_version_buf[0..xai_credits_version_len]);
+}
+
+test "built-in credits provider keeps non-xai models on gateway" {
+    xai_credits_gateway_calls = 0;
+    xai_credits_grok_calls = 0;
+    captured_credits_path_len = 0;
+
+    const gatewayFetch = struct {
+        fn fetch(
+            alloc: Allocator,
+            _: ?[]const u8,
+            path: []const u8,
+        ) anyerror!gateway_client.GetResult {
+            xai_credits_gateway_calls += 1;
+            captured_credits_path_len = @min(path.len, captured_credits_path.len);
+            @memcpy(
+                captured_credits_path[0..captured_credits_path_len],
+                path[0..captured_credits_path_len],
+            );
+            return .{
+                .status = .ok,
+                .body = try alloc.dupe(u8, "{\"balance\":\"10\",\"used\":\"2\",\"plan\":\"pro\"}"),
+            };
+        }
+    }.fetch;
+
+    const grokFetch = struct {
+        fn fetch(
+            alloc: Allocator,
+            _: GrokBillingRequest,
+        ) anyerror!gateway_client.GetResult {
+            _ = alloc;
+            xai_credits_grok_calls += 1;
+            return error.UnexpectedGrokBillingFetch;
+        }
+    }.fetch;
+
+    var snapshot = fetchCreditsWithFetch(
+        std.testing.allocator,
+        .{
+            .credential = "gateway-token",
+            .tenant = null,
+            .model = "zai/glm-5.2",
+        },
+        gatewayFetch,
+        grokFetch,
+    );
+    defer snapshot.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), xai_credits_gateway_calls);
+    try std.testing.expectEqual(@as(usize, 0), xai_credits_grok_calls);
+    try std.testing.expectEqualStrings(
+        "/coding-agent/v1/credits",
+        captured_credits_path[0..captured_credits_path_len],
+    );
+}
+
+test "built-in credits provider hides grok billing token on 401 and 403" {
+    const cases = [_]std.http.Status{ .unauthorized, .forbidden };
+    for (cases) |status| {
+        xai_credits_gateway_calls = 0;
+        xai_credits_grok_calls = 0;
+        grok_billing_http_status = status;
+
+        const gatewayFetch = struct {
+            fn fetch(
+                alloc: Allocator,
+                _: ?[]const u8,
+                _: []const u8,
+            ) anyerror!gateway_client.GetResult {
+                _ = alloc;
+                xai_credits_gateway_calls += 1;
+                return error.UnexpectedGatewayCreditsFetch;
+            }
+        }.fetch;
+
+        const grokFetch = struct {
+            fn fetch(
+                alloc: Allocator,
+                _: GrokBillingRequest,
+            ) anyerror!gateway_client.GetResult {
+                xai_credits_grok_calls += 1;
+                return .{
+                    .status = grok_billing_http_status,
+                    .body = try alloc.dupe(u8, grok_billing_leaked_token),
+                };
+            }
+        }.fetch;
+
+        var snapshot = fetchCreditsWithFetch(
+            std.testing.allocator,
+            .{
+                .credential = grok_billing_leaked_token,
+                .tenant = null,
+                .model = "xai/grok-4.6",
+            },
+            gatewayFetch,
+            grokFetch,
+        );
+        defer snapshot.deinit(std.testing.allocator);
+
+        try std.testing.expectEqual(@as(usize, 0), xai_credits_gateway_calls);
+        try std.testing.expectEqual(@as(usize, 1), xai_credits_grok_calls);
+        try std.testing.expectEqual(output_contracts.CreditsSnapshot.Origin.grok, snapshot.origin);
+        try std.testing.expect(snapshot.err_message != null);
+        try std.testing.expect(std.mem.find(u8, snapshot.err_message.?, "fx login grok") != null);
+        try std.testing.expect(std.mem.find(u8, snapshot.err_message.?, grok_billing_leaked_token) == null);
+    }
+}
+
+test "built-in credits provider maps grok transport and non-401 http to grok billing error" {
+    const cases = [_]?std.http.Status{ null, .internal_server_error };
+    for (cases) |status| {
+        xai_credits_gateway_calls = 0;
+        xai_credits_grok_calls = 0;
+        grok_billing_http_status = status orelse .ok;
+
+        const gatewayFetch = struct {
+            fn fetch(
+                alloc: Allocator,
+                _: ?[]const u8,
+                _: []const u8,
+            ) anyerror!gateway_client.GetResult {
+                _ = alloc;
+                xai_credits_gateway_calls += 1;
+                return error.UnexpectedGatewayCreditsFetch;
+            }
+        }.fetch;
+
+        const grokFetch = struct {
+            fn fetch(
+                alloc: Allocator,
+                _: GrokBillingRequest,
+            ) anyerror!gateway_client.GetResult {
+                xai_credits_grok_calls += 1;
+                if (grok_billing_http_status == .ok) return error.UnexpectedGrokBillingFetch;
+                return .{
+                    .status = grok_billing_http_status,
+                    .body = try alloc.dupe(u8, grok_billing_leaked_token),
+                };
+            }
+        }.fetch;
+
+        var snapshot = fetchCreditsWithFetch(
+            std.testing.allocator,
+            .{
+                .credential = grok_billing_leaked_token,
+                .tenant = null,
+                .model = "xai/grok-4.6",
+            },
+            gatewayFetch,
+            grokFetch,
+        );
+        defer snapshot.deinit(std.testing.allocator);
+
+        try std.testing.expectEqual(@as(usize, 0), xai_credits_gateway_calls);
+        try std.testing.expectEqual(@as(usize, 1), xai_credits_grok_calls);
+        try std.testing.expectEqual(output_contracts.CreditsSnapshot.Origin.grok, snapshot.origin);
+        try std.testing.expect(snapshot.err_message != null);
+        try std.testing.expect(std.mem.find(u8, snapshot.err_message.?, "grok billing") != null);
+        try std.testing.expect(std.mem.find(u8, snapshot.err_message.?, "no data returned by gateway") == null);
+        try std.testing.expect(std.mem.find(u8, snapshot.err_message.?, grok_billing_leaked_token) == null);
+
+        const text = try snapshot.renderText(std.testing.allocator);
+        defer std.testing.allocator.free(text);
+        try std.testing.expect(std.mem.find(u8, text, "grok billing") != null);
+        try std.testing.expect(std.mem.find(u8, text, "no data returned by gateway") == null);
+        try std.testing.expect(std.mem.find(u8, text, grok_billing_leaked_token) == null);
+    }
+}
+
+test "built-in credits provider renders grok snapshot with percent" {
+    xai_credits_gateway_calls = 0;
+    xai_credits_grok_calls = 0;
+
+    const gatewayFetch = struct {
+        fn fetch(
+            alloc: Allocator,
+            _: ?[]const u8,
+            _: []const u8,
+        ) anyerror!gateway_client.GetResult {
+            _ = alloc;
+            xai_credits_gateway_calls += 1;
+            return error.UnexpectedGatewayCreditsFetch;
+        }
+    }.fetch;
+
+    const grokFetch = struct {
+        fn fetch(
+            alloc: Allocator,
+            _: GrokBillingRequest,
+        ) anyerror!gateway_client.GetResult {
+            xai_credits_grok_calls += 1;
+            return .{
+                .status = .ok,
+                .body = try alloc.dupe(u8, grok_billing_ok_json),
+            };
+        }
+    }.fetch;
+
+    var snapshot = fetchCreditsWithFetch(
+        std.testing.allocator,
+        .{
+            .credential = "grok-access-token",
+            .tenant = null,
+            .model = "xai/grok-4.6",
+        },
+        gatewayFetch,
+        grokFetch,
+    );
+    defer snapshot.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), xai_credits_gateway_calls);
+    try std.testing.expectEqual(@as(usize, 1), xai_credits_grok_calls);
+    try std.testing.expectEqual(output_contracts.CreditsSnapshot.Origin.grok, snapshot.origin);
+    try std.testing.expectEqual(@as(u8, 12), snapshot.percent.?);
+
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(
+        "[credits] plan=SuperGrok\n[credits] used=12% weekly\n[credits] balance=$2.50\n",
+        text,
+    );
+
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.find(u8, json, "\"origin\":\"grok\"") != null);
+    try std.testing.expect(std.mem.find(u8, json, "\"percent\":12") != null);
+}
+
+test "built-in credits provider skips http when xai model has no key" {
+    xai_credits_gateway_calls = 0;
+    xai_credits_grok_calls = 0;
+
+    const gatewayFetch = struct {
+        fn fetch(
+            alloc: Allocator,
+            _: ?[]const u8,
+            _: []const u8,
+        ) anyerror!gateway_client.GetResult {
+            _ = alloc;
+            xai_credits_gateway_calls += 1;
+            return error.UnexpectedGatewayCreditsFetch;
+        }
+    }.fetch;
+
+    const grokFetch = struct {
+        fn fetch(
+            alloc: Allocator,
+            _: GrokBillingRequest,
+        ) anyerror!gateway_client.GetResult {
+            _ = alloc;
+            xai_credits_grok_calls += 1;
+            return error.UnexpectedGrokBillingFetch;
+        }
+    }.fetch;
+
+    var snapshot = fetchCreditsWithFetch(
+        std.testing.allocator,
+        .{
+            .credential = null,
+            .tenant = null,
+            .model = "xai/grok-4.6",
+        },
+        gatewayFetch,
+        grokFetch,
+    );
+    defer snapshot.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), xai_credits_gateway_calls);
+    try std.testing.expectEqual(@as(usize, 0), xai_credits_grok_calls);
+    try std.testing.expect(snapshot.err_message != null);
+    try std.testing.expect(std.mem.find(u8, snapshot.err_message.?, "fx login grok") != null);
+    try std.testing.expect(std.mem.find(u8, snapshot.err_message.?, "HTTP") == null);
 }
 
 test "built-in model catalog owns default and loopback target resolution" {

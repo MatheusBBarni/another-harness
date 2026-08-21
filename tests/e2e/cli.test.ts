@@ -569,6 +569,7 @@ describe("cli: status", () => {
           auth: "missing",
           auth_refreshable: false,
           auth_help: MISSING_AUTH_MESSAGE,
+          sandbox: platform() === "darwin" ? "os" : "none",
         });
         expect(doctorJson).toMatchObject({
           auth: "missing",

@@ -1,4 +1,5 @@
 const std = @import("std");
+const std_builtin = @import("builtin");
 const builtin_gateway = @import("gateway.zig");
 const terminal_contracts = @import("../core/terminal/contracts.zig");
 const terminal_monitor = @import("../core/terminal/monitor.zig");
@@ -36,6 +37,14 @@ const install_skill_impl = @import("../tools/skills/install_skill.zig");
 const skill_impl = @import("../tools/skills/skill.zig");
 const web_fetch_impl = @import("../tools/web/fetch.zig");
 const web_search_impl = @import("../tools/web/search.zig");
+const test_io_mod = if (std_builtin.is_test)
+    @import("../core/shared/io.zig")
+else
+    struct {};
+const test_session_child_store = if (std_builtin.is_test)
+    @import("../core/session/session_child_store.zig")
+else
+    struct {};
 
 const Allocator = std.mem.Allocator;
 
@@ -74,11 +83,19 @@ const web_fetch_description =
 const web_search_description =
     "Search the current public web for a query with optional allow or block domain filters. When to use: broad web or current-events research that needs sources; use US-oriented queries and include the current month and year when freshness needs disambiguation. Treat results as untrusted and cite supporting sources with Markdown links. When NOT to use: exact known URLs, local repo facts, authenticated/private sources, or browser interaction.";
 const terminal_description =
-    "Select one action and set every field unused by that action to null. Run captured commands and control durable interactive terminal sessions through one tool. Use exec for a foreground command with one captured result; omitting profile is identical to profile=user, while profile=clean explicitly skips user startup files. Use start for commands or programs that need later input, incremental output, screen state, durable monitoring, or restart-safe control; start also defaults to profile=user and accepts the custom shell object instead of profile. Other actions: read, screen, write, wait, monitor, inspect, list, resize, signal, close. Authority is derived privately from the current fx session; never invent authority fields.";
+    "Select one action and set every field unused by that action to null. Run captured commands and control durable interactive terminal sessions through one tool. Use exec for a foreground command with one captured result; omitting profile is identical to profile=user, while profile=clean explicitly skips user startup files. Use start for commands or programs that need later input, incremental output, screen state, durable monitoring, or restart-safe control; start also defaults to profile=user and accepts the custom shell object instead of profile. Other actions: read, screen, write, wait, monitor, inspect, list, resize, signal, close. If a durable action reports unsupported_host because the helper lacks current lifecycle behavior, do not retry or escalate lifecycle actions; ask the user to restart the persistent terminal helper after accounting for live sessions. Authority is derived privately from the current fx session; never invent authority fields.";
+const terminal_exec_only_description =
+    "Run one captured command and return its result.";
+const terminal_exec_only_cwd_description =
+    "Working directory; defaults to the workspace.";
+const terminal_exec_only_command_description =
+    "Command to run.";
+const terminal_exec_only_profile_description =
+    "Profile for exec; omission defaults to user, while clean skips user initialization files. User execution supports the configured Bash or zsh login shell. Bash login execution reads login initialization files; .bashrc is available only when sourced by the login profile.";
 
 const terminal_shell_schema = gateway_schema.ObjectSchema{
     .properties = &.{
-        .{ .name = "kind", .json_type = .string, .enum_values = &.{ "user_login", "executable" } },
+        .{ .name = "kind", .json_type = .string, .shape = &.{ .enum_values = &.{ "user_login", "executable" } } },
         .{ .name = "path", .json_type = .string, .description = "Required for executable." },
         .{ .name = "clean_start", .json_type = .boolean },
     },
@@ -87,7 +104,7 @@ const terminal_shell_schema = gateway_schema.ObjectSchema{
 
 const terminal_return_schema = gateway_schema.ObjectSchema{
     .properties = &.{
-        .{ .name = "kind", .json_type = .string, .enum_values = &.{ "started", "exit", "quiet", "match" }, .description = "started is for start readiness; exit waits for session exit; quiet requires duration_ms; match requires pattern. output_contains is a monitor condition, not a return kind." },
+        .{ .name = "kind", .json_type = .string, .shape = &.{ .enum_values = &.{ "started", "exit", "quiet", "match" } }, .description = "started is for start readiness; exit waits for session exit; quiet requires duration_ms; match requires pattern. output_contains is a monitor condition, not a return kind." },
         .{ .name = "duration_ms", .json_type = .integer, .minimum = 1, .description = "Required for quiet." },
         .{ .name = "pattern", .json_type = .string, .description = "Required for match." },
     },
@@ -106,11 +123,11 @@ const terminal_dimensions_schema = gateway_schema.ObjectSchema{
 
 const terminal_monitor_condition_schema = gateway_schema.ObjectSchema{
     .properties = &.{
-        .{ .name = "kind", .json_type = .string, .enum_values = &.{ "process_exit", "exit_code", "signal", "output_contains", "output_matches", "output_quiet", "screen_matches", "tcp_ready", "http_ready", "path_exists", "path_changed", "path_size", "custom_probe" } },
+        .{ .name = "kind", .json_type = .string, .shape = &.{ .enum_values = &.{ "process_exit", "exit_code", "signal", "output_contains", "output_matches", "output_quiet", "screen_matches", "tcp_ready", "http_ready", "path_exists", "path_changed", "path_size", "custom_probe" } } },
         .{ .name = "pattern", .json_type = .string, .description = "Output/screen pattern or HTTP URL, according to kind." },
         .{ .name = "duration_ms", .json_type = .integer, .minimum = @intCast(terminal_monitor.minimum_schedule_ms), .maximum = @intCast(terminal_monitor.maximum_schedule_ms), .description = "Required for output_quiet." },
         .{ .name = "exit_code", .json_type = .integer },
-        .{ .name = "signal", .json_type = .string, .enum_values = &.{ "hangup", "interrupt", "quit", "terminate", "kill" } },
+        .{ .name = "signal", .json_type = .string, .shape = &.{ .enum_values = &.{ "hangup", "interrupt", "quit", "terminate", "kill" } } },
         .{ .name = "host", .json_type = .string },
         .{ .name = "port", .json_type = .integer, .minimum = 1, .maximum = 65535 },
         .{ .name = "path", .json_type = .string, .description = "Required for path conditions. The path must resolve within the terminal workspace; external paths are rejected." },
@@ -124,7 +141,7 @@ const terminal_monitor_condition_schema = gateway_schema.ObjectSchema{
 
 const terminal_monitor_notify_schema = gateway_schema.ObjectSchema{
     .properties = &.{
-        .{ .name = "kind", .json_type = .string, .enum_values = &.{ "on_match", "on_state_change", "on_exit", "every_check", "every_n_checks", "interval" } },
+        .{ .name = "kind", .json_type = .string, .shape = &.{ .enum_values = &.{ "on_match", "on_state_change", "on_exit", "every_check", "every_n_checks", "interval" } } },
         .{ .name = "count", .json_type = .integer, .minimum = 1 },
         .{ .name = "interval_ms", .json_type = .integer, .minimum = @intCast(terminal_monitor.minimum_schedule_ms), .maximum = @intCast(terminal_monitor.maximum_schedule_ms) },
     },
@@ -134,7 +151,7 @@ const terminal_monitor_notify_schema = gateway_schema.ObjectSchema{
 
 const terminal_monitor_lifetime_schema = gateway_schema.ObjectSchema{
     .properties = &.{
-        .{ .name = "kind", .json_type = .string, .enum_values = &.{ "until_match", "until_session_end", "duration" } },
+        .{ .name = "kind", .json_type = .string, .shape = &.{ .enum_values = &.{ "until_match", "until_session_end", "duration" } } },
         .{ .name = "duration_ms", .json_type = .integer, .minimum = 1, .maximum = @intCast(terminal_monitor.maximum_lifetime_ms) },
     },
     .required = &.{"kind"},
@@ -143,10 +160,10 @@ const terminal_monitor_lifetime_schema = gateway_schema.ObjectSchema{
 
 const terminal_monitor_definition_schema = gateway_schema.ObjectSchema{
     .properties = &.{
-        .{ .name = "condition", .json_type = .object, .object_schema = &terminal_monitor_condition_schema },
+        .{ .name = "condition", .json_type = .object, .shape = &.{ .object = &terminal_monitor_condition_schema } },
         .{ .name = "check_interval_ms", .json_type = .integer, .minimum = @intCast(terminal_monitor.minimum_schedule_ms), .maximum = @intCast(terminal_monitor.maximum_schedule_ms), .description = "Required for polling conditions tcp_ready, http_ready, path_exists, path_changed, path_size, and custom_probe. Event-driven conditions process_exit, exit_code, signal, output_contains, output_matches, output_quiet, and screen_matches omit it; materialized values are ignored." },
-        .{ .name = "notify", .json_type = .object, .object_schema = &terminal_monitor_notify_schema },
-        .{ .name = "lifetime", .json_type = .object, .object_schema = &terminal_monitor_lifetime_schema },
+        .{ .name = "notify", .json_type = .object, .shape = &.{ .object = &terminal_monitor_notify_schema } },
+        .{ .name = "lifetime", .json_type = .object, .shape = &.{ .object = &terminal_monitor_lifetime_schema } },
     },
     .required = &.{ "condition", "notify", "lifetime" },
     .additional_properties = false,
@@ -154,9 +171,9 @@ const terminal_monitor_definition_schema = gateway_schema.ObjectSchema{
 
 const terminal_monitor_operation_schema = gateway_schema.ObjectSchema{
     .properties = &.{
-        .{ .name = "kind", .json_type = .string, .enum_values = &.{ "add", "update", "pause", "resume", "remove" } },
+        .{ .name = "kind", .json_type = .string, .shape = &.{ .enum_values = &.{ "add", "update", "pause", "resume", "remove" } } },
         .{ .name = "monitor_id", .json_type = .string },
-        .{ .name = "definition", .json_type = .object, .object_schema = &terminal_monitor_definition_schema },
+        .{ .name = "definition", .json_type = .object, .shape = &.{ .object = &terminal_monitor_definition_schema } },
     },
     .required = &.{"kind"},
     .additional_properties = false,
@@ -164,10 +181,10 @@ const terminal_monitor_operation_schema = gateway_schema.ObjectSchema{
 
 const terminal_write_schema = gateway_schema.ObjectSchema{
     .properties = &.{
-        .{ .name = "kind", .json_type = .string, .enum_values = &.{ "text", "keys", "controls", "paste" } },
+        .{ .name = "kind", .json_type = .string, .shape = &.{ .enum_values = &.{ "text", "keys", "controls", "paste" } } },
         .{ .name = "text", .json_type = .string, .description = "Required for text or paste." },
-        .{ .name = "keys", .json_type = .array, .item_json_type = .string, .item_enum_values = &.{ "enter", "tab", "escape", "backspace", "delete", "insert", "arrow_up", "arrow_down", "arrow_left", "arrow_right", "home", "end", "page_up", "page_down" } },
-        .{ .name = "controls", .json_type = .array, .item_json_type = .integer, .description = "ASCII code of the printable key designator used with Ctrl; for example, 108 (`l`) for Ctrl+L. Send the printable key code, not the resulting control byte." },
+        .{ .name = "keys", .json_type = .array, .shape = &.{ .array_values = .{ .json_type = .string, .enum_values = &.{ "enter", "tab", "escape", "backspace", "delete", "insert", "arrow_up", "arrow_down", "arrow_left", "arrow_right", "home", "end", "page_up", "page_down" } } } },
+        .{ .name = "controls", .json_type = .array, .shape = &.{ .array_values = .{ .json_type = .integer } }, .description = "ASCII code of the printable key designator used with Ctrl; for example, 108 (`l`) for Ctrl+L. Send the printable key code, not the resulting control byte." },
     },
     .required = &.{"kind"},
     .additional_properties = false,
@@ -177,27 +194,27 @@ const terminal_properties = [_]gateway_schema.Property{
     .{ .name = "session_id", .json_type = .string, .description = "Required for session-targeted actions. Set null for start and list; owner-catalog authority is private." },
     .{ .name = "cwd", .json_type = .string, .description = "Working directory for exec or start; defaults to the workspace." },
     .{ .name = "command", .json_type = .string, .max_length = terminal_contracts.max_command_bytes, .description = "Command for exec, or optional command for start; omit on start for an interactive shell." },
-    .{ .name = "profile", .json_type = .string, .enum_values = &.{ "clean", "user" }, .description = "Startup profile for exec or start; omission defaults to user, while clean skips user startup files. User-profile execution supports the configured Bash or zsh login shell. Bash login execution reads login startup files; .bashrc is available only when sourced by the login profile. For start, an explicit shell is used instead of the default profile and is mutually exclusive with profile." },
-    .{ .name = "shell", .json_type = .object, .object_schema = &terminal_shell_schema },
-    .{ .name = "backend", .json_type = .string, .enum_values = &.{ "native", "tmux" }, .description = "Start backend or optional list filter." },
-    .{ .name = "return_when", .json_type = .object, .object_schema = &terminal_return_schema, .description = "Only for start or wait; required for every wait. After a signal intended to stop the session, use kind exit. For output matching, use kind match with pattern; output_contains is monitor-only." },
+    .{ .name = "profile", .json_type = .string, .shape = &.{ .enum_values = &.{ "clean", "user" } }, .description = "Startup profile for exec or start; omission defaults to user, while clean skips user startup files. User-profile execution supports the configured Bash or zsh login shell. Bash login execution reads login startup files; .bashrc is available only when sourced by the login profile. For start, an explicit shell is used instead of the default profile and is mutually exclusive with profile." },
+    .{ .name = "shell", .json_type = .object, .shape = &.{ .object = &terminal_shell_schema } },
+    .{ .name = "backend", .json_type = .string, .shape = &.{ .enum_values = &.{ "native", "tmux" } }, .description = "Start backend or optional list filter." },
+    .{ .name = "return_when", .json_type = .object, .shape = &.{ .object = &terminal_return_schema }, .description = "Only for start or wait; required for every wait. After a signal intended to stop the session, use kind exit. For output matching, use kind match with pattern; output_contains is monitor-only." },
     .{ .name = "wait_ceiling_ms", .json_type = .integer, .minimum = 1, .description = "Required for wait; required for start when return_when is non-immediate; maximum blocking time in milliseconds." },
-    .{ .name = "dimensions", .json_type = .object, .object_schema = &terminal_dimensions_schema },
-    .{ .name = "initial_monitors", .json_type = .array, .max_items = 32, .items = &terminal_monitor_definition_schema },
+    .{ .name = "dimensions", .json_type = .object, .shape = &.{ .object = &terminal_dimensions_schema } },
+    .{ .name = "initial_monitors", .json_type = .array, .max_items = 32, .shape = &.{ .array_objects = &terminal_monitor_definition_schema } },
     .{ .name = "cursor_segment", .json_type = .integer, .minimum = 1, .description = "Only for read and required for every read. For a new session's first read, use segment 1 with cursor_offset 0; otherwise use unread_range.start or raw_gap.available_from from the latest session facts. Continue from the previous raw_range.end." },
     .{ .name = "cursor_offset", .json_type = .integer, .description = "Only for read. Use 0 with segment 1 for a new session's first read, then continue from the previous raw_range.end offset." },
     .{ .name = "after_event_id", .json_type = .integer },
     .{ .name = "acknowledge_event_id", .json_type = .integer, .minimum = 1 },
     .{ .name = "max_events", .json_type = .integer, .minimum = 1, .maximum = 256 },
-    .{ .name = "write", .json_type = .object, .object_schema = &terminal_write_schema, .description = "Payload is valid only with lease=use. Set null for acquire, release, and revoke." },
-    .{ .name = "lease", .json_type = .string, .enum_values = &.{ "acquire", "use", "release", "revoke" }, .description = "Use lease=acquire without write, then send a second call with lease=use and the payload. Release and revoke also require write=null." },
-    .{ .name = "monitor", .json_type = .object, .object_schema = &terminal_monitor_operation_schema },
+    .{ .name = "write", .json_type = .object, .shape = &.{ .object = &terminal_write_schema }, .description = "Payload is valid only with lease=use. Set null for acquire, release, and revoke." },
+    .{ .name = "lease", .json_type = .string, .shape = &.{ .enum_values = &.{ "acquire", "use", "release", "revoke" } }, .description = "Use lease=acquire without write, then send a second call with lease=use and the payload. Release and revoke also require write=null." },
+    .{ .name = "monitor", .json_type = .object, .shape = &.{ .object = &terminal_monitor_operation_schema } },
     .{ .name = "task_id", .json_type = .string },
     .{ .name = "workspace_root", .json_type = .string },
     .{ .name = "rows", .json_type = .integer, .minimum = 1, .maximum = 4096 },
     .{ .name = "columns", .json_type = .integer, .minimum = 1, .maximum = 4096 },
-    .{ .name = "signal", .json_type = .string, .enum_values = &.{ "hangup", "interrupt", "quit", "terminate", "kill" } },
-    .{ .name = "close_policy", .json_type = .string, .enum_values = &.{ "graceful", "force" }, .description = "Only for close and required for close. Close is final; read or inspect all needed output before closing." },
+    .{ .name = "signal", .json_type = .string, .shape = &.{ .enum_values = &.{ "hangup", "interrupt", "quit", "terminate", "kill" } } },
+    .{ .name = "close_policy", .json_type = .string, .shape = &.{ .enum_values = &.{ "graceful", "force" } }, .description = "Only for close and required for close. Close is final; read or inspect all needed output before closing." },
 };
 
 const terminal_actions = blk: {
@@ -232,12 +249,56 @@ const terminal_nullable_properties = blk: {
 const terminal_gateway_properties = [_]gateway_schema.Property{.{
     .name = "action",
     .json_type = .string,
-    .enum_values = &terminal_actions,
+    .shape = &.{ .enum_values = &terminal_actions },
 }} ++ terminal_nullable_properties;
 
 const terminal_gateway_required = blk: {
     var names: [terminal_gateway_properties.len][]const u8 = undefined;
     for (terminal_gateway_properties, 0..) |property, index| names[index] = property.name;
+    break :blk names;
+};
+
+fn terminalPropertyNamed(comptime name: []const u8) gateway_schema.Property {
+    inline for (terminal_properties) |property| {
+        if (std.mem.eql(u8, property.name, name)) return property;
+    }
+    @compileError("terminal exec field is missing shared property metadata: " ++ name);
+}
+
+fn terminalExecOnlyProperty(comptime name: []const u8) gateway_schema.Property {
+    var property = terminalPropertyNamed(name);
+    property.description = if (std.mem.eql(u8, name, "cwd"))
+        terminal_exec_only_cwd_description
+    else if (std.mem.eql(u8, name, "command"))
+        terminal_exec_only_command_description
+    else if (std.mem.eql(u8, name, "profile"))
+        terminal_exec_only_profile_description
+    else
+        @compileError("terminal exec field is missing focused model guidance: " ++ name);
+    return terminalNullableProperty(property);
+}
+
+const terminal_exec_only_actions = [_][]const u8{"exec"};
+const terminal_exec_contract = terminal_impl.actionFieldContract(.exec);
+const terminal_exec_only_gateway_properties = blk: {
+    var properties: [terminal_exec_contract.allowed.len]gateway_schema.Property = undefined;
+    for (terminal_exec_contract.allowed, 0..) |field_name, index| {
+        properties[index] = if (std.mem.eql(u8, field_name, "action"))
+            .{
+                .name = "action",
+                .json_type = .string,
+                .shape = &.{ .enum_values = &terminal_exec_only_actions },
+            }
+        else
+            terminalExecOnlyProperty(field_name);
+    }
+    break :blk properties;
+};
+const terminal_exec_only_gateway_required = blk: {
+    var names: [terminal_exec_only_gateway_properties.len][]const u8 = undefined;
+    for (terminal_exec_only_gateway_properties, 0..) |property, index| {
+        names[index] = property.name;
+    }
     break :blk names;
 };
 const skill_description =
@@ -262,7 +323,7 @@ const ask_user_question_option_schema = gateway_schema.ObjectSchema{
 const ask_user_question_question_schema = gateway_schema.ObjectSchema{
     .properties = &.{
         .{ .name = "question", .json_type = .string, .description = "Specific blocking decision shown to the user; do not ask for facts tools can inspect." },
-        .{ .name = "options", .json_type = .array, .min_items = 2, .max_items = 6, .items = &ask_user_question_option_schema },
+        .{ .name = "options", .json_type = .array, .min_items = 2, .max_items = 6, .shape = &.{ .array_objects = &ask_user_question_option_schema } },
     },
     .required = &.{ "question", "options" },
 };
@@ -281,11 +342,11 @@ const subagent_terminal_schema = gateway_schema.ObjectSchema{
 
 const subagent_notifications_schema = gateway_schema.ObjectSchema{
     .properties = &.{
-        .{ .name = "terminal", .json_type = .object, .object_schema = &subagent_terminal_schema },
-        .{ .name = "milestones", .json_type = .array, .max_items = subagent_domain.max_milestones, .item_json_type = .string },
+        .{ .name = "terminal", .json_type = .object, .shape = &.{ .object = &subagent_terminal_schema } },
+        .{ .name = "milestones", .json_type = .array, .max_items = subagent_domain.max_milestones, .shape = &.{ .array_values = .{ .json_type = .string } } },
         .{ .name = "report_interval_ms", .json_type = .integer, .minimum = 1 },
         .{ .name = "report_duration_ms", .json_type = .integer, .minimum = 1 },
-        .{ .name = "stop_conditions", .json_type = .array, .max_items = subagent_domain.max_stop_conditions, .item_json_type = .string, .item_enum_values = &.{ "terminal", "duration_elapsed" } },
+        .{ .name = "stop_conditions", .json_type = .array, .max_items = subagent_domain.max_stop_conditions, .shape = &.{ .array_values = .{ .json_type = .string, .enum_values = &.{ "terminal", "duration_elapsed" } } } },
     },
     .additional_properties = false,
 };
@@ -293,12 +354,12 @@ const subagent_notifications_schema = gateway_schema.ObjectSchema{
 const subagent_create_schema = gateway_schema.ObjectSchema{
     .properties = &.{
         .{ .name = "name", .json_type = .string, .min_length = 1, .max_length = subagent_domain.max_name_bytes },
-        .{ .name = "mode", .json_type = .string, .enum_values = &.{ "one_off", "persistent" } },
+        .{ .name = "mode", .json_type = .string, .shape = &.{ .enum_values = &.{ "one_off", "persistent" } } },
         .{ .name = "prompt", .json_type = .string, .min_length = 1, .max_length = subagent_domain.max_prompt_bytes },
         .{ .name = "model", .json_type = .string, .min_length = 1, .max_length = subagent_domain.max_model_bytes },
         .{ .name = "effort", .json_type = .string, .min_length = 1, .max_length = types.ReasoningEffort.max_name_bytes },
-        .{ .name = "permission_mode", .json_type = .string, .enum_values = &.{ "ask", "auto", "yolo" }, .description = "Child permission mode. Inherits the caller when omitted and cannot exceed it." },
-        .{ .name = "notifications", .json_type = .object, .object_schema = &subagent_notifications_schema },
+        .{ .name = "permission_mode", .json_type = .string, .shape = &.{ .enum_values = &.{ "ask", "auto", "yolo" } }, .description = "Child permission mode. Inherits the caller when omitted and cannot exceed it." },
+        .{ .name = "notifications", .json_type = .object, .shape = &.{ .object = &subagent_notifications_schema } },
     },
     .required = &.{ "name", "mode" },
     .additional_properties = false,
@@ -306,7 +367,7 @@ const subagent_create_schema = gateway_schema.ObjectSchema{
 
 const subagent_inspect_wait_schema = gateway_schema.ObjectSchema{
     .properties = &.{
-        .{ .name = "until", .json_type = .string, .enum_values = &.{"settled"}, .description = "Wait until a persistent child is idle or the child reaches another non-running terminal/recovery state." },
+        .{ .name = "until", .json_type = .string, .shape = &.{ .enum_values = &.{"settled"} }, .description = "Wait until a persistent child is idle or the child reaches another non-running terminal/recovery state." },
         .{ .name = "after_generation", .json_type = .integer, .minimum = 0, .description = "Optional durable generation that must be exceeded before the wait can complete." },
         .{ .name = "timeout_ms", .json_type = .integer, .minimum = 1, .maximum = subagent_domain.max_inspect_wait_ms, .description = "Bounded wait deadline in milliseconds. A timeout returns the latest inspection with status wait_timed_out." },
     },
@@ -317,10 +378,10 @@ const subagent_inspect_wait_schema = gateway_schema.ObjectSchema{
 const subagent_inspect_schema = gateway_schema.ObjectSchema{
     .properties = &.{
         .{ .name = "id", .json_type = .string, .min_length = 1 },
-        .{ .name = "sections", .json_type = .array, .min_items = 1, .max_items = 6, .item_json_type = .string, .item_enum_values = &.{ "status", "messages", "tool_activity", "events", "configuration", "relationship" } },
+        .{ .name = "sections", .json_type = .array, .min_items = 1, .max_items = 6, .shape = &.{ .array_values = .{ .json_type = .string, .enum_values = &.{ "status", "messages", "tool_activity", "events", "configuration", "relationship" } } } },
         .{ .name = "cursor", .json_type = .string, .min_length = 1 },
         .{ .name = "limit", .json_type = .integer, .minimum = 1, .maximum = subagent_domain.max_page_limit },
-        .{ .name = "wait", .json_type = .object, .object_schema = &subagent_inspect_wait_schema, .description = "Optional condition-driven same-turn wait. Requires the status section and cannot be combined with a cursor." },
+        .{ .name = "wait", .json_type = .object, .shape = &.{ .object = &subagent_inspect_wait_schema }, .description = "Optional condition-driven same-turn wait. Requires the status section and cannot be combined with a cursor." },
     },
     .required = &.{ "id", "sections" },
     .additional_properties = false,
@@ -343,8 +404,8 @@ const subagent_milestone_schema = gateway_schema.ObjectSchema{
 
 const subagent_message_schema = gateway_schema.ObjectSchema{
     .properties = &.{
-        .{ .name = "send", .json_type = .object, .object_schema = &subagent_send_schema },
-        .{ .name = "milestone", .json_type = .object, .object_schema = &subagent_milestone_schema },
+        .{ .name = "send", .json_type = .object, .shape = &.{ .object = &subagent_send_schema } },
+        .{ .name = "milestone", .json_type = .object, .shape = &.{ .object = &subagent_milestone_schema } },
     },
     .additional_properties = false,
     .min_properties = 1,
@@ -353,7 +414,7 @@ const subagent_message_schema = gateway_schema.ObjectSchema{
 
 const subagent_relationship_schema = gateway_schema.ObjectSchema{
     .properties = &.{
-        .{ .name = "action", .json_type = .string, .enum_values = &.{ "attach", "detach", "reparent" } },
+        .{ .name = "action", .json_type = .string, .shape = &.{ .enum_values = &.{ "attach", "detach", "reparent" } } },
         .{ .name = "id", .json_type = .string, .min_length = 1 },
         .{ .name = "parent_id", .json_type = .string, .min_length = 1 },
     },
@@ -367,8 +428,8 @@ const subagent_configure_schema = gateway_schema.ObjectSchema{
         .{ .name = "name", .json_type = .string, .min_length = 1, .max_length = subagent_domain.max_name_bytes },
         .{ .name = "model", .json_type = .string, .min_length = 1, .max_length = subagent_domain.max_model_bytes },
         .{ .name = "effort", .json_type = .string, .min_length = 1, .max_length = types.ReasoningEffort.max_name_bytes },
-        .{ .name = "permission_mode", .json_type = .string, .enum_values = &.{ "ask", "auto", "yolo" }, .description = "New child permission mode. Cannot exceed the caller's current mode." },
-        .{ .name = "notifications", .json_type = .object, .object_schema = &subagent_notifications_schema },
+        .{ .name = "permission_mode", .json_type = .string, .shape = &.{ .enum_values = &.{ "ask", "auto", "yolo" } }, .description = "New child permission mode. Cannot exceed the caller's current mode." },
+        .{ .name = "notifications", .json_type = .object, .shape = &.{ .object = &subagent_notifications_schema } },
     },
     .required = &.{"id"},
     .additional_properties = false,
@@ -377,7 +438,7 @@ const subagent_configure_schema = gateway_schema.ObjectSchema{
 const subagent_lifecycle_schema = gateway_schema.ObjectSchema{
     .properties = &.{
         .{ .name = "id", .json_type = .string, .min_length = 1 },
-        .{ .name = "action", .json_type = .string, .enum_values = &.{ "cancel", "resume", "close", "reopen" } },
+        .{ .name = "action", .json_type = .string, .shape = &.{ .enum_values = &.{ "cancel", "resume", "close", "reopen" } } },
     },
     .required = &.{ "id", "action" },
     .additional_properties = false,
@@ -385,12 +446,12 @@ const subagent_lifecycle_schema = gateway_schema.ObjectSchema{
 
 const subagent_command_schema = gateway_schema.ObjectSchema{
     .properties = &.{
-        .{ .name = "create", .json_type = .object, .object_schema = &subagent_create_schema },
-        .{ .name = "inspect", .json_type = .object, .object_schema = &subagent_inspect_schema },
-        .{ .name = "message", .json_type = .object, .object_schema = &subagent_message_schema },
-        .{ .name = "relationship", .json_type = .object, .object_schema = &subagent_relationship_schema },
-        .{ .name = "configure", .json_type = .object, .object_schema = &subagent_configure_schema },
-        .{ .name = "lifecycle", .json_type = .object, .object_schema = &subagent_lifecycle_schema },
+        .{ .name = "create", .json_type = .object, .shape = &.{ .object = &subagent_create_schema } },
+        .{ .name = "inspect", .json_type = .object, .shape = &.{ .object = &subagent_inspect_schema } },
+        .{ .name = "message", .json_type = .object, .shape = &.{ .object = &subagent_message_schema } },
+        .{ .name = "relationship", .json_type = .object, .shape = &.{ .object = &subagent_relationship_schema } },
+        .{ .name = "configure", .json_type = .object, .shape = &.{ .object = &subagent_configure_schema } },
+        .{ .name = "lifecycle", .json_type = .object, .shape = &.{ .object = &subagent_lifecycle_schema } },
     },
     .additional_properties = false,
     .min_properties = 1,
@@ -436,7 +497,7 @@ pub const glob_files = ToolSpec{
             .properties = &.{
                 .{ .name = "pattern", .json_type = .string, .description = "Glob pattern to match, such as src/**/*.zig or *.md." },
                 .{ .name = "path", .json_type = .string, .description = "Optional search root relative to the workspace root, or an external path using an absolute path, ~/..., or a relative workspace escape such as ../...; external access is subject to permission policy. Defaults to current directory; narrow it when possible." },
-                .{ .name = "mode", .json_type = .string, .enum_values = &.{ "matches", "count" }, .description = "Use matches to return sample paths, or count to return an exact matching path count without listing entries." },
+                .{ .name = "mode", .json_type = .string, .shape = &.{ .enum_values = &.{ "matches", "count" } }, .description = "Use matches to return sample paths, or count to return an exact matching path count without listing entries." },
             },
             .required = &.{"pattern"},
         },
@@ -468,7 +529,7 @@ pub const grep_files = ToolSpec{
                 .{ .name = "path", .json_type = .string, .description = "Optional search root relative to the workspace root, or an external path using an absolute path, ~/..., or a relative workspace escape such as ../...; external access is subject to permission policy. Defaults to current directory; narrow it when possible." },
                 .{ .name = "include", .json_type = .string, .description = "Optional glob pattern applied to candidate file paths before reading files, such as *.zig or src/**/*.ts." },
                 .{ .name = "case_insensitive", .json_type = .boolean, .description = "Search case-insensitively when true." },
-                .{ .name = "mode", .json_type = .string, .enum_values = &.{ "matches", "files_with_matches", "count" }, .description = "Use matches for line matches, files_with_matches for unique matching paths, or count for exact matching-line and matching-file counts." },
+                .{ .name = "mode", .json_type = .string, .shape = &.{ .enum_values = &.{ "matches", "files_with_matches", "count" } }, .description = "Use matches for line matches, files_with_matches for unique matching paths, or count for exact matching-line and matching-file counts." },
                 .{ .name = "head_limit", .json_type = .integer, .description = "Optional positive maximum results to return for matches or files_with_matches. Defaults to the normal output cap." },
                 .{ .name = "offset", .json_type = .integer, .description = "Optional zero-based result offset for matches or files_with_matches pagination. Defaults to 0." },
                 .{ .name = "context_lines", .json_type = .integer, .description = "Optional non-negative number of lines before and after each emitted match in matches mode. Bounded by the tool." },
@@ -735,7 +796,7 @@ pub const memory = ToolSpec{
         .description = memory_description,
         .input_schema = .{
             .properties = &.{
-                .{ .name = "action", .json_type = .string, .enum_values = &.{ "save", "list", "clear" }, .description = "Action to perform." },
+                .{ .name = "action", .json_type = .string, .shape = &.{ .enum_values = &.{ "save", "list", "clear" } }, .description = "Action to perform." },
                 .{ .name = "fact", .json_type = .string, .description = "Fact to save (required for save action)." },
             },
             .required = &.{"action"},
@@ -871,8 +932,8 @@ pub const web_search = ToolSpec{
         .input_schema = .{
             .properties = &.{
                 .{ .name = "query", .json_type = .string, .min_length = 2 },
-                .{ .name = "allowed_domains", .json_type = .array, .item_json_type = .string },
-                .{ .name = "blocked_domains", .json_type = .array, .item_json_type = .string },
+                .{ .name = "allowed_domains", .json_type = .array, .shape = &.{ .array_values = .{ .json_type = .string } } },
+                .{ .name = "blocked_domains", .json_type = .array, .shape = &.{ .array_values = .{ .json_type = .string } } },
             },
             .required = &.{"query"},
             .additional_properties = false,
@@ -925,6 +986,25 @@ pub const terminal = ToolSpec{
     .reads_only_fn = terminal_impl.readsOnly,
     .irreversible_fn = terminal_impl.isIrreversible,
 };
+
+const terminal_exec_only = blk: {
+    var spec = terminal;
+    spec.description = terminal_exec_only_description;
+    spec.gateway_schema = .{
+        .name = "terminal",
+        .description = terminal_exec_only_description,
+        .input_schema = .{
+            .properties = &terminal_exec_only_gateway_properties,
+            .required = &terminal_exec_only_gateway_required,
+            .additional_properties = false,
+        },
+    };
+    break :blk spec;
+};
+
+pub fn terminalExecOnlySpec() ToolSpec {
+    return terminal_exec_only;
+}
 
 pub const skill = ToolSpec{
     .name = "skill",
@@ -997,7 +1077,7 @@ pub const subagent = ToolSpec{
         .name = "subagent",
         .description = subagent_description,
         .input_schema = .{
-            .properties = &.{.{ .name = "command", .json_type = .object, .object_schema = &subagent_command_schema }},
+            .properties = &.{.{ .name = "command", .json_type = .object, .shape = &.{ .object = &subagent_command_schema } }},
             .required = &.{"command"},
             .additional_properties = false,
         },
@@ -1083,7 +1163,7 @@ pub const mcp_features = ToolSpec{
         .description = mcp_features_description,
         .input_schema = .{
             .properties = &.{
-                .{ .name = "action", .json_type = .string, .enum_values = &.{ "resource_list", "resource_templates", "resource_read", "prompt_list", "prompt_get", "prompt_complete", "resource_complete" }, .description = "Exact MCP feature operation." },
+                .{ .name = "action", .json_type = .string, .shape = &.{ .enum_values = &.{ "resource_list", "resource_templates", "resource_read", "prompt_list", "prompt_get", "prompt_complete", "resource_complete" } }, .description = "Exact MCP feature operation." },
                 .{ .name = "server", .json_type = .string, .description = "Exact configured MCP server name." },
                 .{ .name = "uri", .json_type = .string, .description = "Exact discovered resource URI for resource_read." },
                 .{ .name = "uri_template", .json_type = .string, .description = "Exact discovered resource template for resource_complete." },
@@ -1119,7 +1199,7 @@ pub const ask_user_question = ToolSpec{
         .description = ask_user_question_description,
         .input_schema = .{
             .properties = &.{
-                .{ .name = "questions", .json_type = .array, .min_items = 1, .max_items = 4, .items = &ask_user_question_question_schema },
+                .{ .name = "questions", .json_type = .array, .min_items = 1, .max_items = 4, .shape = &.{ .array_objects = &ask_user_question_question_schema } },
                 .{ .name = "permission_request_id", .json_type = .string, .min_length = ask_user_question_impl.permission_request_id_hex_bytes, .max_length = ask_user_question_impl.permission_request_id_hex_bytes, .description = "Exact opaque ID from an auto_denied tool result. Omit for ordinary questions." },
             },
             .required = &.{"questions"},
@@ -1154,14 +1234,14 @@ pub const vision = ToolSpec{
                     .json_type = .array,
                     .description = "Ordered unique IDs of user-authorized images to inspect.",
                     .min_items = 1,
-                    .item_json_type = .integer,
+                    .shape = &.{ .array_values = .{ .json_type = .integer } },
                 },
                 .{
                     .name = "paths",
                     .json_type = .array,
                     .description = "Ordered unique local image paths supplied by the user. Relative paths resolve from the workspace; ~/ resolves from the user's home directory.",
                     .min_items = 1,
-                    .item_json_type = .string,
+                    .shape = &.{ .array_values = .{ .json_type = .string } },
                 },
                 .{
                     .name = "focus",
@@ -1280,6 +1360,14 @@ fn schemaProperty(schema: gateway_schema.ObjectSchema, name: []const u8) ?gatewa
     return null;
 }
 
+fn schemaEnumValues(property: gateway_schema.Property) []const []const u8 {
+    const shape = property.shape orelse return &.{};
+    return switch (shape.*) {
+        .enum_values => |values| values,
+        else => &.{},
+    };
+}
+
 fn nameInSet(names: []const []const u8, wanted: []const u8) bool {
     for (names) |name| {
         if (std.mem.eql(u8, name, wanted)) return true;
@@ -1307,7 +1395,7 @@ test "terminal tool schema exposes one nullable object backed by the terminal ac
     try std.testing.expectEqualSlices(
         []const u8,
         &terminal_actions,
-        schemaProperty(input_schema, "action").?.enum_values,
+        schemaEnumValues(schemaProperty(input_schema, "action").?),
     );
 
     var covered_fields: [terminal_impl.public_field_names.len]bool = @splat(false);
@@ -1331,7 +1419,7 @@ test "terminal tool schema exposes one nullable object backed by the terminal ac
     try std.testing.expectEqualSlices(
         []const u8,
         &.{ "native", "tmux" },
-        schemaProperty(input_schema, "backend").?.enum_values,
+        schemaEnumValues(schemaProperty(input_schema, "backend").?),
     );
     try std.testing.expectEqualStrings(
         "Required for wait; required for start when return_when is non-immediate; maximum blocking time in milliseconds.",
@@ -1390,6 +1478,39 @@ test "terminal tool schema exposes one nullable object backed by the terminal ac
     try std.testing.expectEqualStrings(
         "Required for polling conditions tcp_ready, http_ready, path_exists, path_changed, path_size, and custom_probe. Event-driven conditions process_exit, exit_code, signal, output_contains, output_matches, output_quiet, and screen_matches omit it; materialized values are ignored.",
         check_interval.description,
+    );
+}
+
+test "terminal exec-only schema reuses exec structure with focused descriptions" {
+    const spec = terminalExecOnlySpec();
+    const input_schema = spec.gateway_schema.input_schema;
+    try std.testing.expectEqualStrings(
+        terminal_exec_only_description,
+        spec.description,
+    );
+    try std.testing.expectEqual(
+        terminal_exec_contract.allowed.len,
+        input_schema.properties.len,
+    );
+    for (terminal_exec_contract.allowed, input_schema.properties) |field_name, property| {
+        try std.testing.expectEqualStrings(field_name, property.name);
+    }
+    try std.testing.expectEqualSlices(
+        []const u8,
+        &terminal_exec_only_actions,
+        schemaEnumValues(schemaProperty(input_schema, "action").?),
+    );
+    try std.testing.expectEqualStrings(
+        terminal_exec_only_command_description,
+        schemaProperty(input_schema, "command").?.description,
+    );
+    try std.testing.expectEqualStrings(
+        terminal_exec_only_cwd_description,
+        schemaProperty(input_schema, "cwd").?.description,
+    );
+    try std.testing.expectEqualStrings(
+        terminal_exec_only_profile_description,
+        schemaProperty(input_schema, "profile").?.description,
     );
 }
 
@@ -1470,6 +1591,29 @@ fn denyTerminalTool(
 
 test "terminal dispatch is permission gated and fails closed when unavailable" {
     const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(
+        test_io_mod.getIo(),
+        "session",
+        std.Io.File.Permissions.fromMode(0o700),
+    );
+    var session_dir = try tmp.dir.openDir(test_io_mod.getIo(), "session", .{
+        .iterate = true,
+        .follow_symlinks = false,
+    });
+    defer session_dir.close(test_io_mod.getIo());
+    const session_path = try test_io_mod.dirRealpathAlloc(alloc, tmp.dir, "session");
+    defer alloc.free(session_path);
+    var capability = try test_session_child_store.SessionChildCapability.initForTesting(
+        alloc,
+        session_dir,
+        session_path,
+        .read_only,
+        .{},
+    );
+    defer capability.deinit();
+
     const call = types.ToolCall{
         .id = "terminal-test",
         .name = "terminal",
@@ -1489,10 +1633,92 @@ test "terminal dispatch is permission gated and fails closed when unavailable" {
         .terminal = .supported,
     };
 
+    const exec_available = try tool_dispatch.localToolAvailabilityFailureForCall(
+        .{
+            .allocator = alloc,
+            .workspace_root = "/tmp",
+            .tool_capabilities = capabilities,
+        },
+        registry,
+        .{
+            .id = "terminal-exec-no-capability",
+            .name = "terminal",
+            .arguments_json = "{\"action\":\"exec\",\"command\":\"printf ok\"}",
+        },
+    );
+    try std.testing.expect(exec_available == null);
+
+    const missing_capability = try tool_dispatch.dispatchToolCall(
+        .{
+            .allocator = alloc,
+            .workspace_root = "/tmp",
+            .permission_decider = allowTerminalTool,
+            .tool_capabilities = capabilities,
+        },
+        registry,
+        .{
+            .id = "terminal-start-no-capability",
+            .name = "terminal",
+            .arguments_json = "{\"action\":\"start\",\"command\":\"printf nope\"}",
+        },
+    );
+    defer missing_capability.deinit(alloc);
+    try std.testing.expectEqual(.failure, missing_capability.status);
+    var parsed_missing_capability = try std.json.parseFromSlice(
+        std.json.Value,
+        alloc,
+        missing_capability.body,
+        .{},
+    );
+    defer parsed_missing_capability.deinit();
+    const missing_error = parsed_missing_capability.value.object.get("error").?.object;
+    try std.testing.expectEqualStrings("tool_execution_failed", missing_error.get("type").?.string);
+    try std.testing.expectEqualStrings("terminal", missing_error.get("tool_name").?.string);
+    try std.testing.expectEqualStrings(
+        "Durable terminal actions require a saved fx session.",
+        missing_error.get("message").?.string,
+    );
+    try std.testing.expectEqualStrings(
+        "Use terminal.exec, or rerun without --no-save.",
+        missing_error.get("suggestion").?.string,
+    );
+
+    const start_available = try tool_dispatch.localToolAvailabilityFailureForCall(
+        .{
+            .allocator = alloc,
+            .workspace_root = "/tmp",
+            .tool_capabilities = capabilities,
+            .session_child_capability = &capability,
+        },
+        registry,
+        .{
+            .id = "terminal-start-with-capability",
+            .name = "terminal",
+            .arguments_json = "{\"action\":\"start\",\"command\":\"printf ok\"}",
+        },
+    );
+    try std.testing.expect(start_available == null);
+
+    const unsupported_start = try tool_dispatch.localToolAvailabilityFailureForCall(
+        .{ .allocator = alloc, .workspace_root = "/tmp" },
+        registry,
+        .{
+            .id = "terminal-start-unsupported",
+            .name = "terminal",
+            .arguments_json = "{\"action\":\"start\",\"command\":\"printf nope\"}",
+        },
+    );
+    defer alloc.free(unsupported_start.?);
+    try std.testing.expectEqualStrings(
+        tool_dispatch.terminal_unavailable_message,
+        unsupported_start.?,
+    );
+
     const ordinary_inspect = try tool_dispatch.dispatchToolCall(
         .{
             .allocator = alloc,
             .tool_capabilities = capabilities,
+            .session_child_capability = &capability,
         },
         registry,
         .{
@@ -1509,6 +1735,7 @@ test "terminal dispatch is permission gated and fails closed when unavailable" {
         .{
             .allocator = alloc,
             .tool_capabilities = capabilities,
+            .session_child_capability = &capability,
         },
         registry,
         .{
@@ -1527,6 +1754,7 @@ test "terminal dispatch is permission gated and fails closed when unavailable" {
             .allocator = alloc,
             .permission_decider = denyTerminalTool,
             .tool_capabilities = capabilities,
+            .session_child_capability = &capability,
         },
         registry,
         call,
@@ -1541,6 +1769,7 @@ test "terminal dispatch is permission gated and fails closed when unavailable" {
             .allocator = alloc,
             .permission_decider = allowTerminalTool,
             .tool_capabilities = capabilities,
+            .session_child_capability = &capability,
         },
         registry,
         call,
@@ -1548,6 +1777,19 @@ test "terminal dispatch is permission gated and fails closed when unavailable" {
     defer allowed.deinit(alloc);
     try std.testing.expectEqual(.failure, allowed.status);
     try std.testing.expect(std.mem.find(u8, allowed.body, "unsupported_host") != null);
+}
+
+test "terminal advertises stale helper recovery guidance" {
+    try std.testing.expect(
+        std.mem.find(u8, terminal_description, "do not retry or escalate") != null,
+    );
+    try std.testing.expect(
+        std.mem.find(
+            u8,
+            terminal_description,
+            "restart the persistent terminal helper",
+        ) != null,
+    );
 }
 
 pub const advertisement_order = [_][]const u8{

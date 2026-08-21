@@ -153,6 +153,67 @@ describe("lean auto mode reliability", () => {
   );
 
   test(
+    "configured wildcard commands cannot absorb shell operators or substitutions",
+    async () => {
+      const root = createIsolatedRoot();
+      const operatorMarker = join(root.workspace, "operator-bypass-must-not-run");
+      const substitutionMarker = join(
+        root.workspace,
+        "substitution-bypass-must-not-run",
+      );
+      writeFileSync(
+        join(root.home, ".fx", "settings.json"),
+        JSON.stringify({
+          sandbox: "none",
+          permission: { "*": { "printf *": "allow" } },
+          maxxing_mode: "legacy",
+        }),
+      );
+      const gateway = startGateway(
+        [
+          commandCall(
+            `printf safe && touch ${JSON.stringify(operatorMarker)}`,
+            "operator_bypass",
+          ),
+          (body) => {
+            expect(body).toContain("auto_denied");
+            return commandCall(
+              `printf "$(touch ${substitutionMarker})"`,
+              "substitution_bypass",
+            );
+          },
+          (body) => {
+            expect(body).toContain("auto_denied");
+            return commandCall("printf safe", "static_command");
+          },
+          fakeGatewayFinalText("static command complete"),
+        ],
+        [
+          fakeGatewayPermissionDecision("ask", "operator_requires_review"),
+          fakeGatewayPermissionDecision("ask", "substitution_requires_review"),
+        ],
+      );
+
+      const result = await runFx(
+        ["ask", "--quiet", "--json", "--no-save", "Exercise configured commands safely."],
+        {
+          cwd: root.workspace,
+          env: gatewayEnv(root, gateway),
+          timeoutMs: TIMEOUT,
+        },
+      );
+
+      expect(result.code, `stdout: ${result.stdout}\nstderr: ${result.stderr}`).toBe(0);
+      expect(existsSync(operatorMarker)).toBe(false);
+      expect(existsSync(substitutionMarker)).toBe(false);
+      expect(gateway.classifierRequests).toHaveLength(2);
+      expect(gateway.requests).toHaveLength(4);
+      expect(result.stdout).toContain("static command complete");
+    },
+    TIMEOUT,
+  );
+
+  test(
     "an exact read-only git status bypasses automatic review",
     async () => {
       const root = createIsolatedRoot();
@@ -316,7 +377,7 @@ describe("lean auto mode reliability", () => {
   );
 
   test(
-    "headless auto mode requires approval for the next action after three blocks",
+    "headless auto mode finishes normally after four blocked response groups",
     async () => {
       const root = createIsolatedRoot();
       const markers = Array.from(
@@ -335,7 +396,7 @@ describe("lean auto mode reliability", () => {
           }),
         ],
         Array.from(
-          { length: 3 },
+          { length: 4 },
           (_, index) => fakeGatewayPermissionDecision("ask", `blocked_review_${index + 1}`),
         ),
       );
@@ -349,12 +410,57 @@ describe("lean auto mode reliability", () => {
         },
       );
 
-      expect(result.code).toBe(1);
-      expect(result.stderr).toContain("permission required");
-      expect(result.stderr).toContain("noninteractive_permission_prompt_unavailable");
+      expect(result.code).toBe(0);
+      expect(result.stderr).not.toContain("permission required");
+      expect(result.stderr).not.toContain("noninteractive_permission_prompt_unavailable");
       expect(gateway.requests).toHaveLength(4);
-      expect(gateway.classifierRequests).toHaveLength(3);
+      expect(gateway.classifierRequests).toHaveLength(4);
+      const json = JSON.parse(result.stdout.trim()) as {
+        output: string;
+        steps: number;
+      };
+      expect(json.output).toContain(
+        "I couldn't continue because the required actions were blocked by automatic safety checks.",
+      );
+      expect(json.steps).toBe(4);
       for (const marker of markers) expect(existsSync(marker)).toBe(false);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "standalone quiet stays silent after automatic recovery exhaustion",
+    async () => {
+      const root = createIsolatedRoot();
+      const marker = join(root.workspace, "quiet-recovery-must-not-run");
+      const command = `touch ${JSON.stringify(marker)}`;
+      const gateway = startGateway(
+        Array.from({ length: 4 }, (_, index) => (body?: string) => {
+          if (index > 0) expect(body).toContain("auto_denied");
+          return commandCall(command, `quiet_blocked_${index + 1}`);
+        }),
+        [fakeGatewayPermissionDecision("ask", "quiet_blocked_review")],
+      );
+
+      const result = await runFx(
+        ["ask", "--quiet", "--no-save", "Try the blocked action safely."],
+        {
+          cwd: root.workspace,
+          env: gatewayEnv(root, gateway),
+          timeoutMs: TIMEOUT,
+        },
+      );
+
+      expect(result.code).toBe(0);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).not.toContain("permission required");
+      expect(result.stderr).not.toContain("NonInteractivePermissionRequired");
+      expect(result.stderr).not.toContain(
+        "I couldn't continue because the required actions were blocked by automatic safety checks.",
+      );
+      expect(gateway.requests).toHaveLength(4);
+      expect(gateway.classifierRequests).toHaveLength(1);
+      expect(existsSync(marker)).toBe(false);
     },
     TIMEOUT,
   );
@@ -469,7 +575,7 @@ describe("lean auto mode reliability", () => {
   );
 
   test.skipIf(process.platform !== "darwin")(
-    "headless sandbox widening requires approval after three blocks",
+    "headless sandbox widening finishes normally after four blocked groups",
     async () => {
       const root = createIsolatedRoot("/Users/Shared");
       const marker = join(root.workspace, "sandbox-widening-must-not-run");
@@ -494,6 +600,7 @@ describe("lean auto mode reliability", () => {
           fakeGatewayPermissionDecision("ask", "sandbox_review_1"),
           fakeGatewayFinalText("malformed reviewer output"),
           fakeGatewayPermissionDecision("ask", "sandbox_review_3"),
+          fakeGatewayPermissionDecision("ask", "sandbox_review_4"),
         ],
       );
 
@@ -506,15 +613,19 @@ describe("lean auto mode reliability", () => {
         },
       );
 
-      expect(result.code).toBe(1);
-      expect(result.stderr).toContain("permission required");
-      expect(result.stderr).toContain("noninteractive_permission_prompt_unavailable");
+      expect(result.code).toBe(0);
+      expect(result.stderr).not.toContain("permission required");
+      expect(result.stderr).not.toContain("noninteractive_permission_prompt_unavailable");
       expect(gateway.requests).toHaveLength(4);
-      expect(gateway.classifierRequests).toHaveLength(3);
+      expect(gateway.classifierRequests).toHaveLength(4);
       for (const request of gateway.classifierRequests) {
         expect(request.body).toContain("phase: preflight");
         expect(request.body).toContain("action: sandbox_widening");
       }
+      const json = JSON.parse(result.stdout.trim()) as { output: string };
+      expect(json.output).toContain(
+        "I couldn't continue because the required actions were blocked by automatic safety checks.",
+      );
       expect(existsSync(marker)).toBe(false);
     },
     TIMEOUT,

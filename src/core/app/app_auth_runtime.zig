@@ -529,21 +529,29 @@ pub fn Runtime(comptime App: type) type {
         }
 
         fn recoverPromptCredentialRefreshFailure(app: *App, err: anyerror) !bool {
-            debug_trace.logf("auth", "prompt credential refresh failed source=fx_login err={s}", .{@errorName(err)});
-            app.auth.recordCredentialRefreshFailure(.fx_login);
+            const source = app.auth.credentialSource() orelse return false;
+            debug_trace.logf("auth", "prompt credential refresh failed source={t} err={s}", .{ source, @errorName(err) });
+            app.auth.recordCredentialRefreshFailure(source);
             try app.auth.refreshSourceInventory(app.alloc);
             app.auth.openPicker(app.alloc);
             const failure = auth_runtime.FailureSnapshot{
-                .source = .fx_login,
+                .source = source,
                 .reason = .credential_refresh_failed,
             };
             const failure_text = try failure.renderText(app.alloc);
             defer app.alloc.free(failure_text);
-            const recovery = try std.fmt.allocPrint(
-                app.alloc,
-                "{s}.\nChoose another source below.",
-                .{failure_text},
-            );
+            const recovery = if (source == .grok_oauth)
+                try std.fmt.allocPrint(
+                    app.alloc,
+                    "{s}.\nRun fx login grok.\nChoose another source below.",
+                    .{failure_text},
+                )
+            else
+                try std.fmt.allocPrint(
+                    app.alloc,
+                    "{s}.\nChoose another source below.",
+                    .{failure_text},
+                );
             defer app.alloc.free(recovery);
             try app.writeDomainNotice(.{
                 .topic = "auth",
@@ -1168,6 +1176,7 @@ test "logout durability failure still reconciles live auth" {
 test "prompt credential refresh failure is recoverable and detail-free" {
     var app: TestApp = .{};
     defer app.deinit();
+    app.auth.active_source = .fx_login;
     app.auth.refresh_error = error.OAuthRequestFailed;
 
     try std.testing.expect(!try Runtime(TestApp).preparePromptCredential(&app));
@@ -1179,6 +1188,24 @@ test "prompt credential refresh failure is recoverable and detail-free" {
     try std.testing.expectEqual(credentials.Source.fx_login, app.auth.refresh_failure_source.?);
     try std.testing.expect(app.auth.picker_opened);
     try std.testing.expectEqual(@as(usize, 0), app.model_cache.reset_count);
+}
+
+test "prompt credential grok refresh failure records grok_oauth and opens picker" {
+    var app: TestApp = .{};
+    defer app.deinit();
+    app.auth.active_source = .grok_oauth;
+    app.auth.refresh_error = error.OAuthRequestFailed;
+
+    try std.testing.expect(!try Runtime(TestApp).preparePromptCredential(&app));
+    try std.testing.expect(std.mem.find(u8, app.transcript.items, "Run fx login grok.") != null);
+    try std.testing.expect(std.mem.find(u8, app.transcript.items, "Choose another source below.") != null);
+    try std.testing.expect(std.mem.find(u8, app.transcript.items, "fx login credential refresh failed") == null);
+    try std.testing.expect(std.mem.find(u8, app.transcript.items, "OAuthRequestFailed") == null);
+    try std.testing.expectEqual(credentials.Source.grok_oauth, app.auth.refresh_failure_source.?);
+    try std.testing.expect(app.auth.refresh_failure_source.? != .fx_login);
+    try std.testing.expect(app.auth.picker_opened);
+    try std.testing.expectEqual(@as(usize, 1), app.auth.source_inventory_refresh_count);
+    try std.testing.expect(app.shell.render_requests.footer_requested);
 }
 
 test "prompt credential admission retries a crossed readiness deadline" {
@@ -1196,6 +1223,7 @@ test "prompt credential admission retries a crossed readiness deadline" {
 test "prompt credential admission rejects a credential that remains unavailable" {
     var app: TestApp = .{};
     defer app.deinit();
+    app.auth.active_source = .fx_login;
     app.auth.gateway_ready = false;
 
     try std.testing.expect(!try Runtime(TestApp).preparePromptCredential(&app));

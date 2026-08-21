@@ -1328,12 +1328,23 @@ pub const BackgroundDetailSnapshot = struct {
     }
 };
 
+pub const CreditsView = enum { credits, xai_usage };
+
 pub const CreditsSnapshot = struct {
+    pub const Origin = enum { gateway, grok };
+
+    origin: Origin = .gateway,
     balance: ?[]const u8 = null,
     used: ?[]const u8 = null,
     plan: ?[]const u8 = null,
     raw_json: ?[]const u8 = null,
     err_message: ?[]const u8 = null,
+    percent: ?u8 = null,
+    period: ?[]const u8 = null,
+    reset_at: ?[]const u8 = null,
+    prepaid_cents: ?i64 = null,
+    rpm_remaining: ?u64 = null,
+    rpm_limit: ?u64 = null,
 
     /// Frees provider-owned fields. `raw_json` remains borrowed presentation
     /// input and is not released here.
@@ -1342,6 +1353,8 @@ pub const CreditsSnapshot = struct {
         if (self.used) |value| alloc.free(value);
         if (self.plan) |value| alloc.free(value);
         if (self.err_message) |value| alloc.free(value);
+        if (self.period) |value| alloc.free(value);
+        if (self.reset_at) |value| alloc.free(value);
         self.* = undefined;
     }
 
@@ -1352,12 +1365,64 @@ pub const CreditsSnapshot = struct {
         };
     }
 
+    pub fn renderForView(self: CreditsSnapshot, alloc: Allocator, view: CreditsView) ![]u8 {
+        if (view == .xai_usage and self.origin == .grok and self.err_message == null) {
+            return self.renderXaiUsageText(alloc);
+        }
+        return self.renderText(alloc);
+    }
+
+    fn renderXaiUsageText(self: CreditsSnapshot, alloc: Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+
+        const plan = self.plan orelse "SuperGrok";
+        const period = self.period orelse "current period";
+        if (self.percent) |percent| {
+            try out.writer.print("{s} {d}% {s}", .{ plan, percent, period });
+        } else {
+            try out.writer.print("{s} {s}", .{ plan, period });
+        }
+        if (self.reset_at) |reset_at| {
+            try out.writer.print(" · resets {s}", .{reset_at});
+        }
+        if (self.prepaid_cents) |cents| {
+            const abs: u64 = @intCast(if (cents < 0) -cents else cents);
+            const dollars = abs / 100;
+            const remainder = abs % 100;
+            if (cents < 0) {
+                try out.writer.print(" · prepaid -${d}.{d:0>2}", .{ dollars, remainder });
+            } else {
+                try out.writer.print(" · prepaid ${d}.{d:0>2}", .{ dollars, remainder });
+            }
+        }
+        if (self.rpm_remaining) |remaining| {
+            if (self.rpm_limit) |limit| {
+                try out.writer.print("\n{d}/{d} RPM", .{ remaining, limit });
+            }
+        }
+        return try out.toOwnedSlice();
+    }
+
     pub fn renderText(self: CreditsSnapshot, alloc: Allocator) ![]u8 {
         var out: std.Io.Writer.Allocating = .init(alloc);
         defer out.deinit();
 
         if (self.err_message) |msg| {
             try out.writer.print("[credits] error: {s}\n", .{msg});
+            return try out.toOwnedSlice();
+        }
+
+        if (self.origin == .grok) {
+            if (self.plan) |p| {
+                try out.writer.print("[credits] plan={s}\n", .{p});
+            }
+            if (self.used) |u| {
+                try out.writer.print("[credits] used={s}\n", .{u});
+            }
+            if (self.balance) |b| {
+                try out.writer.print("[credits] balance={s}\n", .{b});
+            }
             return try out.toOwnedSlice();
         }
 
@@ -1387,6 +1452,23 @@ pub const CreditsSnapshot = struct {
         defer out.deinit();
 
         if (self.err_message) |msg| return alloc.dupe(u8, msg);
+        if (self.origin == .grok) {
+            var wrote_grok = false;
+            if (self.plan) |plan| {
+                try out.writer.print("plan={s}", .{plan});
+                wrote_grok = true;
+            }
+            if (self.used) |used| {
+                if (wrote_grok) try out.writer.writeByte('\n');
+                try out.writer.print("used={s}", .{used});
+                wrote_grok = true;
+            }
+            if (self.balance) |balance| {
+                if (wrote_grok) try out.writer.writeByte('\n');
+                try out.writer.print("balance={s}", .{balance});
+            }
+            return try out.toOwnedSlice();
+        }
         var wrote_field = false;
         if (self.balance) |balance| {
             try out.writer.print("balance={s}", .{balance});
@@ -1436,10 +1518,57 @@ pub const CreditsSnapshot = struct {
             }
         }
 
+        if (self.origin == .grok) {
+            try out.writer.writeAll(",\"origin\":");
+            try std.json.Stringify.value(@tagName(self.origin), .{}, &out.writer);
+            try writeCreditsJsonU8(&out.writer, "percent", self.percent);
+            try writeCreditsJsonStr(&out.writer, "period", self.period);
+            try writeCreditsJsonStr(&out.writer, "reset_at", self.reset_at);
+            try writeCreditsJsonI64(&out.writer, "prepaid_cents", self.prepaid_cents);
+            try writeCreditsJsonU64(&out.writer, "rpm_remaining", self.rpm_remaining);
+            try writeCreditsJsonU64(&out.writer, "rpm_limit", self.rpm_limit);
+        }
+
         try out.writer.writeByte('}');
         return try out.toOwnedSlice();
     }
 };
+
+fn writeCreditsJsonStr(writer: *std.Io.Writer, key: []const u8, value: ?[]const u8) !void {
+    try writer.print(",\"{s}\":", .{key});
+    if (value) |text_value| {
+        try std.json.Stringify.value(text_value, .{}, writer);
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
+fn writeCreditsJsonU8(writer: *std.Io.Writer, key: []const u8, value: ?u8) !void {
+    try writer.print(",\"{s}\":", .{key});
+    if (value) |number| {
+        try writer.print("{d}", .{number});
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
+fn writeCreditsJsonI64(writer: *std.Io.Writer, key: []const u8, value: ?i64) !void {
+    try writer.print(",\"{s}\":", .{key});
+    if (value) |number| {
+        try writer.print("{d}", .{number});
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
+fn writeCreditsJsonU64(writer: *std.Io.Writer, key: []const u8, value: ?u64) !void {
+    try writer.print(",\"{s}\":", .{key});
+    if (value) |number| {
+        try writer.print("{d}", .{number});
+    } else {
+        try writer.writeAll("null");
+    }
+}
 
 pub const UpgradeSnapshot = struct {
     current: []const u8,
@@ -2661,6 +2790,99 @@ test "core credits snapshot renders parsed, raw, and empty fallbacks" {
     const empty_text = try (CreditsSnapshot{}).renderText(std.testing.allocator);
     defer std.testing.allocator.free(empty_text);
     try std.testing.expectEqualStrings("[credits] no data returned by gateway\n", empty_text);
+}
+
+test "core credits snapshot interactive grok body omits credits prefix" {
+    const grok = CreditsSnapshot{
+        .origin = .grok,
+        .plan = "SuperGrok",
+        .used = "90% weekly",
+        .balance = "$0.00",
+    };
+    const text = try grok.renderInteractiveBody(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings(
+        "plan=SuperGrok\nused=90% weekly\nbalance=$0.00",
+        text,
+    );
+    try std.testing.expect(std.mem.find(u8, text, "[credits]") == null);
+}
+
+test "core credits snapshot renders xai-usage only for grok origin" {
+    const grok = CreditsSnapshot{
+        .origin = .grok,
+        .plan = @constCast("SuperGrok"),
+        .used = @constCast("12% weekly"),
+        .balance = @constCast("$2.50"),
+        .percent = 12,
+        .period = @constCast("weekly"),
+        .reset_at = @constCast("2026-08-24T17:33:48.278Z"),
+        .prepaid_cents = 250,
+    };
+    const grok_usage = try grok.renderForView(std.testing.allocator, .xai_usage);
+    defer std.testing.allocator.free(grok_usage);
+    try std.testing.expectEqualStrings(
+        "SuperGrok 12% weekly · resets 2026-08-24T17:33:48.278Z · prepaid $2.50",
+        grok_usage,
+    );
+
+    const gateway = CreditsSnapshot{ .balance = "10", .used = "2", .plan = "pro" };
+    const gateway_usage = try gateway.renderForView(std.testing.allocator, .xai_usage);
+    defer std.testing.allocator.free(gateway_usage);
+    try std.testing.expectEqualStrings(
+        "[credits] balance=10\n[credits] used=2\n[credits] plan=pro\n",
+        gateway_usage,
+    );
+}
+
+test "core credits snapshot grok json includes typed fields" {
+    const grok = CreditsSnapshot{
+        .origin = .grok,
+        .plan = "SuperGrok",
+        .used = "12% weekly",
+        .balance = "$2.50",
+        .percent = 12,
+        .period = "weekly",
+        .reset_at = "2026-08-24T17:33:48.278Z",
+        .prepaid_cents = 250,
+        .rpm_remaining = 8299,
+        .rpm_limit = 8300,
+    };
+    const json = try grok.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"credits\",\"balance\":\"$2.50\",\"used\":\"12% weekly\",\"plan\":\"SuperGrok\",\"origin\":\"grok\",\"percent\":12,\"period\":\"weekly\",\"reset_at\":\"2026-08-24T17:33:48.278Z\",\"prepaid_cents\":250,\"rpm_remaining\":8299,\"rpm_limit\":8300}",
+        json,
+    );
+}
+
+test "core credits snapshot xai-usage omits invented percent and appends rpm" {
+    const without_percent = CreditsSnapshot{
+        .origin = .grok,
+        .plan = "SuperGrok",
+        .period = "weekly",
+    };
+    const omitted = try without_percent.renderForView(std.testing.allocator, .xai_usage);
+    defer std.testing.allocator.free(omitted);
+    try std.testing.expectEqualStrings("SuperGrok weekly", omitted);
+    try std.testing.expect(std.mem.find(u8, omitted, "0%") == null);
+
+    const with_rpm = CreditsSnapshot{
+        .origin = .grok,
+        .plan = "SuperGrok",
+        .percent = 12,
+        .period = "weekly",
+        .reset_at = "2026-08-24T17:33:48.278Z",
+        .prepaid_cents = 250,
+        .rpm_remaining = 8299,
+        .rpm_limit = 8300,
+    };
+    const usage = try with_rpm.renderForView(std.testing.allocator, .xai_usage);
+    defer std.testing.allocator.free(usage);
+    try std.testing.expectEqualStrings(
+        "SuperGrok 12% weekly · resets 2026-08-24T17:33:48.278Z · prepaid $2.50\n8299/8300 RPM",
+        usage,
+    );
 }
 
 test "core upgrade snapshot renders errors and statuses" {

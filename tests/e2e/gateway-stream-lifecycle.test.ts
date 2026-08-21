@@ -703,7 +703,7 @@ describe("gateway stream lifecycle", () => {
     })).toEqual([]);
   });
 
-  test("ask sends status text normally with the full tool surface", async () => {
+  test("no-save ask sends status text with the exec-only terminal surface", async () => {
     const root = createFixtureRoot("status-text-ask");
     const tracePath = join(root.root, "trace.log");
     const gateway = startGateway(() => fakeGatewayFinalText("STATUS_TEXT_ASK_COMPLETE"));
@@ -738,8 +738,8 @@ describe("gateway stream lifecycle", () => {
       expect(request.prompt[0]?.role).toBe("system");
       expect(request.prompt[1]?.role).toBe("system");
       expect(contentText(request.prompt[1]?.content)).toBe(WEB_SEARCH_GUIDANCE);
-      expect(toolByName(oracleRequest, "terminal")?.description).toContain(
-        "Use exec for a foreground command",
+      expect(toolByName(oracleRequest, "terminal")?.description).toBe(
+        "Run one captured command and return its result.",
       );
       expect(toolByName(oracleRequest, "skill")?.description).toContain(
         "the task clearly matches one",

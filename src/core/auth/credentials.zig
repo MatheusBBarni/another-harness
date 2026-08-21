@@ -219,7 +219,9 @@ pub fn resolve(
 /// `preferred` is the source the user last chose in the hub. It wins over the
 /// precedence order below, including over the environment, because it is an
 /// explicit choice rather than a default. A preferred source that no longer
-/// resolves falls through to precedence instead of failing.
+/// resolves falls through to precedence instead of failing, except a preferred
+/// `grok_oauth` refresh error, which is surfaced so CLI credits cannot adopt a
+/// Vercel or env key.
 pub fn resolvePreferring(
     alloc: std.mem.Allocator,
     transport: oauth_transport.Provider,
@@ -230,7 +232,7 @@ pub fn resolvePreferring(
     if (preferred) |source| {
         if (source != .stored_key or !secret_store.isDisabled()) {
             const chosen = loadPreferredSource(alloc, transport, secret_store, mode, source) catch |err| blk: {
-                if (err == error.OutOfMemory) return err;
+                if (err == error.OutOfMemory or source == .grok_oauth) return err;
                 debug_trace.logf("auth", "preferred source load failed source={t} err={s}", .{ source, @errorName(err) });
                 break :blk null;
             };
@@ -410,9 +412,7 @@ pub fn loadGrokLoginCredential(
     var session = (try grok_session.load(alloc)) orelse return null;
     defer session.deinit(alloc);
     if (session.expired(io_mod.milliTimestamp())) {
-        var refreshed = grok_oauth.refreshAccessToken(alloc, transport, session.refresh_token) catch {
-            return null;
-        };
+        var refreshed = try grok_oauth.refreshAccessToken(alloc, transport, session.refresh_token);
         defer refreshed.deinit(alloc);
         secret.zeroAndFree(alloc, session.access_token);
         session.access_token = refreshed.access_token;
@@ -826,6 +826,46 @@ test "a remembered choice that no longer resolves falls back to precedence" {
     var credential = resolution.credential orelse return error.TestExpectedCredential;
     defer credential.deinit(alloc);
     try std.testing.expectEqual(Source.ai_gateway_api_key, credential.source);
+}
+
+test "preferred grok_oauth refresh failure does not fall through to a Vercel key" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(home);
+
+    const env = try CredentialTestEnv.install(alloc, &.{
+        .{ "HOME", home },
+        .{ "AI_GATEWAY_API_KEY", "vercel-api-key" },
+        .{ "VERCEL_OIDC_TOKEN", "oidc-token" },
+    });
+    defer env.deinit();
+
+    var token = try oauth.parseTokenSet(
+        alloc,
+        "{\"access_token\":\"expired-grok-access\",\"refresh_token\":\"expired-grok-refresh\",\"expires_in\":1,\"scope\":\"openid\",\"token_type\":\"Bearer\"}",
+    );
+    defer token.deinit(alloc);
+    var session = try grok_session.takeLoginSession(alloc, &token, 0);
+    defer session.deinit(alloc);
+    try grok_session.saveNewSession(alloc, session);
+
+    try std.testing.expectError(
+        error.OAuthTransportUnavailable,
+        loadGrokLoginCredential(alloc, oauth_transport.unavailable_provider),
+    );
+
+    try std.testing.expectError(
+        error.OAuthTransportUnavailable,
+        resolvePreferring(
+            alloc,
+            oauth_transport.unavailable_provider,
+            host.unavailable_secret_store,
+            .refresh_if_needed,
+            .grok_oauth,
+        ),
+    );
 }
 
 test "no remembered choice resolves exactly as plain precedence" {

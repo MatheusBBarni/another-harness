@@ -828,19 +828,19 @@ const schema_properties = [_]gateway_schema.Property{
     .{
         .name = "risk",
         .json_type = .string,
-        .enum_values = risk_values[0..],
+        .shape = &.{ .enum_values = risk_values[0..] },
         .description = "Risk of the exact action being reviewed.",
     },
     .{
         .name = "authorization",
         .json_type = .string,
-        .enum_values = authorization_values[0..],
+        .shape = &.{ .enum_values = authorization_values[0..] },
         .description = "Strength of authorization from proven user-authored instructions.",
     },
     .{
         .name = "decision",
         .json_type = .string,
-        .enum_values = decision_values[0..],
+        .shape = &.{ .enum_values = decision_values[0..] },
         .description = "Allow this action, or ask the user.",
     },
     .{

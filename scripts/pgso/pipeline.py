@@ -33,6 +33,8 @@ USE_FLAGS = (
     "-passes=default<O2>",
 )
 
+CANDIDATE_SIGNING_PAGE_SIZE = 16 * 1024
+
 PROFILE_SECTION_ALIGNMENTS = (
     "-Wl,-sectalign,__DATA,__llvm_prf_cnts,0x4000",
     "-Wl,-sectalign,__DATA,__llvm_prf_data,0x4000",
@@ -804,6 +806,25 @@ def link_candidate(
         require_empty_stderr=True,
     )
     _require_nonempty_file(paths.candidate_binary, "stripped candidate executable")
+    run_checked(
+        (
+            str(toolchain.codesign),
+            "--force",
+            "--sign",
+            "-",
+            "--options",
+            "linker-signed",
+            "--pagesize",
+            str(CANDIDATE_SIGNING_PAGE_SIZE),
+            str(paths.candidate_binary),
+        ),
+        cwd=paths.root,
+        env=os.environ.copy(),
+        timeout_s=120,
+        log_path=paths.logs / "resign-candidate.json",
+        require_empty_stderr=False,
+    )
+    _require_nonempty_file(paths.candidate_binary, "re-signed candidate executable")
     return paths.candidate_binary
 
 
